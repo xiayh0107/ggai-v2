@@ -1,0 +1,930 @@
+import { createReadStream } from 'node:fs'
+import { lstat, realpath, stat } from 'node:fs/promises'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import type { Socket } from 'node:net'
+import path from 'node:path'
+import { isArtifactControlPath } from './artifactPaths.js'
+import {
+  CanvasCorruptionError,
+  CanvasMutationReuseError,
+  CanvasRevisionConflictError,
+  CanvasStoreManager,
+} from './canvasStore.js'
+import { isPathWithin, PermissionPolicyError, resolveProjectDir } from './permissions.js'
+import {
+  parseCanvasBranch,
+  parseCreateRunRequest,
+  parseNodeId,
+  parsePermissionDecision,
+  parsePutCanvasRequest,
+  parseRunId,
+  ProtocolError,
+  type RunStreamMessage,
+} from './protocol.js'
+import { AgentRegistry } from './registry.js'
+import { RunManager } from './runs.js'
+import { SessionsCorruptionError } from './sessions.js'
+import { WorkspacePreferencesManager } from './preferences.js'
+import {
+  WorkspaceVersionManager,
+  type WorkspaceMergeExpectation,
+} from './workspaceVersioning.js'
+
+const MAX_JSON_BODY_BYTES = 8 * 1024 * 1024
+const SSE_HEARTBEAT_MS = 15_000
+const MAX_SSE_BUFFER_BYTES = 512 * 1024
+const MAX_ARTIFACT_BYTES = 100 * 1024 * 1024
+const MAX_TEXT_ARTIFACT_BYTES = 1 * 1024 * 1024
+const DEFAULT_BROWSER_ORIGINS = new Set([
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://[::1]:3000',
+])
+
+export interface DaemonServerOptions {
+  projectRoot: string
+  allowedOrigins?: string[]
+  registry?: AgentRegistry
+  runManager?: RunManager
+  canvasStoreManager?: CanvasStoreManager
+  workspaceVersionManager?: WorkspaceVersionManager
+  preferencesManager?: WorkspacePreferencesManager
+}
+
+export interface DaemonServer {
+  server: Server
+  registry: AgentRegistry
+  runs: RunManager
+  canvases: CanvasStoreManager
+  versions: WorkspaceVersionManager
+  preferences: WorkspacePreferencesManager
+  close(): Promise<void>
+}
+
+export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
+  const registry = options.registry ?? new AgentRegistry()
+  const versions = options.workspaceVersionManager ?? new WorkspaceVersionManager({
+    projectRoot: options.projectRoot,
+    ...(options.canvasStoreManager ? { canvasStoreManager: options.canvasStoreManager } : {}),
+  })
+  const canvases = versions.canvases
+  const preferences = options.preferencesManager ?? new WorkspacePreferencesManager(options.projectRoot)
+  const runs = options.runManager ?? new RunManager({
+    projectRoot: options.projectRoot,
+    registry,
+    acquireProjectLease: (projectDir) => versions.canvases.acquireProjectLease(projectDir),
+    resolveSourceProjectDir: ({ projectDir, canvasBranch }) =>
+      versions.sourceExecutionProjectDir(projectDir, canvasBranch),
+    onRunFinished: async ({ summary, request, projectDir }) => {
+      if (summary.status !== 'done' || request.automationMode !== 'auto') return
+      const canvasBranch = request.canvasBranch ?? 'main'
+      const binding = await versions.sourceBranch(projectDir, canvasBranch)
+      if (!binding.ok || !binding.value) return
+      const nodeTitle = request.canvasSnapshot.nodes
+        .find((node) => node.id === request.nodeId)?.title ?? request.nodeId
+      // Automatic mode still cannot approve sensitive or oversized changes.
+      await versions.checkpointSource(projectDir, canvasBranch, {
+        runId: summary.runId,
+        nodeTitle,
+        allowSensitive: false,
+      })
+    },
+  })
+  const allowedOrigins = new Set(options.allowedOrigins ?? [])
+  const sockets = new Set<Socket>()
+  const lifecycle = { closing: false }
+  let closePromise: Promise<void> | null = null
+
+  const server = createServer((request, response) => {
+    void route(request, response, {
+      projectRoot: options.projectRoot,
+      registry,
+      runs,
+      canvases,
+      versions,
+      preferences,
+      allowedOrigins,
+      lifecycle,
+    })
+      .catch((error: unknown) => writeError(response, error))
+  })
+  server.on('connection', (socket) => {
+    sockets.add(socket)
+    socket.once('close', () => sockets.delete(socket))
+  })
+
+  return {
+    server,
+    registry,
+    runs,
+    canvases,
+    versions,
+    preferences,
+    close() {
+      closePromise ??= closeDaemonServer(server, sockets, runs, versions, preferences, lifecycle)
+      return closePromise
+    },
+  }
+}
+
+interface RouteContext {
+  projectRoot: string
+  registry: AgentRegistry
+  runs: RunManager
+  canvases: CanvasStoreManager
+  versions: WorkspaceVersionManager
+  preferences: WorkspacePreferencesManager
+  allowedOrigins: Set<string>
+  lifecycle: { closing: boolean }
+}
+
+async function route(
+  request: IncomingMessage,
+  response: ServerResponse,
+  context: RouteContext,
+): Promise<void> {
+  setSecurityHeaders(response)
+  assertServerOpen(context)
+  const origin = request.headers.origin
+  if (!isAllowedOrigin(origin, context.allowedOrigins)) {
+    throw new ProtocolError('request origin is not allowed', 'origin_denied', 403)
+  }
+  if (origin) {
+    response.setHeader('Access-Control-Allow-Origin', origin)
+    response.setHeader('Vary', 'Origin')
+  }
+  if (request.method === 'OPTIONS') {
+    response.writeHead(204, {
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Last-Event-ID',
+      'Access-Control-Max-Age': '600',
+    })
+    response.end()
+    return
+  }
+
+  const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+  const pathname = url.pathname
+
+  if (request.method === 'GET' && pathname === '/health') {
+    writeJson(response, 200, {
+      status: 'ok',
+      version: 1,
+      projectRoot: context.projectRoot,
+    })
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/agents') {
+    writeJson(response, 200, { agents: await context.registry.probe() })
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/canvas') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
+    writeJson(response, 200, (await context.versions.getCanvas(projectDir, branch)).canvas)
+    return
+  }
+
+  if (request.method === 'PUT' && pathname === '/canvas') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
+    const requestBody = parsePutCanvasRequest(await readJson(request))
+    assertServerOpen(context)
+    writeJson(response, 200, (await context.versions.saveCanvas(projectDir, branch, requestBody)).canvas)
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/canvas/status') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    writeJson(response, 200, await context.versions.status(projectDir))
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/canvas/branches') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    writeJson(response, 200, await context.versions.listBranches(projectDir))
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/canvas/branches') {
+    const body = requestObject(await readJson(request))
+    const projectDir = optionalBodyString(body, 'projectDir', 4_096) ?? '.'
+    const name = parseCanvasBranch(requiredBodyString(body, 'name'))
+    const fromBranch = body.fromBranch === undefined
+      ? undefined
+      : parseCanvasBranch(body.fromBranch)
+    assertServerOpen(context)
+    const result = await context.runs.withIdleBranches(
+      projectDir,
+      [fromBranch ?? 'main', name],
+      () => context.versions.createBranch(projectDir, { name, fromBranch }),
+    )
+    writeJson(response, 200, result)
+    return
+  }
+
+  if (request.method === 'DELETE' && pathname === '/canvas/branches') {
+    const body = requestObject(await readJson(request))
+    const projectDir = optionalBodyString(body, 'projectDir', 4_096) ?? '.'
+    const branch = parseCanvasBranch(requiredBodyString(body, 'branch'))
+    assertServerOpen(context)
+    const result = await context.runs.withIdleBranches(
+      projectDir,
+      [branch, 'main'],
+      () => context.versions.deleteBranch(projectDir, branch),
+    )
+    writeJson(response, 200, result)
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/canvas/history') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
+    const cursor = singleQueryParameter(url, 'cursor')
+    const limit = optionalIntegerQuery(url, 'limit', { min: 1, max: 100 })
+    writeJson(response, 200, await context.versions.history(projectDir, {
+      branch,
+      ...(cursor === undefined ? {} : { cursor }),
+      ...(limit === undefined ? {} : { limit }),
+    }))
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/canvas/checkpoints') {
+    const body = requestObject(await readJson(request))
+    const projectDir = optionalBodyString(body, 'projectDir', 4_096) ?? '.'
+    const branch = parseCanvasBranch(requiredBodyString(body, 'branch'))
+    const reason = optionalBodyString(body, 'reason') ?? 'manual'
+    assertServerOpen(context)
+    writeJson(response, 200, await context.versions.manualCheckpoint(projectDir, branch, reason))
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/canvas/restores') {
+    const body = requestObject(await readJson(request))
+    const projectDir = optionalBodyString(body, 'projectDir', 4_096) ?? '.'
+    const sourceBranch = parseCanvasBranch(requiredBodyString(body, 'sourceBranch'))
+    const newBranch = parseCanvasBranch(requiredBodyString(body, 'newBranch'))
+    const checkpoint = requiredBodyString(body, 'checkpoint')
+    assertServerOpen(context)
+    const result = await context.runs.withIdleBranches(
+      projectDir,
+      [sourceBranch, newBranch],
+      () => context.versions.restoreAsNewBranch(projectDir, {
+        sourceBranch,
+        newBranch,
+        checkpoint,
+      }),
+    )
+    writeJson(response, 200, result)
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/canvas/merges/preview') {
+    const body = requestObject(await readJson(request))
+    const projectDir = optionalBodyString(body, 'projectDir', 4_096) ?? '.'
+    const sourceBranch = parseCanvasBranch(requiredBodyString(body, 'sourceBranch'))
+    const targetBranch = parseCanvasBranch(requiredBodyString(body, 'targetBranch'))
+    assertServerOpen(context)
+    const result = await context.runs.withIdleBranches(
+      projectDir,
+      [sourceBranch, targetBranch],
+      () => context.versions.previewMerge(projectDir, {
+        sourceBranch,
+        targetBranch,
+      }),
+    )
+    writeJson(response, 200, result)
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/canvas/merges') {
+    const body = requestObject(await readJson(request))
+    const projectDir = optionalBodyString(body, 'projectDir', 4_096) ?? '.'
+    const sourceBranch = parseCanvasBranch(requiredBodyString(body, 'sourceBranch'))
+    const targetBranch = parseCanvasBranch(requiredBodyString(body, 'targetBranch'))
+    const confirmed = requiredBodyBoolean(body, 'confirmed')
+    const expected = parseWorkspaceMergeExpectation(body.expected)
+    assertServerOpen(context)
+    const result = await context.runs.withIdleBranches(
+      projectDir,
+      [sourceBranch, targetBranch],
+      () => context.versions.executeMerge(projectDir, {
+        sourceBranch,
+        targetBranch,
+        confirmed,
+        expected,
+      }),
+    )
+    writeJson(response, 200, result)
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/canvas/source') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    writeJson(response, 200, await context.versions.sourceStatus(projectDir))
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/canvas/source/bind') {
+    const body = requestObject(await readJson(request))
+    const projectDir = optionalBodyString(body, 'projectDir', 4_096) ?? '.'
+    const branch = parseCanvasBranch(optionalBodyString(body, 'branch') ?? 'main')
+    assertServerOpen(context)
+    const result = await context.runs.withIdleBranches(
+      projectDir,
+      [branch],
+      () => context.versions.bindSource(projectDir, branch),
+    )
+    writeJson(response, 200, result)
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/canvas/source/checkpoints') {
+    const body = requestObject(await readJson(request))
+    const projectDir = optionalBodyString(body, 'projectDir', 4_096) ?? '.'
+    const branch = parseCanvasBranch(requiredBodyString(body, 'branch'))
+    const runId = requiredBodyString(body, 'runId')
+    const nodeTitle = requiredBodyString(body, 'nodeTitle')
+    const allowSensitive = body.allowSensitive === undefined
+      ? undefined
+      : requiredBodyBoolean(body, 'allowSensitive')
+    assertServerOpen(context)
+    const result = await context.runs.withIdleBranches(
+      projectDir,
+      [branch],
+      () => context.versions.checkpointSource(projectDir, branch, {
+        runId,
+        nodeTitle,
+        ...(allowSensitive === undefined ? {} : { allowSensitive }),
+      }),
+    )
+    writeJson(response, 200, result)
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/canvas/preferences') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    await context.canvases.acquireProjectLease(projectDir)
+    writeJson(response, 200, await context.preferences.get(projectDir))
+    return
+  }
+
+  if (request.method === 'PUT' && pathname === '/canvas/preferences') {
+    const body = requestObject(await readJson(request))
+    const projectDir = optionalBodyString(body, 'projectDir', 4_096) ?? '.'
+    assertServerOpen(context)
+    await context.canvases.acquireProjectLease(projectDir)
+    writeJson(response, 200, await context.preferences.put(projectDir, {
+      automationMode: body.automationMode,
+    }))
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/artifacts') {
+    await streamArtifact(response, context.projectRoot, url)
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/runs') {
+    const parsed = parseCreateRunRequest(await readJson(request))
+    const projectDir = parsed.projectDir ?? '.'
+    assertServerOpen(context)
+    await context.canvases.acquireProjectLease(projectDir)
+    const preferences = parsed.automationMode === undefined
+      ? await context.preferences.get(projectDir)
+      : null
+    const body = {
+      ...parsed,
+      canvasBranch: parsed.canvasBranch ?? 'main',
+      automationMode: parsed.automationMode ?? preferences?.automationMode ?? 'confirm',
+    }
+    const run = await context.runs.create(body)
+    writeJson(response, 202, { runId: run.runId })
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/runs') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const rawNodeId = singleQueryParameter(url, 'nodeId')
+    const nodeId = rawNodeId === undefined ? undefined : parseNodeId(rawNodeId)
+    const rawBranch = singleQueryParameter(url, 'branch')
+    const canvasBranch = rawBranch === undefined ? undefined : parseCanvasBranch(rawBranch)
+    const limit = optionalIntegerQuery(url, 'limit', { min: 1, max: 2_000 })
+    const runs = await context.runs.listRunHistory(projectDir, { nodeId, canvasBranch, limit })
+    writeJson(response, 200, { runs })
+    return
+  }
+
+  const eventMatch = pathname.match(/^\/runs\/([^/]+)\/events$/)
+  if (request.method === 'GET' && eventMatch) {
+    const runId = runIdFromPath(eventMatch[1])
+    if (!context.runs.get(runId)) throw new ProtocolError('run not found', 'run_not_found', 404)
+    streamRunEvents(request, response, context.runs, runId)
+    return
+  }
+
+  const cancelMatch = pathname.match(/^\/runs\/([^/]+)\/cancel$/)
+  if (request.method === 'POST' && cancelMatch) {
+    await readOptionalJson(request)
+    const runId = runIdFromPath(cancelMatch[1])
+    const accepted = await context.runs.cancel(runId)
+    if (!accepted) throw new ProtocolError('run is missing or already finished', 'run_not_active', 409)
+    writeJson(response, 200, { runId, status: context.runs.get(runId)?.status ?? 'cancelled' })
+    return
+  }
+
+  const logMatch = pathname.match(/^\/runs\/([^/]+)\/log$/)
+  if (request.method === 'GET' && logMatch) {
+    const runId = runIdFromPath(logMatch[1])
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const afterEventId = optionalIntegerQuery(url, 'afterEventId', {
+      min: 0,
+      max: Number.MAX_SAFE_INTEGER,
+    })
+    const limit = optionalIntegerQuery(url, 'limit', { min: 1, max: 2_000 })
+    const page = await context.runs.readRunLog(runId, projectDir, { afterEventId, limit })
+    if (!page) throw new ProtocolError('run not found', 'run_not_found', 404)
+    writeJson(response, 200, page)
+    return
+  }
+  if (request.method === 'DELETE' && logMatch) {
+    const runId = runIdFromPath(logMatch[1])
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const active = context.runs.get(runId)
+    if (active && !['done', 'error', 'cancelled', 'interrupted'].includes(active.status)) {
+      throw new ProtocolError(
+        'cannot delete the log of an active run',
+        'run_log_active',
+        409,
+      )
+    }
+    const deleted = await context.runs.deleteRunLog(runId, projectDir)
+    if (!deleted) throw new ProtocolError('run not found', 'run_not_found', 404)
+    writeJson(response, 200, { runId, deleted: true })
+    return
+  }
+
+  const runMatch = pathname.match(/^\/runs\/([^/]+)$/)
+  if (request.method === 'GET' && runMatch) {
+    const runId = runIdFromPath(runMatch[1])
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const run = await context.runs.getPersisted(runId, projectDir)
+    if (!run) throw new ProtocolError('run not found', 'run_not_found', 404)
+    writeJson(response, 200, run)
+    return
+  }
+
+  const permissionMatch = pathname.match(/^\/permissions\/([^/]+)$/)
+  if (request.method === 'POST' && permissionMatch) {
+    parsePermissionDecision(await readJson(request))
+    const permissionId = decodeURIComponent(permissionMatch[1] ?? '')
+    const pending = context.runs.resolvePermission(permissionId)
+    if (!pending) throw new ProtocolError('permission request not found', 'permission_not_found', 404)
+    throw new ProtocolError(
+      'this transport resolves permissions non-interactively; interactive forwarding requires the ACP SDK transport',
+      'permission_bridge_unavailable',
+      501,
+    )
+  }
+
+  if (request.method === 'GET' && pathname === '/sessions') {
+    const nodeId = url.searchParams.get('nodeId') ?? undefined
+    const agentId = url.searchParams.get('agentId') ?? undefined
+    const rawBranch = singleQueryParameter(url, 'branch')
+    const canvasBranch = rawBranch === undefined ? undefined : parseCanvasBranch(rawBranch)
+    const projectDir = url.searchParams.get('projectDir') ?? '.'
+    const sessions = await context.runs.listSessions(projectDir, { canvasBranch, nodeId, agentId })
+    writeJson(response, 200, { sessions })
+    return
+  }
+
+  throw new ProtocolError('route not found', 'not_found', 404)
+}
+
+function runIdFromPath(value: string | undefined): string {
+  try {
+    return parseRunId(decodeURIComponent(value ?? ''))
+  } catch (error) {
+    if (error instanceof ProtocolError) throw error
+    throw new ProtocolError('runId contains invalid URL encoding')
+  }
+}
+
+function singleQueryParameter(url: URL, name: string): string | undefined {
+  const values = url.searchParams.getAll(name)
+  if (values.length > 1) throw new ProtocolError(`${name} must be provided at most once`)
+  return values[0]
+}
+
+function requestObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new ProtocolError('request body must be a JSON object')
+  }
+  return value as Record<string, unknown>
+}
+
+function optionalBodyString(
+  body: Record<string, unknown>,
+  name: string,
+  maxLength = 500,
+): string | undefined {
+  const value = body[name]
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || value.length === 0 || value.length > maxLength) {
+    throw new ProtocolError(
+      `${name} must be a non-empty string of at most ${maxLength} characters`,
+    )
+  }
+  return value
+}
+
+function requiredBodyString(body: Record<string, unknown>, name: string): string {
+  const value = optionalBodyString(body, name)
+  if (value === undefined) throw new ProtocolError(`${name} is required`)
+  return value
+}
+
+function requiredBodyBoolean(body: Record<string, unknown>, name: string): boolean {
+  const value = body[name]
+  if (typeof value !== 'boolean') throw new ProtocolError(`${name} must be a boolean`)
+  return value
+}
+
+function parseWorkspaceMergeExpectation(value: unknown): WorkspaceMergeExpectation {
+  const expected = requestObject(value)
+  const canvas = requestObject(expected.canvas)
+  const source = expected.source === null
+    ? null
+    : requestObject(expected.source)
+  return {
+    canvas: {
+      sourceCommit: requiredCommit(canvas, 'sourceCommit'),
+      targetCommit: requiredCommit(canvas, 'targetCommit'),
+      sourceRevision: requiredNonNegativeInteger(canvas, 'sourceRevision'),
+      targetRevision: requiredNonNegativeInteger(canvas, 'targetRevision'),
+    },
+    source: source
+      ? {
+          sourceCommit: requiredCommit(source, 'sourceCommit'),
+          targetCommit: requiredCommit(source, 'targetCommit'),
+        }
+      : null,
+  }
+}
+
+function requiredCommit(body: Record<string, unknown>, name: string): string {
+  const commit = requiredBodyString(body, name)
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(commit)) {
+    throw new ProtocolError(`${name} must be a full lowercase Git commit ID`)
+  }
+  return commit
+}
+
+function requiredNonNegativeInteger(body: Record<string, unknown>, name: string): number {
+  const value = body[name]
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new ProtocolError(`${name} must be a non-negative integer`)
+  }
+  return Number(value)
+}
+
+function optionalIntegerQuery(
+  url: URL,
+  name: string,
+  range: { min: number; max: number },
+): number | undefined {
+  const raw = singleQueryParameter(url, name)
+  if (raw === undefined) return undefined
+  if (!/^\d+$/u.test(raw)) {
+    throw new ProtocolError(`${name} must be an integer`)
+  }
+  const parsed = Number(raw)
+  if (!Number.isSafeInteger(parsed) || parsed < range.min || parsed > range.max) {
+    throw new ProtocolError(`${name} must be between ${range.min} and ${range.max}`)
+  }
+  return parsed
+}
+
+function assertServerOpen(context: RouteContext): void {
+  if (context.lifecycle.closing) {
+    throw new ProtocolError('daemon is shutting down', 'daemon_shutting_down', 503)
+  }
+}
+
+async function closeDaemonServer(
+  server: Server,
+  sockets: Set<Socket>,
+  runs: RunManager,
+  versions: WorkspaceVersionManager,
+  preferences: WorkspacePreferencesManager,
+  lifecycle: { closing: boolean },
+): Promise<void> {
+  lifecycle.closing = true
+  const serverClosed = new Promise<void>((resolve, reject) => {
+    if (!server.listening) {
+      resolve()
+      return
+    }
+    server.close((error) => error ? reject(error) : resolve())
+    server.closeIdleConnections()
+  })
+
+  try {
+    // Runs may perform a final branch-scoped source checkpoint. Keep
+    // versioning open until all terminal hooks have settled, then wait for
+    // ordinary in-flight HTTP routes before closing their managers.
+    await runs.close()
+    await serverClosed
+    await Promise.all([versions.close(), preferences.close()])
+  } finally {
+    // Runs have emitted their terminal close frames; do not let a stuck client
+    // connection keep process shutdown alive indefinitely.
+    for (const socket of sockets) socket.destroy()
+    await serverClosed
+  }
+}
+
+function streamRunEvents(
+  request: IncomingMessage,
+  response: ServerResponse,
+  runs: RunManager,
+  runId: string,
+): void {
+  const lastEventId = parseLastEventId(request.headers['last-event-id'])
+  const write = (message: RunStreamMessage & { id: number }) => {
+    if (response.writableEnded || response.destroyed) return
+    const frame = [
+      `id: ${message.id}`,
+      `event: ${message.event}`,
+      `data: ${JSON.stringify(message.data)}`,
+      '',
+      '',
+    ].join('\n')
+    response.write(frame)
+    if (message.event === 'close') response.end()
+    else if (response.writableLength > MAX_SSE_BUFFER_BYTES) {
+      // A stalled renderer must not make daemon memory grow without bound. It
+      // can reconnect with Last-Event-ID while the run history is retained.
+      response.destroy(new Error('SSE consumer is too slow'))
+    }
+  }
+  const subscription = runs.subscribe(runId, write, lastEventId)
+  if (!subscription) throw new ProtocolError('run not found', 'run_not_found', 404)
+  if (subscription.replayGap) {
+    subscription.unsubscribe()
+    throw new ProtocolError('requested event history is no longer available', 'event_history_gap', 409)
+  }
+
+  response.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  })
+  response.flushHeaders()
+  for (const message of subscription.history) write(message)
+  if (subscription.closed || response.writableEnded || response.destroyed) {
+    subscription.unsubscribe()
+    if (!response.writableEnded && !response.destroyed) response.end()
+    return
+  }
+
+  const heartbeat = setInterval(() => {
+    if (!response.writableEnded) response.write(`: heartbeat ${Date.now()}\n\n`)
+  }, SSE_HEARTBEAT_MS)
+  heartbeat.unref()
+  const cleanup = () => {
+    clearInterval(heartbeat)
+    subscription.unsubscribe()
+  }
+  request.once('close', cleanup)
+  response.once('close', cleanup)
+}
+
+function parseLastEventId(value: string | string[] | undefined): number {
+  if (Array.isArray(value)) {
+    throw new ProtocolError('Last-Event-ID must be a single non-negative integer')
+  }
+  if (value === undefined || value.trim() === '') return 0
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new ProtocolError('Last-Event-ID must be a non-negative integer')
+  }
+  return parsed
+}
+
+async function readJson(request: IncomingMessage): Promise<unknown> {
+  const contentType = request.headers['content-type'] ?? ''
+  if (!contentType.toLowerCase().startsWith('application/json')) {
+    throw new ProtocolError('Content-Type must be application/json', 'unsupported_media_type', 415)
+  }
+  let bytes = 0
+  const chunks: Buffer[] = []
+  for await (const value of request) {
+    const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value as Uint8Array)
+    bytes += chunk.byteLength
+    if (bytes > MAX_JSON_BODY_BYTES) {
+      throw new ProtocolError('request body is too large', 'payload_too_large', 413)
+    }
+    chunks.push(chunk)
+  }
+  if (chunks.length === 0) throw new ProtocolError('request body is required')
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+  } catch (error) {
+    throw new ProtocolError(
+      `request body is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+}
+
+async function readOptionalJson(request: IncomingMessage): Promise<unknown | undefined> {
+  if (request.headers['content-length'] === '0' || request.headers['content-length'] === undefined) {
+    return undefined
+  }
+  return readJson(request)
+}
+
+function writeJson(response: ServerResponse, status: number, body: unknown): void {
+  if (response.headersSent || response.writableEnded) return
+  const payload = `${JSON.stringify(body)}\n`
+  response.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(payload),
+    'Cache-Control': 'no-store',
+  })
+  response.end(payload)
+}
+
+async function streamArtifact(
+  response: ServerResponse,
+  projectRoot: string,
+  url: URL,
+): Promise<void> {
+  const requestedPath = url.searchParams.get('path')
+  if (!requestedPath || requestedPath.includes('\0') || path.isAbsolute(requestedPath)) {
+    throw new ProtocolError('artifact path must be a non-empty relative path')
+  }
+  if (isArtifactControlPath(requestedPath)) {
+    throw new ProtocolError(
+      'artifact control metadata is not available for preview',
+      'artifact_forbidden',
+      403,
+    )
+  }
+
+  const projectDir = await resolveProjectDir(projectRoot, url.searchParams.get('projectDir') ?? '.')
+  const artifactRoot = path.resolve(projectDir, 'artifacts')
+  const candidate = path.resolve(projectDir, requestedPath)
+  if (!isPathWithin(artifactRoot, candidate)) {
+    throw new ProtocolError('artifact path is outside the project artifacts directory', 'artifact_forbidden', 403)
+  }
+
+  let canonicalRoot: string
+  let canonicalFile: string
+  let rootInfo: Awaited<ReturnType<typeof lstat>>
+  try {
+    [rootInfo, canonicalRoot, canonicalFile] = await Promise.all([
+      lstat(artifactRoot),
+      realpath(artifactRoot),
+      realpath(candidate),
+    ])
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT') || isNodeError(error, 'ENOTDIR')) {
+      throw new ProtocolError('artifact not found', 'artifact_not_found', 404)
+    }
+    throw error
+  }
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || canonicalRoot !== artifactRoot) {
+    throw new ProtocolError(
+      'project artifacts directory must be a real directory',
+      'artifact_forbidden',
+      403,
+    )
+  }
+  if (!isPathWithin(canonicalRoot, canonicalFile)) {
+    throw new ProtocolError('artifact resolves outside the project artifacts directory', 'artifact_forbidden', 403)
+  }
+
+  const info = await stat(canonicalFile)
+  if (!info.isFile()) throw new ProtocolError('artifact is not a file', 'artifact_not_found', 404)
+  const previewLimit = isTextArtifact(canonicalFile)
+    ? MAX_TEXT_ARTIFACT_BYTES
+    : MAX_ARTIFACT_BYTES
+  if (info.size > previewLimit) {
+    throw new ProtocolError('artifact is too large to preview', 'artifact_too_large', 413)
+  }
+
+  response.writeHead(200, {
+    'Content-Type': artifactContentType(canonicalFile),
+    'Content-Length': info.size,
+    'Cache-Control': 'no-store',
+    'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+  })
+  const stream = createReadStream(canonicalFile)
+  stream.once('error', () => response.destroy())
+  stream.pipe(response)
+}
+
+function isTextArtifact(filename: string): boolean {
+  return new Set([
+    '.json', '.csv', '.md', '.txt', '.log', '.ts', '.tsx', '.js', '.jsx', '.py', '.tex',
+  ]).has(path.extname(filename).toLowerCase())
+}
+
+function artifactContentType(filename: string): string {
+  switch (path.extname(filename).toLowerCase()) {
+    case '.png': return 'image/png'
+    case '.jpg':
+    case '.jpeg': return 'image/jpeg'
+    case '.webp': return 'image/webp'
+    case '.gif': return 'image/gif'
+    case '.svg': return 'image/svg+xml'
+    case '.pdf': return 'application/pdf'
+    case '.json': return 'application/json; charset=utf-8'
+    case '.csv': return 'text/csv; charset=utf-8'
+    case '.md': return 'text/markdown; charset=utf-8'
+    case '.txt':
+    case '.log':
+    case '.ts':
+    case '.tsx':
+    case '.js':
+    case '.jsx':
+    case '.py':
+    case '.tex': return 'text/plain; charset=utf-8'
+    default: return 'application/octet-stream'
+  }
+}
+
+function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error && error.code === code
+}
+
+function writeError(response: ServerResponse, error: unknown): void {
+  if (response.headersSent || response.writableEnded) {
+    if (!response.writableEnded) response.end()
+    return
+  }
+  if (error instanceof ProtocolError) {
+    writeJson(response, error.status, { error: { code: error.code, message: error.message } })
+    return
+  }
+  if (error instanceof PermissionPolicyError) {
+    writeJson(response, 403, { error: { code: error.code.toLowerCase(), message: error.message } })
+    return
+  }
+  if (error instanceof SessionsCorruptionError) {
+    writeJson(response, 409, {
+      error: {
+        code: 'sessions_corrupt',
+        message: error.message,
+        recovery: error.recovery,
+      },
+    })
+    return
+  }
+  if (error instanceof CanvasRevisionConflictError) {
+    writeJson(response, 409, {
+      error: {
+        code: 'canvas_revision_conflict',
+        message: error.message,
+        currentRevision: error.currentRevision,
+      },
+    })
+    return
+  }
+  if (error instanceof CanvasMutationReuseError) {
+    writeJson(response, 409, {
+      error: { code: 'canvas_mutation_reused', message: error.message },
+    })
+    return
+  }
+  if (error instanceof CanvasCorruptionError) {
+    writeJson(response, 409, {
+      error: {
+        code: 'canvas_corrupt',
+        message: error.message,
+        recovery: error.recovery,
+      },
+    })
+    return
+  }
+  const message = error instanceof Error ? error.message : 'internal daemon error'
+  writeJson(response, 500, { error: { code: 'internal_error', message } })
+}
+
+function setSecurityHeaders(response: ServerResponse): void {
+  response.setHeader('X-Content-Type-Options', 'nosniff')
+  response.setHeader('Referrer-Policy', 'no-referrer')
+  // Browser development commonly uses localhost:3000 while the daemon is fixed to 127.0.0.1.
+  // CORS still gates the exact origin; CORP must therefore permit that cross-origin fetch.
+  response.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+}
+
+function isAllowedOrigin(origin: string | undefined, configured: Set<string>): boolean {
+  if (!origin) return true
+  return configured.has(origin) || DEFAULT_BROWSER_ORIGINS.has(origin)
+}
