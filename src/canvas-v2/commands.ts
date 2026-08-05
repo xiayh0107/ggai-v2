@@ -1,9 +1,13 @@
 import {
   assertCanvasDocumentV2,
+  canvasEdgeTopologyIssueV2,
   cloneCanvasDocumentV2,
   entityKeyV2,
+  isReservedCanvasIdV2,
   type CanvasCollectionV2,
   type CanvasDocumentV2,
+  type CanvasEdgeContextRoleV2,
+  type CanvasEdgeRelationV2,
   type CanvasEdgeV2,
   type CanvasEntityRef,
   type CanvasNodeV2,
@@ -50,9 +54,51 @@ export interface TrustedProjectionPlanInputV2 {
   digest: string
 }
 
+export interface UpdateNodeContentPatchV2 {
+  title?: string
+  text?: string | null
+  payload?: Record<string, unknown> | null
+}
+
+export interface UpdateEdgePatchV2 {
+  from?: CanvasEntityRef
+  to?: CanvasEntityRef
+  relation?: CanvasEdgeRelationV2
+  contextRole?: CanvasEdgeContextRoleV2
+}
+
+export interface DerivedTaskSourceV2 {
+  entity: CanvasEntityRef
+  relation: 'source' | 'modified'
+  contextRole: CanvasEdgeContextRoleV2
+}
+
 export type CanvasCommandV2 =
   | { type: 'CreateTask'; task: CanvasTaskV2 }
   | { type: 'UpdateTaskGoal'; taskId: string; goal: string }
+  | { type: 'CreateNode'; node: CanvasNodeV2 }
+  | { type: 'UpdateNodeContent'; nodeId: string; patch: UpdateNodeContentPatchV2 }
+  | { type: 'ResizeNode'; nodeId: string; w: number; h: number }
+  | { type: 'DeleteNode'; nodeId: string }
+  | {
+      type: 'DuplicateNode'
+      sourceNodeId: string
+      newNodeId: string
+      offset: CanvasPointV2
+      title?: string
+    }
+  | { type: 'CreateEdge'; edge: CanvasEdgeV2 }
+  | { type: 'CreateEdges'; edges: CanvasEdgeV2[] }
+  | { type: 'UpdateEdge'; edgeId: string; patch: UpdateEdgePatchV2 }
+  | { type: 'DeleteEdge'; edgeId: string }
+  | { type: 'DetachNodeFromTask'; nodeId: string }
+  | { type: 'AssignNodeToTask'; nodeId: string; taskId: string }
+  | { type: 'CreateTaskForOutputSlot'; task: CanvasTaskV2; nodeId: string }
+  | {
+      type: 'CreateDerivedTaskFromSelection'
+      task: CanvasTaskV2
+      sources: DerivedTaskSourceV2[]
+    }
   | {
       type: 'MoveEntities'
       entities: CanvasEntityRef[]
@@ -115,6 +161,45 @@ export function applyCanvasCommandV2(
     case 'UpdateTaskGoal':
       requireTask(next, command.taskId).goal = command.goal
       break
+    case 'CreateNode':
+      createNode(next, command.node)
+      break
+    case 'UpdateNodeContent':
+      updateNodeContent(next, command.nodeId, command.patch)
+      break
+    case 'ResizeNode':
+      resizeNode(next, command.nodeId, command.w, command.h)
+      break
+    case 'DeleteNode':
+      deleteNode(next, command.nodeId)
+      break
+    case 'DuplicateNode':
+      duplicateNode(next, command)
+      break
+    case 'CreateEdge':
+      createUserEdge(next, command.edge)
+      break
+    case 'CreateEdges':
+      createUserEdges(next, command.edges)
+      break
+    case 'UpdateEdge':
+      updateUserEdge(next, command.edgeId, command.patch)
+      break
+    case 'DeleteEdge':
+      deleteEdge(next, command.edgeId)
+      break
+    case 'DetachNodeFromTask':
+      detachNodeFromTask(next, command.nodeId)
+      break
+    case 'AssignNodeToTask':
+      assignNodeToTask(next, command.nodeId, command.taskId)
+      break
+    case 'CreateTaskForOutputSlot':
+      createTaskForOutputSlot(next, command.task, command.nodeId)
+      break
+    case 'CreateDerivedTaskFromSelection':
+      createDerivedTaskFromSelection(next, command.task, command.sources)
+      break
     case 'MoveEntities':
       moveEntities(
         next,
@@ -170,6 +255,7 @@ export function deterministicCanvasIdV2(
 }
 
 function createTask(document: CanvasDocumentV2, task: CanvasTaskV2): void {
+  requireClientOwnedId(task.id, 'task')
   ensureEntityIdAvailable(document, task.id)
   if (task.origin.kind !== 'user') {
     throw new CanvasCommandError(
@@ -180,6 +266,306 @@ function createTask(document: CanvasDocumentV2, task: CanvasTaskV2): void {
   if (task.collectionId) requireCollection(document, task.collectionId)
   document.tasks.push(structuredClone(task))
   document.everCreated = true
+}
+
+function createNode(document: CanvasDocumentV2, node: CanvasNodeV2): void {
+  requireClientOwnedId(node.id, 'node')
+  ensureEntityIdAvailable(document, node.id)
+  if (node.origin.kind !== 'user') {
+    throw new CanvasCommandError(
+      'invalid-node-origin',
+      'CreateNode creates user nodes; trusted outputs use MaterializeProjectionPlan',
+    )
+  }
+  if (!Array.isArray(node.artifactRefs) || node.artifactRefs.length !== 0) {
+    throw new CanvasCommandError(
+      'forged-artifact-reference',
+      'CreateNode cannot attach daemon-owned artifact references',
+    )
+  }
+  if (node.homeTaskId) requireTask(document, node.homeTaskId)
+  if (node.collectionId) requireCollection(document, node.collectionId)
+  document.nodes.push(structuredClone(node))
+  document.everCreated = true
+}
+
+function updateNodeContent(
+  document: CanvasDocumentV2,
+  nodeId: string,
+  patch: UpdateNodeContentPatchV2,
+): void {
+  if (!isPlainRecord(patch)) {
+    throw new CanvasCommandError('invalid-node-content-patch', 'Node content patch must be an object')
+  }
+  const keys = Object.keys(patch)
+  if (keys.length === 0
+    || keys.some((key) => !['title', 'text', 'payload'].includes(key))) {
+    throw new CanvasCommandError(
+      'invalid-node-content-patch',
+      'UpdateNodeContent requires an allow-listed content field',
+    )
+  }
+  const node = requireNode(document, nodeId)
+  if (hasOwn(patch, 'title')) {
+    if (typeof patch.title !== 'string' || patch.title.length === 0 || patch.title.length > 1_000) {
+      throw new CanvasCommandError('invalid-node-title', 'Node title is invalid')
+    }
+    node.title = patch.title
+  }
+  if (hasOwn(patch, 'text')) {
+    if (patch.text === null) delete node.text
+    else {
+      if (typeof patch.text !== 'string' || patch.text.length > 1_000_000) {
+        throw new CanvasCommandError('invalid-node-text', 'Node text is invalid')
+      }
+      node.text = patch.text
+    }
+  }
+  if (hasOwn(patch, 'payload')) {
+    if (patch.payload === null) delete node.payload
+    else {
+      if (!isPlainRecord(patch.payload)) {
+        throw new CanvasCommandError('invalid-node-payload', 'Node payload must be a JSON object')
+      }
+      node.payload = structuredClone(patch.payload)
+    }
+  }
+}
+
+function resizeNode(
+  document: CanvasDocumentV2,
+  nodeId: string,
+  w: number,
+  h: number,
+): void {
+  if (!Number.isFinite(w) || w <= 0 || !Number.isFinite(h) || h <= 0) {
+    throw new CanvasCommandError('invalid-node-size', 'Node dimensions must be positive and finite')
+  }
+  const node = requireNode(document, nodeId)
+  node.frame.w = w
+  node.frame.h = h
+}
+
+function deleteNode(document: CanvasDocumentV2, nodeId: string): void {
+  requireNode(document, nodeId)
+  document.nodes = document.nodes.filter((node) => node.id !== nodeId)
+  document.edges = document.edges.filter((edge) =>
+    !(edge.from.kind === 'node' && edge.from.id === nodeId)
+    && !(edge.to.kind === 'node' && edge.to.id === nodeId))
+}
+
+function duplicateNode(
+  document: CanvasDocumentV2,
+  command: Extract<CanvasCommandV2, { type: 'DuplicateNode' }>,
+): void {
+  const source = requireNode(document, command.sourceNodeId)
+  requireClientOwnedId(command.newNodeId, 'node')
+  ensureEntityIdAvailable(document, command.newNodeId)
+  if (!Number.isFinite(command.offset.x) || !Number.isFinite(command.offset.y)) {
+    throw new CanvasCommandError('invalid-offset', 'Duplicate offset must be finite')
+  }
+
+  const duplicate: CanvasNodeV2 = {
+    id: command.newNodeId,
+    type: source.type,
+    frame: {
+      ...source.frame,
+      x: source.frame.x + command.offset.x,
+      y: source.frame.y + command.offset.y,
+      z: maxNodeZ(document) + 1,
+    },
+    title: command.title ?? `${source.title} copy`,
+    ...(source.text === undefined ? {} : { text: source.text }),
+    ...(source.payload === undefined ? {} : { payload: structuredClone(source.payload) }),
+    artifactRefs: structuredClone(source.artifactRefs),
+    ...(source.homeTaskId ? { homeTaskId: source.homeTaskId } : {}),
+    ...(source.collectionId ? { collectionId: source.collectionId } : {}),
+    origin: { kind: 'copied', sourceNodeId: source.id },
+  }
+  document.nodes.push(duplicate)
+  document.everCreated = true
+}
+
+function createUserEdge(document: CanvasDocumentV2, edge: CanvasEdgeV2): void {
+  if (!hasExactKeys(edge, ['id', 'from', 'to', 'relation', 'contextRole', 'origin'])) {
+    throw new CanvasCommandError('invalid-edge', 'CreateEdge has an invalid shape')
+  }
+  requireClientOwnedId(edge.id, 'edge')
+  if (!isExactUserOrigin(edge.origin)) {
+    throw new CanvasCommandError(
+      'invalid-edge-origin',
+      'CreateEdge creates user edges; Agent edges come only from trusted plans',
+    )
+  }
+  ensureEdgeIdAvailable(document, edge.id)
+  requireEntity(document, edge.from)
+  requireEntity(document, edge.to)
+  requireValidEdgeSemantics(edge)
+  document.edges.push(structuredClone(edge))
+}
+
+function createUserEdges(document: CanvasDocumentV2, edges: CanvasEdgeV2[]): void {
+  if (!Array.isArray(edges) || edges.length === 0 || edges.length > 500) {
+    throw new CanvasCommandError('invalid-edges', 'CreateEdges requires 1 to 500 edges')
+  }
+  for (const edge of edges) createUserEdge(document, edge)
+}
+
+function updateUserEdge(
+  document: CanvasDocumentV2,
+  edgeId: string,
+  patch: UpdateEdgePatchV2,
+): void {
+  if (!isPlainRecord(patch)) {
+    throw new CanvasCommandError('invalid-edge-patch', 'Edge patch must be an object')
+  }
+  const keys = Object.keys(patch)
+  if (keys.length === 0
+    || keys.some((key) => !['from', 'to', 'relation', 'contextRole'].includes(key))) {
+    throw new CanvasCommandError(
+      'invalid-edge-patch',
+      'UpdateEdge requires an allow-listed semantic field',
+    )
+  }
+  const edge = requireEdge(document, edgeId)
+  if (edge.origin.kind !== 'user') {
+    throw new CanvasCommandError(
+      'trusted-edge-immutable',
+      'Agent-authored edges cannot be patched by a browser command',
+    )
+  }
+  if (hasOwn(patch, 'from')) {
+    if (!isEntityRef(patch.from)) throw new CanvasCommandError('invalid-edge-endpoint', 'from is invalid')
+    edge.from = structuredClone(patch.from)
+  }
+  if (hasOwn(patch, 'to')) {
+    if (!isEntityRef(patch.to)) throw new CanvasCommandError('invalid-edge-endpoint', 'to is invalid')
+    edge.to = structuredClone(patch.to)
+  }
+  if (hasOwn(patch, 'relation')) {
+    requireEdgeRelation(patch.relation)
+    edge.relation = patch.relation as CanvasEdgeRelationV2
+  }
+  if (hasOwn(patch, 'contextRole')) {
+    requireContextRole(patch.contextRole)
+    edge.contextRole = patch.contextRole as CanvasEdgeContextRoleV2
+  }
+  requireEntity(document, edge.from)
+  requireEntity(document, edge.to)
+  requireValidEdgeSemantics(edge)
+}
+
+function deleteEdge(document: CanvasDocumentV2, edgeId: string): void {
+  requireEdge(document, edgeId)
+  document.edges = document.edges.filter((edge) => edge.id !== edgeId)
+}
+
+function detachNodeFromTask(document: CanvasDocumentV2, nodeId: string): void {
+  const node = requireNode(document, nodeId)
+  delete node.homeTaskId
+}
+
+function assignNodeToTask(document: CanvasDocumentV2, nodeId: string, taskId: string): void {
+  const node = requireNode(document, nodeId)
+  requireTask(document, taskId)
+  if (node.origin.kind === 'agent-output' && node.origin.taskId !== taskId) {
+    throw new CanvasCommandError(
+      'output-task-mismatch',
+      'An Agent output can only return to its provenance task',
+    )
+  }
+  delete node.collectionId
+  node.homeTaskId = taskId
+}
+
+function createTaskForOutputSlot(
+  document: CanvasDocumentV2,
+  task: CanvasTaskV2,
+  nodeId: string,
+): void {
+  const node = requireNode(document, nodeId)
+  if (!isEmptyUserOutputSlot(node)) {
+    throw new CanvasCommandError(
+      'node-not-empty-output-slot',
+      'Only an empty user-origin node without artifacts can become an output slot',
+    )
+  }
+  if (node.homeTaskId) {
+    throw new CanvasCommandError('node-already-assigned', 'Output slot already belongs to a task')
+  }
+  if (node.collectionId !== task.collectionId) {
+    throw new CanvasCommandError(
+      'collection-mismatch',
+      'An output slot and its new task must share collection membership',
+    )
+  }
+  createTask(document, task)
+  delete node.collectionId
+  node.homeTaskId = task.id
+}
+
+function createDerivedTaskFromSelection(
+  document: CanvasDocumentV2,
+  task: CanvasTaskV2,
+  sources: DerivedTaskSourceV2[],
+): void {
+  if (!Array.isArray(sources) || sources.length === 0 || sources.length > 500) {
+    throw new CanvasCommandError(
+      'invalid-derived-sources',
+      'A derived task requires 1 to 500 selected sources',
+    )
+  }
+  if (!sources.every((source) => hasExactKeys(source, [
+    'entity',
+    'relation',
+    'contextRole',
+  ]) && isEntityRef(source.entity))) {
+    throw new CanvasCommandError(
+      'invalid-derived-sources',
+      'Every derived task source must be a typed entity relation',
+    )
+  }
+  const sourceKeys = sources.map((source) => entityKeyV2(source.entity))
+  if (new Set(sourceKeys).size !== sourceKeys.length) {
+    throw new CanvasCommandError('duplicate-entities', 'Derived task sources must be unique')
+  }
+  for (const source of sources) {
+    requireEntity(document, source.entity)
+    if (source.relation !== 'source' && source.relation !== 'modified') {
+      throw new CanvasCommandError(
+        'invalid-derived-relation',
+        'Derived task edges allow only source or modified',
+      )
+    }
+    if (source.relation === 'modified' && source.entity.kind !== 'node') {
+      throw new CanvasCommandError(
+        'invalid-derived-relation',
+        'Only a node can be a modified input',
+      )
+    }
+    requireContextRole(source.contextRole)
+  }
+
+  createTask(document, task)
+  const target = { kind: 'task' as const, id: task.id }
+  for (const source of sources) {
+    const edge: CanvasEdgeV2 = {
+      id: deterministicCanvasIdV2(
+        'edge',
+        'derived-task-source',
+        task.id,
+        entityKeyV2(source.entity),
+      ),
+      from: structuredClone(source.entity),
+      to: target,
+      relation: source.relation,
+      contextRole: source.contextRole,
+      origin: { kind: 'user' },
+    }
+    ensureEdgeIdAvailable(document, edge.id)
+    requireValidEdgeSemantics(edge)
+    document.edges.push(edge)
+  }
 }
 
 function moveEntities(
@@ -241,6 +627,7 @@ function createCollection(
   collection: CanvasCollectionV2,
   refs: CanvasEntityRef[],
 ): void {
+  requireClientOwnedId(collection.id, 'collection')
   ensureEntityIdAvailable(document, collection.id)
   const members = requireUniqueRefs(refs)
   if (members.length === 0) {
@@ -326,6 +713,7 @@ function duplicateTaskAsDraft(
   command: Extract<CanvasCommandV2, { type: 'DuplicateTaskAsDraft' }>,
 ): void {
   const source = requireTask(document, command.sourceTaskId)
+  requireClientOwnedId(command.newTaskId, 'task')
   ensureEntityIdAvailable(document, command.newTaskId)
   if (!Number.isFinite(command.offset.x) || !Number.isFinite(command.offset.y)) {
     throw new CanvasCommandError('invalid-offset', 'Duplicate offset must be finite')
@@ -351,6 +739,7 @@ function duplicateTaskAsDraft(
       ...structuredClone(edge),
       id: edgeId,
       to: { kind: 'task', id: duplicate.id },
+      origin: { kind: 'user' },
     })
   }
 
@@ -377,28 +766,56 @@ function materializeProjectionPlan(
     .slice(0, 12)
     .map(({ output }) => output)
 
-  const nodeIdByOutput = new Map(materializedOutputs.map((output) => [
-    output.key,
-    deterministicCanvasIdV2('node', plan.planId, output.key),
-  ]))
-  for (const nodeId of nodeIdByOutput.values()) ensureEntityIdAvailable(document, nodeId)
+  const adoptedOutputKeys = new Set<string>()
+  const adoptedNodeIds = new Set<string>()
+  const nodeIdByOutput = new Map<string, string>()
+  for (const output of materializedOutputs) {
+    const candidates = document.nodes.filter((node) =>
+      !adoptedNodeIds.has(node.id)
+      && node.homeTaskId === task.id
+      && node.type === output.pluginId
+      && isEmptyUserOutputSlot(node))
+    if (candidates.length === 1) {
+      const candidate = candidates[0]!
+      adoptedOutputKeys.add(output.key)
+      adoptedNodeIds.add(candidate.id)
+      nodeIdByOutput.set(output.key, candidate.id)
+      continue
+    }
+    const nodeId = deterministicCanvasIdV2('node', plan.planId, output.key)
+    ensureEntityIdAvailable(document, nodeId)
+    nodeIdByOutput.set(output.key, nodeId)
+  }
 
   const maxZ = maxNodeZ(document)
-  const newNodes: CanvasNodeV2[] = materializedOutputs.map((output, index) => ({
-    id: requireMappedId(nodeIdByOutput, output.key),
-    type: output.pluginId,
-    frame: projectionFrame(task.anchor, index, maxZ),
-    title: output.title,
-    artifactRefs: structuredClone(output.artifactRefs),
-    homeTaskId: task.id,
-    origin: {
-      kind: 'agent-output',
+  const newNodes: CanvasNodeV2[] = []
+  for (const [index, output] of materializedOutputs.entries()) {
+    const origin = {
+      kind: 'agent-output' as const,
       taskId: task.id,
       runId: plan.runId,
       planId: plan.planId,
       outputKey: output.key,
-    },
-  }))
+    }
+    if (adoptedOutputKeys.has(output.key)) {
+      const node = requireNode(document, requireMappedId(nodeIdByOutput, output.key))
+      node.title = output.title
+      delete node.text
+      delete node.payload
+      node.artifactRefs = structuredClone(output.artifactRefs)
+      node.origin = origin
+      continue
+    }
+    newNodes.push({
+      id: requireMappedId(nodeIdByOutput, output.key),
+      type: output.pluginId,
+      frame: projectionFrame(task.anchor, index, maxZ),
+      title: output.title,
+      artifactRefs: structuredClone(output.artifactRefs),
+      homeTaskId: task.id,
+      origin,
+    })
+  }
 
   const newEdges: CanvasEdgeV2[] = []
   for (const output of materializedOutputs) {
@@ -687,6 +1104,20 @@ function requireNode(document: CanvasDocumentV2, nodeId: string): CanvasNodeV2 {
   return node
 }
 
+function requireEntity(document: CanvasDocumentV2, ref: CanvasEntityRef): void {
+  if (!isEntityRef(ref)) {
+    throw new CanvasCommandError('invalid-edge-endpoint', 'Edge endpoint is invalid')
+  }
+  if (ref.kind === 'node') requireNode(document, ref.id)
+  else requireTask(document, ref.id)
+}
+
+function requireEdge(document: CanvasDocumentV2, edgeId: string): CanvasEdgeV2 {
+  const edge = document.edges.find((entry) => entry.id === edgeId)
+  if (!edge) throw new CanvasCommandError('edge-not-found', `Edge ${edgeId} does not exist`)
+  return edge
+}
+
 function requireTask(document: CanvasDocumentV2, taskId: string): CanvasTaskV2 {
   const task = document.tasks.find((entry) => entry.id === taskId)
   if (!task) throw new CanvasCommandError('task-not-found', `Task ${taskId} does not exist`)
@@ -719,6 +1150,80 @@ function ensureEdgeIdAvailable(document: CanvasDocumentV2, id: string): void {
   if (document.edges.some((edge) => edge.id === id)) {
     throw new CanvasCommandError('edge-id-conflict', `Edge id ${id} is already in use`)
   }
+}
+
+function requireClientOwnedId(id: string, kind: string): void {
+  if (isReservedCanvasIdV2(id)) {
+    throw new CanvasCommandError(
+      'reserved-id',
+      `Browser commands cannot assign trusted ${kind} id ${id}`,
+    )
+  }
+}
+
+function requireValidEdgeSemantics(edge: CanvasEdgeV2): void {
+  if (!isEntityRef(edge.from) || !isEntityRef(edge.to)) {
+    throw new CanvasCommandError('invalid-edge-endpoint', 'Edge endpoints must be typed entities')
+  }
+  requireEdgeRelation(edge.relation)
+  requireContextRole(edge.contextRole)
+  const issue = canvasEdgeTopologyIssueV2(edge)
+  if (issue) throw new CanvasCommandError('invalid-edge-topology', issue)
+}
+
+function requireEdgeRelation(value: unknown): asserts value is CanvasEdgeRelationV2 {
+  if (value !== 'source'
+    && value !== 'produced'
+    && value !== 'derived'
+    && value !== 'modified'
+    && value !== 'references'
+    && value !== 'compares'
+    && value !== 'replaces'
+    && value !== 'depends-on') {
+    throw new CanvasCommandError('invalid-edge-relation', 'Edge relation is invalid')
+  }
+}
+
+function requireContextRole(value: unknown): asserts value is CanvasEdgeContextRoleV2 {
+  if (value !== 'full' && value !== 'summary' && value !== 'none') {
+    throw new CanvasCommandError('invalid-context-role', 'Edge contextRole is invalid')
+  }
+}
+
+function isEntityRef(value: unknown): value is CanvasEntityRef {
+  return isPlainRecord(value)
+    && hasExactKeys(value, ['kind', 'id'])
+    && (value.kind === 'node' || value.kind === 'task')
+    && typeof value.id === 'string'
+}
+
+function isExactUserOrigin(value: unknown): boolean {
+  return isPlainRecord(value)
+    && hasExactKeys(value, ['kind'])
+    && value.kind === 'user'
+}
+
+function isEmptyUserOutputSlot(node: CanvasNodeV2): boolean {
+  return node.origin.kind === 'user'
+    && node.artifactRefs.length === 0
+    && (node.text === undefined || node.text.trim().length === 0)
+    && (node.payload === undefined || Object.keys(node.payload).length === 0)
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function hasExactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  return isPlainRecord(value)
+    && Object.keys(value).length === keys.length
+    && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+}
+
+function hasOwn(value: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key)
 }
 
 function requireMappedId(map: Map<string, string>, key: string): string {

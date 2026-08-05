@@ -104,4 +104,66 @@ describe('Canvas V2 model', () => {
       }),
     ]))
   })
+
+  it('enforces artifact uniqueness and typed edge endpoint topology', () => {
+    const input = emptyCanvasDocumentV2()
+    input.tasks.push(task('task-1'))
+    input.nodes.push({
+      ...node('node-1'),
+      artifactRefs: [
+        { runId: 'run-1', artifactId: `artifact_${'a'.repeat(64)}` },
+        { runId: 'run-1', artifactId: `artifact_${'a'.repeat(64)}` },
+      ],
+    })
+    input.edges.push({
+      id: 'invalid-produced',
+      from: { kind: 'node', id: 'node-1' },
+      to: { kind: 'task', id: 'task-1' },
+      relation: 'produced',
+      contextRole: 'full',
+      origin: { kind: 'user' },
+    })
+
+    expect(collectCanvasV2ValidationIssues(input)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        path: 'nodes[0].artifactRefs',
+        message: 'contains duplicate artifact references',
+      }),
+      expect.objectContaining({
+        path: 'edges[0]',
+        message: 'produced edges must connect a task to a node',
+      }),
+    ]))
+  })
+
+  it('permits a receipt-backed Agent output to detach while retaining provenance', () => {
+    const input = emptyCanvasDocumentV2()
+    input.tasks.push(task('task-1'))
+    input.nodes.push({
+      ...node('node-output'),
+      homeTaskId: undefined,
+      type: 'image',
+      artifactRefs: [{
+        runId: 'run-1',
+        artifactId: `artifact_${'a'.repeat(64)}`,
+      }],
+      origin: {
+        kind: 'agent-output',
+        taskId: 'task-1',
+        runId: 'run-1',
+        planId: `plan_${'b'.repeat(64)}`,
+        outputKey: 'preview',
+      },
+    })
+    input.receipts.push({
+      kind: 'materialization',
+      planId: `plan_${'b'.repeat(64)}`,
+      runId: 'run-1',
+      taskId: 'task-1',
+      outcomes: [{ outputKey: 'preview', nodeId: 'node-output' }],
+      dismissedProposalKeys: [],
+    })
+
+    expect(collectCanvasV2ValidationIssues(input)).toEqual([])
+  })
 })

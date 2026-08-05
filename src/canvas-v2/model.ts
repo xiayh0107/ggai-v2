@@ -159,6 +159,7 @@ const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]*$/u
 const TYPE_PATTERN = /^@?[A-Za-z0-9][A-Za-z0-9._:@/-]*$/u
 const PLAN_ID_PATTERN = /^plan_[0-9a-f]{64}$/u
 const ARTIFACT_ID_PATTERN = /^artifact_[0-9a-f]{64}$/u
+const RESERVED_CANVAS_ID_PATTERN = /^cv2_(?:node|task|collection|edge)_[0-9a-f]{32}$/u
 const EDGE_RELATIONS = new Set<CanvasEdgeRelationV2>([
   'source',
   'produced',
@@ -194,6 +195,40 @@ export function parseEntityKeyV2(value: string): CanvasEntityRef | null {
   if (value.startsWith('task:')) {
     const id = value.slice('task:'.length)
     return validId(id) ? { kind: 'task', id } : null
+  }
+  return null
+}
+
+/** IDs in this namespace are assigned only by trusted reducer operations. */
+export function isReservedCanvasIdV2(value: unknown): value is string {
+  return typeof value === 'string' && RESERVED_CANVAS_ID_PATTERN.test(value)
+}
+
+/** Returns a human-readable reason when a typed edge has impossible endpoints. */
+export function canvasEdgeTopologyIssueV2(
+  edge: Pick<CanvasEdgeV2, 'from' | 'to' | 'relation'>,
+): string | null {
+  const { from, to, relation } = edge
+  if (entityKeyV2(from) === entityKeyV2(to)) return 'must not be a self edge'
+  if (relation === 'modified') {
+    return from.kind === 'node' && to.kind === 'task'
+      ? null
+      : 'modified edges must connect a node to a task'
+  }
+  if (relation === 'produced') {
+    return from.kind === 'task' && to.kind === 'node'
+      ? null
+      : 'produced edges must connect a task to a node'
+  }
+  if (relation === 'derived') {
+    return from.kind === 'node' && to.kind === 'node'
+      ? null
+      : 'derived edges must connect two nodes'
+  }
+  if (relation === 'depends-on') {
+    return from.kind === 'task' && to.kind === 'task'
+      ? null
+      : 'depends-on edges must connect two tasks'
   }
   return null
 }
@@ -280,7 +315,7 @@ function validateNode(value: unknown, path: string, issues: CanvasV2ValidationIs
   validateString(value.title, `${path}.title`, 1_000, false, issues)
   if (value.text !== undefined) validateString(value.text, `${path}.text`, 1_000_000, true, issues)
   if (value.payload !== undefined) {
-    if (!isRecord(value.payload)) issue(issues, `${path}.payload`, 'must be an object')
+    if (!isJsonObject(value.payload)) issue(issues, `${path}.payload`, 'must be a JSON object')
     else validateJsonValue(value.payload, `${path}.payload`, 0, new WeakSet(), issues)
   }
   if (!Array.isArray(value.artifactRefs) || value.artifactRefs.length > 500) {
@@ -589,9 +624,6 @@ function validateInvariants(
       if (node.homeTaskId && node.homeTaskId !== outputOrigin.taskId) {
         issue(issues, `nodes[${index}].homeTaskId`, 'must match agent output taskId')
       }
-      if (taskIds.has(outputOrigin.taskId) && node.homeTaskId !== outputOrigin.taskId) {
-        issue(issues, `nodes[${index}].homeTaskId`, 'must belong to its existing output task')
-      }
       if (materializationByOutput.get(provenanceKey) !== node.id) {
         issue(issues, `nodes[${index}].origin`, 'does not match a materialization receipt')
       }
@@ -610,7 +642,8 @@ function validateInvariants(
     const toKey = entityKeyV2(edge.to)
     if (!entityExists(nodeIds, taskIds, edge.from)) issue(issues, `edges[${index}].from`, 'is missing')
     if (!entityExists(nodeIds, taskIds, edge.to)) issue(issues, `edges[${index}].to`, 'is missing')
-    if (fromKey === toKey) issue(issues, `edges[${index}]`, 'must not be a self edge')
+    const topologyIssue = canvasEdgeTopologyIssueV2(edge)
+    if (topologyIssue) issue(issues, `edges[${index}]`, topologyIssue)
     const semanticKey = JSON.stringify([fromKey, toKey, edge.relation, edge.contextRole])
     if (edgeSemantics.has(semanticKey)) issue(issues, `edges[${index}]`, 'duplicates a semantic edge')
     edgeSemantics.add(semanticKey)
@@ -789,6 +822,11 @@ function validateJsonValue(
     value.forEach((entry, index) =>
       validateJsonValue(entry, `${path}[${index}]`, depth + 1, ancestors, issues))
   } else {
+    if (!isJsonObject(value)) {
+      issue(issues, path, 'is not a plain JSON object')
+      ancestors.delete(value)
+      return
+    }
     for (const [key, entry] of Object.entries(value)) {
       validateJsonValue(entry, `${path}.${key}`, depth + 1, ancestors, issues)
     }
@@ -802,6 +840,12 @@ function issue(issues: CanvasV2ValidationIssue[], path: string, message: string)
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value) || Reflect.ownKeys(value).some((key) => typeof key !== 'string')) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
 }
 
 function isExactRecord(

@@ -78,6 +78,10 @@ export interface CanvasV2DaemonClientOptions {
   fetch?: typeof globalThis.fetch
 }
 
+export interface CanvasV2DaemonCapabilities {
+  canvasModelV2: boolean
+}
+
 export class CanvasV2ClientError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options)
@@ -133,6 +137,19 @@ export class CanvasV2DaemonClient {
     const fetchImplementation = options.fetch ?? globalThis.fetch
     if (!fetchImplementation) throw new CanvasV2ClientError('Fetch is unavailable')
     this.#fetch = fetchImplementation
+  }
+
+  async getCapabilities(): Promise<CanvasV2DaemonCapabilities> {
+    const response = await this.#fetch(new URL('/health', `${this.#baseUrl}/`), {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    })
+    if (!response.ok) throw await decodeHttpError(response, 'GET /health')
+    const value = await readJson(response, 'GET /health response')
+    if (!isRecord(value) || !isRecord(value.capabilities)) {
+      throw new CanvasV2ProtocolError('Daemon capabilities are invalid')
+    }
+    return { canvasModelV2: value.capabilities.canvasModelV2 === true }
   }
 
   async getCanvas(scope: CanvasV2CanvasScope): Promise<CanvasV2Envelope> {
@@ -265,6 +282,19 @@ export function serializeCanvasCommandV2(command: CanvasCommandV2): CanvasComman
       return { type: command.type, planId: command.plan.planId }
     case 'CreateTask':
     case 'UpdateTaskGoal':
+    case 'CreateNode':
+    case 'UpdateNodeContent':
+    case 'ResizeNode':
+    case 'DeleteNode':
+    case 'DuplicateNode':
+    case 'CreateEdge':
+    case 'CreateEdges':
+    case 'UpdateEdge':
+    case 'DeleteEdge':
+    case 'DetachNodeFromTask':
+    case 'AssignNodeToTask':
+    case 'CreateTaskForOutputSlot':
+    case 'CreateDerivedTaskFromSelection':
     case 'MoveEntities':
     case 'CreateCollectionFromSelection':
     case 'AssignToCollection':

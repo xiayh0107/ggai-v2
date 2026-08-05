@@ -3,6 +3,7 @@ import {
   applyCanvasCommandV2,
   CanvasCommandError,
   deterministicCanvasIdV2,
+  type CanvasCommandV2,
   type TrustedProjectionPlanInputV2,
 } from './commands'
 import {
@@ -339,6 +340,297 @@ describe('Canvas V2 commands', () => {
       type: 'DismissPlan',
       plan: trustedPlan,
     })).toBe(dismissed)
+  })
+
+  it('creates, edits, resizes, duplicates, and deletes user nodes without forging artifacts', () => {
+    let current = applyCanvasCommandV2(emptyCanvasDocumentV2(), {
+      type: 'CreateNode',
+      node: node('node-1', 20, 40),
+    })
+    current = applyCanvasCommandV2(current, {
+      type: 'UpdateNodeContent',
+      nodeId: 'node-1',
+      patch: {
+        title: 'Edited node',
+        text: 'User-authored content',
+        payload: { style: 'concise', count: 2 },
+      },
+    })
+    current = applyCanvasCommandV2(current, {
+      type: 'ResizeNode',
+      nodeId: 'node-1',
+      w: 420,
+      h: 260,
+    })
+    current = applyCanvasCommandV2(current, {
+      type: 'DuplicateNode',
+      sourceNodeId: 'node-1',
+      newNodeId: 'node-copy',
+      offset: { x: 48, y: 64 },
+    })
+
+    expect(current.nodes[0]).toMatchObject({
+      title: 'Edited node',
+      text: 'User-authored content',
+      payload: { style: 'concise', count: 2 },
+      frame: { w: 420, h: 260 },
+      origin: { kind: 'user' },
+    })
+    expect(current.nodes[1]).toMatchObject({
+      id: 'node-copy',
+      artifactRefs: [],
+      origin: { kind: 'copied', sourceNodeId: 'node-1' },
+      frame: { x: 68, y: 104, w: 420, h: 260 },
+    })
+
+    const forged = {
+      type: 'CreateNode',
+      node: {
+        ...node('forged', 0, 0),
+        artifactRefs: [{
+          runId: 'run-1',
+          artifactId: `artifact_${'a'.repeat(64)}`,
+        }],
+      },
+    } satisfies CanvasCommandV2
+    expect(() => applyCanvasCommandV2(current, forged)).toThrowError(CanvasCommandError)
+    const freePatch = {
+      type: 'UpdateNodeContent',
+      nodeId: 'node-1',
+      patch: { artifactRefs: [] },
+    } as unknown as CanvasCommandV2
+    expect(() => applyCanvasCommandV2(current, freePatch)).toThrowError(CanvasCommandError)
+
+    current = applyCanvasCommandV2(current, {
+      type: 'CreateEdge',
+      edge: {
+        id: 'edge-copy',
+        from: { kind: 'node', id: 'node-1' },
+        to: { kind: 'node', id: 'node-copy' },
+        relation: 'derived',
+        contextRole: 'summary',
+        origin: { kind: 'user' },
+      },
+    })
+    const deleted = applyCanvasCommandV2(current, { type: 'DeleteNode', nodeId: 'node-1' })
+    expect(deleted.nodes.map(({ id }) => id)).toEqual(['node-copy'])
+    expect(deleted.edges).toEqual([])
+  })
+
+  it('creates and edits typed edges with atomic fanout', () => {
+    const initial = emptyCanvasDocumentV2()
+    initial.tasks.push(task('task-a'), task('task-b'))
+    initial.nodes.push(node('node-a', 0, 0), node('node-b', 20, 20))
+    const created = applyCanvasCommandV2(initial, {
+      type: 'CreateEdges',
+      edges: [
+        {
+          id: 'edge-source',
+          from: { kind: 'node', id: 'node-a' },
+          to: { kind: 'task', id: 'task-a' },
+          relation: 'source',
+          contextRole: 'full',
+          origin: { kind: 'user' },
+        },
+        {
+          id: 'edge-dependency',
+          from: { kind: 'task', id: 'task-a' },
+          to: { kind: 'task', id: 'task-b' },
+          relation: 'depends-on',
+          contextRole: 'summary',
+          origin: { kind: 'user' },
+        },
+      ],
+    })
+    const updated = applyCanvasCommandV2(created, {
+      type: 'UpdateEdge',
+      edgeId: 'edge-source',
+      patch: { relation: 'modified', contextRole: 'summary' },
+    })
+    expect(updated.edges[0]).toMatchObject({ relation: 'modified', contextRole: 'summary' })
+
+    const snapshot = structuredClone(updated)
+    expect(() => applyCanvasCommandV2(updated, {
+      type: 'CreateEdges',
+      edges: [
+        {
+          id: 'edge-valid-first',
+          from: { kind: 'node', id: 'node-b' },
+          to: { kind: 'task', id: 'task-a' },
+          relation: 'source',
+          contextRole: 'full',
+          origin: { kind: 'user' },
+        },
+        {
+          id: 'edge-invalid-second',
+          from: { kind: 'node', id: 'node-a' },
+          to: { kind: 'task', id: 'task-a' },
+          relation: 'produced',
+          contextRole: 'full',
+          origin: { kind: 'user' },
+        },
+      ],
+    })).toThrowError(CanvasCommandError)
+    expect(updated).toEqual(snapshot)
+
+    const deleted = applyCanvasCommandV2(updated, {
+      type: 'DeleteEdge',
+      edgeId: 'edge-dependency',
+    })
+    expect(deleted.edges.map(({ id }) => id)).toEqual(['edge-source'])
+  })
+
+  it('adopts one empty output slot, supports detach/assign, and never resurrects a deleted view', () => {
+    const emptyImage = { ...node('image-slot', 40, 60), type: 'image' }
+    let current = applyCanvasCommandV2(emptyCanvasDocumentV2(), {
+      type: 'CreateNode',
+      node: emptyImage,
+    })
+    current = applyCanvasCommandV2(current, {
+      type: 'CreateTaskForOutputSlot',
+      task: task('task-1'),
+      nodeId: 'image-slot',
+    })
+    const outputPlan: TrustedProjectionPlanInputV2 = {
+      ...plan(),
+      outputs: [{
+        ...plan().outputs[1]!,
+        role: 'primary',
+      }],
+      taskProposals: [],
+    }
+    current = applyCanvasCommandV2(current, {
+      type: 'MaterializeProjectionPlan',
+      plan: outputPlan,
+    })
+
+    expect(current.nodes).toHaveLength(1)
+    expect(current.nodes[0]).toMatchObject({
+      id: 'image-slot',
+      homeTaskId: 'task-1',
+      artifactRefs: outputPlan.outputs[0]!.artifactRefs,
+      origin: {
+        kind: 'agent-output',
+        taskId: 'task-1',
+        outputKey: 'preview',
+      },
+    })
+    expect(current.receipts[0]).toMatchObject({
+      outcomes: [{ outputKey: 'preview', nodeId: 'image-slot' }],
+    })
+    current = applyCanvasCommandV2(current, {
+      type: 'DuplicateNode',
+      sourceNodeId: 'image-slot',
+      newNodeId: 'image-copy',
+      offset: { x: 40, y: 40 },
+    })
+    expect(current.nodes[1]).toMatchObject({
+      artifactRefs: outputPlan.outputs[0]!.artifactRefs,
+      origin: { kind: 'copied', sourceNodeId: 'image-slot' },
+    })
+    current = applyCanvasCommandV2(current, { type: 'DeleteNode', nodeId: 'image-copy' })
+
+    const detached = applyCanvasCommandV2(current, {
+      type: 'DetachNodeFromTask',
+      nodeId: 'image-slot',
+    })
+    expect(detached.nodes[0].homeTaskId).toBeUndefined()
+    expect(detached.edges.some((edge) => edge.relation === 'produced')).toBe(true)
+    const reassigned = applyCanvasCommandV2(detached, {
+      type: 'AssignNodeToTask',
+      nodeId: 'image-slot',
+      taskId: 'task-1',
+    })
+    expect(reassigned.nodes[0].homeTaskId).toBe('task-1')
+    const withForeignTask = applyCanvasCommandV2(reassigned, {
+      type: 'CreateTask',
+      task: task('task-2'),
+    })
+    expect(() => applyCanvasCommandV2(withForeignTask, {
+      type: 'AssignNodeToTask',
+      nodeId: 'image-slot',
+      taskId: 'task-2',
+    })).toThrowError(CanvasCommandError)
+
+    const deleted = applyCanvasCommandV2(withForeignTask, {
+      type: 'DeleteNode',
+      nodeId: 'image-slot',
+    })
+    const replayed = applyCanvasCommandV2(deleted, {
+      type: 'MaterializeProjectionPlan',
+      plan: outputPlan,
+    })
+    expect(replayed).toBe(deleted)
+    expect(replayed.nodes).toEqual([])
+    expect(replayed.receipts).toHaveLength(1)
+  })
+
+  it('atomically creates a derived task and never overwrites a content source node', () => {
+    const initial = emptyCanvasDocumentV2()
+    initial.tasks.push(task('upstream-task'))
+    initial.nodes.push({
+      ...node('content-source', 20, 40),
+      type: 'image',
+      text: 'Keep this original content',
+    })
+    const derived = applyCanvasCommandV2(initial, {
+      type: 'CreateDerivedTaskFromSelection',
+      task: task('task-derived'),
+      sources: [
+        {
+          entity: { kind: 'node', id: 'content-source' },
+          relation: 'modified',
+          contextRole: 'full',
+        },
+        {
+          entity: { kind: 'task', id: 'upstream-task' },
+          relation: 'source',
+          contextRole: 'summary',
+        },
+      ],
+    })
+
+    expect(derived.tasks.map(({ id }) => id)).toEqual(['upstream-task', 'task-derived'])
+    expect(derived.edges).toHaveLength(2)
+    expect(derived.edges.map(({ id }) => id)).toEqual([
+      deterministicCanvasIdV2('edge', 'derived-task-source', 'task-derived', 'node:content-source'),
+      deterministicCanvasIdV2('edge', 'derived-task-source', 'task-derived', 'task:upstream-task'),
+    ])
+    expect(derived.nodes[0]).toMatchObject({
+      id: 'content-source',
+      text: 'Keep this original content',
+      origin: { kind: 'user' },
+    })
+
+    const derivedPlan: TrustedProjectionPlanInputV2 = {
+      ...plan(`plan_${'b'.repeat(64)}`),
+      taskId: 'task-derived',
+      outputs: [{ ...plan().outputs[1]!, role: 'primary' }],
+      taskProposals: [],
+    }
+    const materialized = applyCanvasCommandV2(derived, {
+      type: 'MaterializeProjectionPlan',
+      plan: derivedPlan,
+    })
+    expect(materialized.nodes.find(({ id }) => id === 'content-source')).toMatchObject({
+      text: 'Keep this original content',
+      origin: { kind: 'user' },
+    })
+    expect(materialized.nodes.map(({ id }) => id)).toContain(
+      deterministicCanvasIdV2('node', derivedPlan.planId, 'preview'),
+    )
+
+    const snapshot = structuredClone(initial)
+    expect(() => applyCanvasCommandV2(initial, {
+      type: 'CreateDerivedTaskFromSelection',
+      task: task('failed-task'),
+      sources: [{
+        entity: { kind: 'node', id: 'missing-node' },
+        relation: 'source',
+        contextRole: 'full',
+      }],
+    })).toThrowError(CanvasCommandError)
+    expect(initial).toEqual(snapshot)
   })
 
   it('keeps multi-step command failures atomic', () => {

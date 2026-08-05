@@ -55,6 +55,22 @@ function plan(): TrustedProjectionPlanInputV2 {
 }
 
 describe('Canvas V2 daemon client', () => {
+  it('reads the daemon V2 capability from health without a canvas scope', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = new URL(String(input))
+      expect(url.pathname).toBe('/health')
+      expect(url.search).toBe('')
+      expect(init?.method).toBe('GET')
+      return json({ capabilities: { canvasModelV2: true } })
+    })
+    const client = new CanvasV2DaemonClient({
+      baseUrl: persistenceScope.daemonBaseUrl,
+      fetch,
+    })
+
+    await expect(client.getCapabilities()).resolves.toEqual({ canvasModelV2: true })
+  })
+
   it('GETs and validates a branch V2 envelope', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       const url = new URL(String(input))
