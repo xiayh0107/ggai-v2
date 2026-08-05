@@ -188,6 +188,94 @@ async function createRun(baseUrl: string, body: Record<string, unknown>): Promis
   return payload.runId
 }
 
+test('RunIntent V2 executes only against the exact persisted Canvas revision', async () => {
+  const fixture = await startTestDaemon()
+  try {
+    const command = await fetch(`${fixture.baseUrl}/canvas/commands`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        branch: 'main',
+        baseRevision: 0,
+        mutationId: 'create-task-run-v2',
+        command: {
+          type: 'CreateTask',
+          task: {
+            id: 'task-server-v2',
+            title: 'Server V2 task',
+            goal: 'Use the durable task revision',
+            anchor: { x: 100, y: 120 },
+            origin: { kind: 'user' },
+          },
+        },
+      }),
+    })
+    assert.equal(command.status, 200, await command.text())
+
+    const intent = {
+      schemaVersion: 2,
+      runId: 'server-task-run-v2',
+      taskId: 'task-server-v2',
+      agentId: 'codex',
+      canvasBranch: 'main',
+      baseRevision: 1,
+      prompt: 'SERVER_V2_PROMPT',
+      attachments: [],
+      materializationPolicy: 'auto',
+    }
+    const stale = await fetch(`${fixture.baseUrl}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...intent, runId: 'server-task-run-stale', baseRevision: 0 }),
+    })
+    assert.equal(stale.status, 409)
+    assert.deepEqual(await stale.json(), {
+      error: {
+        code: 'canvas_v2_revision_conflict',
+        message: 'Canvas V2 revision changed; current revision is 1',
+        currentRevision: 1,
+      },
+    })
+
+    const forgedSnapshot = await fetch(`${fixture.baseUrl}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...intent, canvasSnapshot: { nodes: [], edges: [] } }),
+    })
+    assert.equal(forgedSnapshot.status, 400)
+    assert.equal((await forgedSnapshot.json() as { error: { code: string } }).error.code,
+      'invalid_run_intent_v2')
+
+    const accepted = await fetch(`${fixture.baseUrl}/runs?projectDir=.`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(intent),
+    })
+    assert.equal(accepted.status, 202, await accepted.text())
+    await waitFor(async () => fixture.daemon.runs.get(intent.runId)?.status === 'done')
+
+    const summaryResponse = await fetch(`${fixture.baseUrl}/runs/${intent.runId}`)
+    assert.equal(summaryResponse.status, 200)
+    const summary = await summaryResponse.json() as RunSummary
+    assert.equal(summary.taskId, 'task-server-v2')
+    assert.equal(summary.nodeId, 'task-server-v2')
+
+    const pack = await readFile(
+      path.join(fixture.root, '.gg', 'context', 'runs', intent.runId, 'pack.md'),
+      'utf8',
+    )
+    assert.match(pack, /Use the durable task revision/u)
+    assert.match(pack, /SERVER_V2_PROMPT/u)
+    assert.doesNotMatch(pack, /canvasSnapshot/u)
+
+    const history = await fetch(`${fixture.baseUrl}/runs?taskId=task-server-v2`)
+    assert.equal(history.status, 200)
+    assert.equal((await history.json() as { runs: RunSummary[] }).runs[0]?.runId, intent.runId)
+  } finally {
+    await fixture.close()
+  }
+})
+
 function ssePayloads(source: string, eventName: string): unknown[] {
   return source.split(/\r?\n\r?\n/).flatMap((block) => {
     const event = block.split(/\r?\n/).find((line) => line.startsWith('event: '))?.slice(7)

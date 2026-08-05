@@ -114,12 +114,13 @@ export class RunLogStore {
   }
 
   async list(
-    filter: { nodeId?: string; canvasBranch?: string; limit?: number } = {},
+    filter: { nodeId?: string; taskId?: string; canvasBranch?: string; limit?: number } = {},
   ): Promise<RunSummary[]> {
     const summaries = await this.#readAllSummaries()
     const limit = Math.max(1, Math.min(filter.limit ?? 200, 2_000))
     return summaries
       .filter((entry) => !filter.nodeId || entry.nodeId === filter.nodeId)
+      .filter((entry) => !filter.taskId || entry.taskId === filter.taskId)
       .filter((entry) => !filter.canvasBranch || entry.canvasBranch === filter.canvasBranch)
       .sort((left, right) => right.startedAt - left.startedAt)
       .slice(0, limit)
@@ -441,6 +442,8 @@ function decodeSummary(source: string, expectedRunId: string): RunSummary {
     || typeof record.agentId !== 'string'
     || !isRunId(record.runId)
     || !isRunId(record.nodeId)
+    || (record.taskId !== undefined
+      && (typeof record.taskId !== 'string' || !isRunId(record.taskId)))
     || !isRunId(record.agentId)
     || !isRunStatus(record.status)
     || typeof record.startedAt !== 'number'
@@ -464,6 +467,7 @@ function decodeSummary(source: string, expectedRunId: string): RunSummary {
   }
   return {
     runId: record.runId,
+    ...(record.taskId === undefined ? {} : { taskId: record.taskId }),
     nodeId: record.nodeId,
     agentId: record.agentId,
     canvasBranch,

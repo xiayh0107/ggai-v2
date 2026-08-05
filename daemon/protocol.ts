@@ -127,6 +127,9 @@ export type DaemonRunStatus =
 
 export interface RunSummary {
   runId: string
+  /** Task ownership is authoritative for Canvas V2 runs. */
+  taskId?: string
+  /** Legacy target identity; V2 mirrors taskId here for transport compatibility. */
   nodeId: string
   agentId: string
   /** Logical canvas branch that owned the run; absent only on legacy summaries. */

@@ -3,6 +3,7 @@ import { lstat, realpath, stat } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
 import path from 'node:path'
+import type { CanvasDocumentV2 } from '../src/canvas-v2/model.js'
 import { isArtifactControlPath } from './artifactPaths.js'
 import {
   CanvasCorruptionError,
@@ -34,6 +35,14 @@ import {
 import { AgentRegistry } from './registry.js'
 import { RunManager } from './runs.js'
 import { SessionsCorruptionError } from './sessions.js'
+import {
+  parseRunIntentV2,
+  parseTaskIdV2,
+  TaskRunProtocolV2Error,
+  type RunIntentV2,
+} from './taskRunProtocolV2.js'
+import { isResolvedTaskRunRequestV2 } from './taskRunTypesV2.js'
+import { TaskSessionsV2CorruptionError } from './taskSessionsV2.js'
 import { WorkspacePreferencesManager } from './preferences.js'
 import {
   WorkspaceVersionManager,
@@ -92,6 +101,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     resolveSourceProjectDir: ({ projectDir, canvasBranch }) =>
       versions.sourceExecutionProjectDir(projectDir, canvasBranch),
     onRunFinished: async ({ summary, request, projectDir }) => {
+      if (isResolvedTaskRunRequestV2(request)) return
       if (summary.status !== 'done' || request.automationMode !== 'auto') return
       const canvasBranch = request.canvasBranch ?? 'main'
       const binding = await versions.sourceBranch(projectDir, canvasBranch)
@@ -444,7 +454,30 @@ async function route(
   }
 
   if (request.method === 'POST' && pathname === '/runs') {
-    const parsed = parseCreateRunRequest(await readJson(request))
+    const raw = await readJson(request)
+    if (isRunIntentV2Candidate(raw)) {
+      const intent = parseRunIntentV2ForServer(raw)
+      const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+      assertServerOpen(context)
+      const envelope = await context.canvasV2.get(projectDir, intent.canvasBranch)
+      if (envelope.revision !== intent.baseRevision) {
+        throw new CanvasRevisionConflictV2Error(envelope.revision)
+      }
+      if (!envelope.document.tasks.some((task) => task.id === intent.taskId)) {
+        throw new ProtocolError('task does not exist at the requested revision', 'task_not_found', 404)
+      }
+      assertRunIntentAttachmentsExist(intent, envelope.document)
+      const run = await context.runs.create({
+        ...intent,
+        projectDir,
+        canvasDocument: structuredClone(envelope.document),
+        automationMode: 'confirm',
+      })
+      writeJson(response, 202, { runId: run.runId })
+      return
+    }
+
+    const parsed = parseCreateRunRequest(raw)
     const projectDir = parsed.projectDir ?? '.'
     assertServerOpen(context)
     await context.canvases.acquireProjectLease(projectDir)
@@ -465,10 +498,17 @@ async function route(
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
     const rawNodeId = singleQueryParameter(url, 'nodeId')
     const nodeId = rawNodeId === undefined ? undefined : parseNodeId(rawNodeId)
+    const rawTaskId = singleQueryParameter(url, 'taskId')
+    const taskId = rawTaskId === undefined ? undefined : parseTaskIdV2(rawTaskId)
     const rawBranch = singleQueryParameter(url, 'branch')
     const canvasBranch = rawBranch === undefined ? undefined : parseCanvasBranch(rawBranch)
     const limit = optionalIntegerQuery(url, 'limit', { min: 1, max: 2_000 })
-    const runs = await context.runs.listRunHistory(projectDir, { nodeId, canvasBranch, limit })
+    const runs = await context.runs.listRunHistory(projectDir, {
+      nodeId,
+      taskId,
+      canvasBranch,
+      limit,
+    })
     writeJson(response, 200, { runs })
     return
   }
@@ -920,6 +960,40 @@ function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoExcepti
   return error instanceof Error && 'code' in error && error.code === code
 }
 
+function isRunIntentV2Candidate(value: unknown): boolean {
+  return typeof value === 'object'
+    && value !== null
+    && !Array.isArray(value)
+    && (value as Record<string, unknown>).schemaVersion === 2
+}
+
+function parseRunIntentV2ForServer(value: unknown): RunIntentV2 {
+  try {
+    return parseRunIntentV2(value)
+  } catch (error) {
+    if (error instanceof TaskRunProtocolV2Error) {
+      throw new ProtocolError(error.message, 'invalid_run_intent_v2', 400)
+    }
+    throw error
+  }
+}
+
+function assertRunIntentAttachmentsExist(
+  intent: RunIntentV2,
+  document: CanvasDocumentV2,
+): void {
+  const nodeIds = new Set(document.nodes.map((node) => node.id))
+  for (const attachment of intent.attachments) {
+    if (attachment.kind === 'node' && !nodeIds.has(attachment.nodeId)) {
+      throw new ProtocolError(
+        `attachment node does not exist at the requested revision: ${attachment.nodeId}`,
+        'attachment_not_found',
+        404,
+      )
+    }
+  }
+}
+
 function writeError(response: ServerResponse, error: unknown): void {
   if (response.headersSent || response.writableEnded) {
     if (!response.writableEnded) response.end()
@@ -937,6 +1011,16 @@ function writeError(response: ServerResponse, error: unknown): void {
     writeJson(response, 409, {
       error: {
         code: 'sessions_corrupt',
+        message: error.message,
+        recovery: error.recovery,
+      },
+    })
+    return
+  }
+  if (error instanceof TaskSessionsV2CorruptionError) {
+    writeJson(response, 409, {
+      error: {
+        code: 'task_sessions_v2_corrupt',
         message: error.message,
         recovery: error.recovery,
       },

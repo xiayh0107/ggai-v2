@@ -1,6 +1,11 @@
 import { lstat, mkdir, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { packContext, renderPackPrompt } from '../src/agent/context.js'
+import {
+  compileTaskContextV2,
+  renderTaskContextPromptV2,
+  type TaskContextPackV2,
+} from '../src/agent/contextV2.js'
 import type { ContextPack } from '../src/agent/types.js'
 import {
   ARTIFACT_CONTROL_DIRECTORY,
@@ -15,11 +20,16 @@ import {
 } from './outcome.js'
 import { isPathWithin } from './permissions.js'
 import type { CreateRunRequest, PluginContract } from './protocol.js'
+import {
+  isResolvedTaskRunRequestV2,
+  type ResolvedTaskRunRequestV2,
+  type RunExecutionRequest,
+} from './taskRunTypesV2.js'
 
 const MAX_ARTIFACT_FILES = 500
 let latestViewWrite = Promise.resolve()
 
-export interface PreparedRunContext {
+export interface PreparedLegacyRunContext {
   projectDir: string
   artifactDir: string
   contextFile: string
@@ -27,6 +37,17 @@ export interface PreparedRunContext {
   /** Kept short so transports never put a large canvas snapshot in argv. */
   agentPrompt: string
 }
+
+export interface PreparedTaskRunContextV2 {
+  projectDir: string
+  artifactDir: string
+  contextFile: string
+  pack: TaskContextPackV2
+  /** Kept short so transports never put Canvas context in argv. */
+  agentPrompt: string
+}
+
+export type PreparedRunContext = PreparedLegacyRunContext | PreparedTaskRunContextV2
 
 async function atomicWrite(file: string, contents: string): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true })
@@ -244,12 +265,41 @@ function renderDaemonContract(
  * Compile the browser snapshot into the file-layer contract consumed by an external Agent CLI.
  * Existing project AGENTS.md files are intentionally not overwritten.
  */
-export async function prepareRunContext(
+export function prepareRunContext(
   request: CreateRunRequest,
+  projectDir: string,
+  runId: string,
+  executionProjectDir?: string,
+): Promise<PreparedLegacyRunContext>
+export function prepareRunContext(
+  request: ResolvedTaskRunRequestV2,
+  projectDir: string,
+  runId: string,
+  executionProjectDir?: string,
+): Promise<PreparedTaskRunContextV2>
+export function prepareRunContext(
+  request: RunExecutionRequest,
+  projectDir: string,
+  runId: string,
+  executionProjectDir?: string,
+): Promise<PreparedRunContext>
+export function prepareRunContext(
+  request: RunExecutionRequest,
   projectDir: string,
   runId: string,
   executionProjectDir = projectDir,
 ): Promise<PreparedRunContext> {
+  return isResolvedTaskRunRequestV2(request)
+    ? prepareTaskRunContextV2(request, projectDir, runId, executionProjectDir)
+    : prepareLegacyRunContext(request, projectDir, runId, executionProjectDir)
+}
+
+async function prepareLegacyRunContext(
+  request: CreateRunRequest,
+  projectDir: string,
+  runId: string,
+  executionProjectDir = projectDir,
+): Promise<PreparedLegacyRunContext> {
   const artifactDir = artifactRunDir(
     projectDir,
     request.canvasBranch ?? 'main',
@@ -350,6 +400,86 @@ export async function prepareRunContext(
       request.canvasSnapshot.plugins ?? [],
       artifactTarget,
     ),
+  ]).then(() => undefined))
+  latestViewWrite = writeLatest.catch(() => undefined)
+  await writeLatest
+
+  return {
+    projectDir,
+    artifactDir,
+    contextFile,
+    pack,
+    agentPrompt: [
+      `Read ${JSON.stringify(contextFile)} and carry out its task and output contract.`,
+      `Write deliverables under ${JSON.stringify(artifactDir)} and report their project-relative paths.`,
+    ].join(' '),
+  }
+}
+
+async function prepareTaskRunContextV2(
+  request: ResolvedTaskRunRequestV2,
+  projectDir: string,
+  runId: string,
+  executionProjectDir = projectDir,
+): Promise<PreparedTaskRunContextV2> {
+  const artifactDir = artifactRunDir(
+    projectDir,
+    request.canvasBranch,
+    runId,
+    request.taskId,
+  )
+  const contextRoot = path.join(projectDir, '.gg', 'context')
+  const contextDir = path.join(contextRoot, 'runs', runId)
+  const contextFile = path.join(contextDir, 'pack.md')
+  const isolatedSource = path.resolve(executionProjectDir) !== path.resolve(projectDir)
+  const contextReference = isolatedSource
+    ? contextFile
+    : toPosix(path.relative(projectDir, contextFile))
+  const skillsReference = isolatedSource
+    ? path.join(contextDir, 'skills')
+    : toPosix(path.relative(projectDir, path.join(contextDir, 'skills')))
+  const artifactTarget = `${artifactDir}${path.sep}`
+  const outcomeTarget = path.join(artifactDir, ...RUN_OUTCOME_RELATIVE_PATH.split('/'))
+  await Promise.all([
+    mkdir(artifactDir, { recursive: true }),
+    mkdir(contextDir, { recursive: true }),
+  ])
+
+  const pack = compileTaskContextV2({
+    document: request.canvasDocument,
+    taskId: request.taskId,
+    runFilesDirectory: artifactTarget,
+    runOutcomeSidecarPath: outcomeTarget,
+  })
+  const daemonContract = renderDaemonContract(
+    contextReference,
+    skillsReference,
+    artifactTarget,
+  )
+  const rendered = [
+    daemonContract.trimEnd(),
+    '',
+    renderTaskContextPromptV2(pack),
+    '',
+    '## This run\'s prompt',
+    '',
+    request.prompt,
+    '',
+  ].join('\n')
+  const packJson = `${JSON.stringify(pack, null, 2)}\n`
+
+  await Promise.all([
+    atomicWrite(contextFile, rendered),
+    atomicWrite(path.join(contextDir, 'pack.json'), packJson),
+    atomicWrite(path.join(contextDir, 'AGENTS.md'), daemonContract),
+    writePluginContracts(path.join(contextDir, 'skills'), [], artifactTarget),
+  ])
+
+  const writeLatest = latestViewWrite.then(() => Promise.all([
+    atomicWrite(path.join(contextRoot, 'pack.md'), rendered),
+    atomicWrite(path.join(contextRoot, 'pack.json'), packJson),
+    atomicWrite(path.join(contextRoot, 'AGENTS.md'), daemonContract),
+    writePluginContracts(path.join(projectDir, '.gg', 'skills'), [], artifactTarget),
   ]).then(() => undefined))
   latestViewWrite = writeLatest.catch(() => undefined)
   await writeLatest

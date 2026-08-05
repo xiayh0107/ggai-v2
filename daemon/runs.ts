@@ -15,7 +15,6 @@ import {
   type ProjectScope,
 } from './permissions.js'
 import type {
-  CreateRunRequest,
   DaemonRunStatus,
   RunClosePayload,
   RunStreamMessage,
@@ -25,6 +24,17 @@ import { parseCanvasBranch, ProtocolError } from './protocol.js'
 import { AgentRegistry } from './registry.js'
 import { RunLogExistsError, RunLogStore, type RunLogPage } from './runLogs.js'
 import { SessionStore, type SessionRecord } from './sessions.js'
+import {
+  TaskSessionStoreV2,
+  type TaskSessionListFilterV2,
+  type TaskSessionRecordV2,
+} from './taskSessionsV2.js'
+import {
+  isResolvedTaskRunRequestV2,
+  requestedRunSessionId,
+  runTargetId,
+  type RunExecutionRequest,
+} from './taskRunTypesV2.js'
 import type { AgentProcessTransport } from './transport/types.js'
 import { watchArtifacts, type ArtifactWatcher } from './watcher.js'
 
@@ -45,7 +55,7 @@ interface InternalRun {
   /** Writable source checkout for this canvas branch, when explicitly bound. */
   sourceProjectDir: string | null
   scope: ProjectScope
-  request: CreateRunRequest
+  request: RunExecutionRequest
   transport: AgentProcessTransport
   abortController: AbortController
   messages: BufferedStreamMessage[]
@@ -93,15 +103,16 @@ export interface RunManagerOptions {
 
 export interface RunFinishedEvent {
   summary: RunSummary
-  request: CreateRunRequest
+  request: RunExecutionRequest
   projectDir: string
 }
 
 interface PendingRunCreation {
   projectDir: string
   canvasBranch: string
-  nodeId: string
+  targetId: string
   agentId: string
+  requestIdentity: string
   promise: Promise<RunSummary>
 }
 
@@ -114,6 +125,7 @@ export class RunManager {
   readonly #runs = new Map<string, InternalRun>()
   readonly #tasks = new Map<string, Promise<void>>()
   readonly #sessionStores = new Map<string, SessionStore>()
+  readonly #taskSessionStores = new Map<string, TaskSessionStoreV2>()
   readonly #runLogStores = new Map<string, RunLogStore>()
   readonly #runLogRecovery = new Map<string, Promise<void>>()
   readonly #pendingCreates = new Map<string, PendingRunCreation>()
@@ -129,8 +141,11 @@ export class RunManager {
     this.#resolveSourceProjectDir = options.resolveSourceProjectDir
   }
 
-  async create(request: CreateRunRequest): Promise<RunSummary> {
+  async create(request: RunExecutionRequest): Promise<RunSummary> {
     this.#assertOpen()
+    // Pin the revision payload before any asynchronous lease/path work so a
+    // caller cannot mutate the context while the run is being accepted.
+    if (isResolvedTaskRunRequestV2(request)) request = structuredClone(request)
     const transport = this.#registry.resolve(request.agentId)
     if (!transport) {
       throw new ProtocolError(`unknown agent: ${request.agentId}`, 'unknown_agent', 404)
@@ -174,8 +189,9 @@ export class RunManager {
     const reservation: PendingRunCreation = {
       projectDir,
       canvasBranch,
-      nodeId: request.nodeId,
+      targetId: runTargetId(request),
       agentId: request.agentId,
+      requestIdentity: runRequestIdentity(request),
       promise: creation,
     }
     this.#pendingCreates.set(runId, reservation)
@@ -187,7 +203,7 @@ export class RunManager {
   }
 
   async #createReserved(input: {
-    request: CreateRunRequest
+    request: RunExecutionRequest
     transport: AgentProcessTransport
     scope: ProjectScope
     projectDir: string
@@ -241,17 +257,20 @@ export class RunManager {
       if ([...this.#runs.values()].some((run) =>
         !run.closed
         && run.projectDir === projectDir
-        && run.request.nodeId === request.nodeId
+        && runTargetId(run.request) === runTargetId(request)
         && (run.request.canvasBranch ?? 'main') === canvasBranch)) {
+        const targetKind = isResolvedTaskRunRequestV2(request) ? 'task' : 'node'
         throw new ProtocolError(
-          'this node already has an active run',
-          'node_run_active',
+          `this ${targetKind} already has an active run`,
+          `${targetKind}_run_active`,
           409,
         )
       }
+      const targetId = runTargetId(request)
       const summary: RunSummary = {
         runId,
-        nodeId: request.nodeId,
+        ...(isResolvedTaskRunRequestV2(request) ? { taskId: request.taskId } : {}),
+        nodeId: targetId,
         agentId: request.agentId,
         canvasBranch,
         status: 'preparing',
@@ -300,7 +319,13 @@ export class RunManager {
           )
         }
         this.#assertOpen()
-        await assertManagedPaths(scope, request.nodeId, runId, canvasBranch)
+        await assertManagedPaths(
+          scope,
+          targetId,
+          runId,
+          canvasBranch,
+          isResolvedTaskRunRequestV2(request),
+        )
         run.acceptanceState = 'accepted'
         run.resolveAcceptance()
       } catch (error) {
@@ -354,7 +379,7 @@ export class RunManager {
 
   async listRunHistory(
     projectDirRequest = '.',
-    filter: { nodeId?: string; canvasBranch?: string; limit?: number } = {},
+    filter: { nodeId?: string; taskId?: string; canvasBranch?: string; limit?: number } = {},
   ): Promise<RunSummary[]> {
     const { store } = await this.#persistentRunStore(projectDirRequest)
     return store.list(filter)
@@ -443,6 +468,14 @@ export class RunManager {
     return this.#sessions(projectDir).list(filter)
   }
 
+  async listTaskSessions(
+    projectDirRequest = '.',
+    filter: TaskSessionListFilterV2 = {},
+  ): Promise<TaskSessionRecordV2[]> {
+    const projectDir = await this.#leaseProject(projectDirRequest)
+    return this.#taskSessions(projectDir).list(filter)
+  }
+
   /**
    * Atomically reserves every named branch for a lifecycle mutation. New runs
    * cannot enter while the operation is pending, and a run lease acquired
@@ -496,13 +529,17 @@ export class RunManager {
     let watcher: ArtifactWatcher | null = null
     let capturedSessionId: string | null = null
     let watcherError: Error | null = null
+    const targetId = runTargetId(run.request)
+    const canvasBranch = run.request.canvasBranch ?? 'main'
+    const taskOwned = isResolvedTaskRunRequestV2(run.request)
 
     try {
       await assertManagedPaths(
         run.scope,
-        run.request.nodeId,
+        targetId,
         run.summary.runId,
-        run.request.canvasBranch ?? 'main',
+        canvasBranch,
+        taskOwned,
       )
       await this.#revalidateSourceProjectDir(run)
       throwIfAborted(run.abortController.signal)
@@ -515,8 +552,8 @@ export class RunManager {
       throwIfAborted(run.abortController.signal)
       watcher = await watchArtifacts({
         projectDir: run.projectDir,
-        nodeId: run.request.nodeId,
-        canvasBranch: run.request.canvasBranch ?? 'main',
+        nodeId: targetId,
+        canvasBranch,
         runId: run.summary.runId,
         onEvent: (event) => this.#publishAgentEvent(run, event),
         onError: (error) => {
@@ -529,18 +566,30 @@ export class RunManager {
       })
       throwIfAborted(run.abortController.signal)
 
-      const sessions = this.#sessions(run.projectDir)
-      const canvasBranch = run.request.canvasBranch ?? 'main'
-      const prior = await sessions.get(run.request.nodeId, run.request.agentId, canvasBranch)
+      let priorSessionId: string | null
+      if (isResolvedTaskRunRequestV2(run.request)) {
+        priorSessionId = (await this.#taskSessions(run.projectDir).get(
+          canvasBranch,
+          run.request.taskId,
+          run.request.agentId,
+        ))?.sessionId ?? null
+      } else {
+        priorSessionId = (await this.#sessions(run.projectDir).get(
+          targetId,
+          run.request.agentId,
+          canvasBranch,
+        ))?.sessionId ?? null
+      }
       throwIfAborted(run.abortController.signal)
-      const sessionId = prior?.sessionId ?? run.request.sessionId ?? null
+      const sessionId = priorSessionId ?? requestedRunSessionId(run.request)
       run.summary.status = 'running'
       // Recheck after directory creation and immediately before granting the CLI writable roots.
       await assertManagedPaths(
         run.scope,
-        run.request.nodeId,
+        targetId,
         run.summary.runId,
-        run.request.canvasBranch ?? 'main',
+        canvasBranch,
+        taskOwned,
       )
       await this.#revalidateSourceProjectDir(run)
       throwIfAborted(run.abortController.signal)
@@ -549,7 +598,7 @@ export class RunManager {
       try {
         result = await run.transport.run({
           runId: run.summary.runId,
-          nodeId: run.request.nodeId,
+          nodeId: targetId,
           agentId: run.request.agentId,
           sessionId,
           prompt: prepared.agentPrompt,
@@ -573,12 +622,7 @@ export class RunManager {
       throwIfAborted(run.abortController.signal)
       run.summary.sessionId = capturedSessionId
       if (capturedSessionId) {
-        await sessions.upsert({
-          canvasBranch,
-          nodeId: run.request.nodeId,
-          agentId: run.request.agentId,
-          sessionId: capturedSessionId,
-        })
+        await this.#persistRunSession(run, capturedSessionId)
         throwIfAborted(run.abortController.signal)
         this.#publish(run, { event: 'session', data: { sessionId: capturedSessionId } })
       }
@@ -591,8 +635,8 @@ export class RunManager {
         this.#publishAgentEvent(run, { type: 'done', stopReason: terminalReason })
       }
       const status = statusForStopReason(terminalReason)
-      const artifacts = await listArtifactSnapshot(run.projectDir, run.request.nodeId, {
-        canvasBranch: run.request.canvasBranch ?? 'main',
+      const artifacts = await listArtifactSnapshot(run.projectDir, targetId, {
+        canvasBranch,
         runId: run.summary.runId,
       })
       const outcome = status === 'done'
@@ -602,12 +646,7 @@ export class RunManager {
     } catch (error) {
       if (capturedSessionId) {
         try {
-          await this.#sessions(run.projectDir).upsert({
-            canvasBranch: run.request.canvasBranch ?? 'main',
-            nodeId: run.request.nodeId,
-            agentId: run.request.agentId,
-            sessionId: capturedSessionId,
-          })
+          await this.#persistRunSession(run, capturedSessionId)
         } catch {
           // The primary run error remains the one surfaced to the UI.
         }
@@ -623,8 +662,8 @@ export class RunManager {
         if (!run.doneEventSent) {
           this.#publishAgentEvent(run, { type: 'done', stopReason: terminalReason })
         }
-        const snapshot = await listArtifactSnapshot(run.projectDir, run.request.nodeId, {
-          canvasBranch: run.request.canvasBranch ?? 'main',
+        const snapshot = await listArtifactSnapshot(run.projectDir, targetId, {
+          canvasBranch,
           runId: run.summary.runId,
         })
           .catch(() => ({ files: [], complete: false }))
@@ -637,8 +676,8 @@ export class RunManager {
         await this.#finish(
           run,
           'error',
-          await listArtifactSnapshot(run.projectDir, run.request.nodeId, {
-            canvasBranch: run.request.canvasBranch ?? 'main',
+          await listArtifactSnapshot(run.projectDir, targetId, {
+            canvasBranch,
             runId: run.summary.runId,
           })
             .then((snapshot) => snapshot.files)
@@ -661,7 +700,7 @@ export class RunManager {
       const prior = run.lastFileEvents.get(relative) ?? 0
       if (now - prior < 500) return
       run.lastFileEvents.set(relative, now)
-      event = { type: 'file-write', path: relative, nodeId: run.request.nodeId }
+      event = { type: 'file-write', path: relative, nodeId: runTargetId(run.request) }
     } else if (event.type === 'permission-request') {
       run.pendingPermissionIds.add(event.id)
       run.summary.status = 'awaiting-permission'
@@ -682,7 +721,7 @@ export class RunManager {
     const prefix = `${artifactRunRelativeDir(
       run.request.canvasBranch ?? 'main',
       run.summary.runId,
-      run.request.nodeId,
+      runTargetId(run.request),
     )}/`
     if (!relative.startsWith(prefix) || relative.includes('\0')) return null
     return isArtifactControlPath(relative.slice(prefix.length)) ? null : relative
@@ -777,6 +816,25 @@ export class RunManager {
     }
   }
 
+  async #persistRunSession(run: InternalRun, sessionId: string): Promise<void> {
+    const canvasBranch = run.request.canvasBranch ?? 'main'
+    if (isResolvedTaskRunRequestV2(run.request)) {
+      await this.#taskSessions(run.projectDir).upsert({
+        canvasBranch,
+        taskId: run.request.taskId,
+        agentId: run.request.agentId,
+        sessionId,
+      })
+      return
+    }
+    await this.#sessions(run.projectDir).upsert({
+      canvasBranch,
+      nodeId: run.request.nodeId,
+      agentId: run.request.agentId,
+      sessionId,
+    })
+  }
+
   #sessions(projectDir: string): SessionStore {
     let store = this.#sessionStores.get(projectDir)
     if (!store) {
@@ -784,6 +842,18 @@ export class RunManager {
         validatePath: () => assertSessionStorePath(projectDir),
       })
       this.#sessionStores.set(projectDir, store)
+    }
+    return store
+  }
+
+  #taskSessions(projectDir: string): TaskSessionStoreV2 {
+    let store = this.#taskSessionStores.get(projectDir)
+    if (!store) {
+      const filePath = path.join(projectDir, '.gg', 'runtime', 'task-sessions-v2.json')
+      store = new TaskSessionStoreV2(filePath, {
+        validatePath: () => assertTaskSessionStoreV2Path(projectDir),
+      })
+      this.#taskSessionStores.set(projectDir, store)
     }
     return store
   }
@@ -937,15 +1007,17 @@ function throwIfAborted(signal: AbortSignal): void {
 
 async function assertManagedPaths(
   scope: ProjectScope,
-  nodeId: string,
+  targetId: string,
   runId: string,
   canvasBranch: string,
+  taskOwned = false,
 ): Promise<void> {
+  if (taskOwned) await assertTaskSessionStoreV2Path(scope.projectDir)
   const paths = [
-    artifactRunRelativeDir(canvasBranch, runId, nodeId),
+    artifactRunRelativeDir(canvasBranch, runId, targetId),
     `.gg/context/runs/${runId}`,
     '.gg/skills',
-    '.gg/sessions.json',
+    ...(!taskOwned ? ['.gg/sessions.json'] : []),
     `.gg/runs/${runId}`,
   ]
   for (const managedPath of paths) {
@@ -1009,6 +1081,40 @@ async function assertSessionStorePath(projectDir: string): Promise<void> {
   }
 }
 
+async function assertTaskSessionStoreV2Path(projectDir: string): Promise<void> {
+  const runtimeDir = path.join(projectDir, '.gg', 'runtime')
+  const expected = path.join(runtimeDir, 'task-sessions-v2.json')
+  const [canonicalProject, canonicalRuntime, canonicalExpected] = await Promise.all([
+    canonicalizePotentialPath(projectDir),
+    canonicalizePotentialPath(runtimeDir),
+    canonicalizePotentialPath(expected),
+  ])
+  if (
+    canonicalProject !== projectDir
+    || canonicalRuntime !== runtimeDir
+    || canonicalExpected !== expected
+    || !isPathWithin(path.join(projectDir, '.gg'), expected)
+  ) {
+    throw new ProtocolError(
+      'unsafe task sessions path: path resolves through a symlink',
+      'unsafe_managed_path',
+      403,
+    )
+  }
+  try {
+    const info = await lstat(expected)
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw new ProtocolError(
+        'unsafe task sessions path: expected a regular file',
+        'unsafe_managed_path',
+        403,
+      )
+    }
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
+  }
+}
+
 async function pathInfo(candidate: string): Promise<{ directory: boolean; symbolicLink: boolean }> {
   const info = await lstat(candidate)
   return { directory: info.isDirectory(), symbolicLink: info.isSymbolicLink() }
@@ -1028,26 +1134,39 @@ function branchLeaseKey(projectDir: string, canvasBranch: string): string {
 
 function sameRunIdentity(
   run: InternalRun,
-  request: CreateRunRequest,
+  request: RunExecutionRequest,
   projectDir: string,
   canvasBranch: string,
 ): boolean {
   return run.projectDir === projectDir
-    && run.request.nodeId === request.nodeId
+    && runTargetId(run.request) === runTargetId(request)
     && run.request.agentId === request.agentId
     && (run.request.canvasBranch ?? 'main') === canvasBranch
+    && runRequestIdentity(run.request) === runRequestIdentity(request)
 }
 
 function samePendingRunIdentity(
   pending: PendingRunCreation,
-  request: CreateRunRequest,
+  request: RunExecutionRequest,
   projectDir: string,
   canvasBranch: string,
 ): boolean {
   return pending.projectDir === projectDir
     && pending.canvasBranch === canvasBranch
-    && pending.nodeId === request.nodeId
+    && pending.targetId === runTargetId(request)
     && pending.agentId === request.agentId
+    && pending.requestIdentity === runRequestIdentity(request)
+}
+
+function runRequestIdentity(request: RunExecutionRequest): string {
+  if (!isResolvedTaskRunRequestV2(request)) return 'canvas-v1'
+  return JSON.stringify({
+    schemaVersion: request.schemaVersion,
+    baseRevision: request.baseRevision,
+    prompt: request.prompt,
+    attachments: request.attachments,
+    materializationPolicy: request.materializationPolicy,
+  })
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
