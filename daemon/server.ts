@@ -545,6 +545,23 @@ async function route(
     return
   }
 
+  const projectionPlanMatch = pathname.match(/^\/projection-plans\/([^/]+)$/)
+  if (request.method === 'GET' && projectionPlanMatch) {
+    const planId = projectionPlanIdFromPath(projectionPlanMatch[1])
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
+    const settlement = await context.runs.getPendingProjectionPlan(planId, projectDir, branch)
+    if (!settlement) {
+      throw new ProtocolError(
+        'pending projection plan not found',
+        'projection_plan_not_found',
+        404,
+      )
+    }
+    writeJson(response, 200, settlement)
+    return
+  }
+
   const eventMatch = pathname.match(/^\/runs\/([^/]+)\/events$/)
   if (request.method === 'GET' && eventMatch) {
     const runId = runIdFromPath(eventMatch[1])
@@ -649,6 +666,19 @@ function artifactIdFromPath(value: string | undefined): string {
   }
   if (!/^artifact_[0-9a-f]{64}$/u.test(decoded)) {
     throw new ProtocolError('artifactId is invalid')
+  }
+  return decoded
+}
+
+function projectionPlanIdFromPath(value: string | undefined): string {
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(value ?? '')
+  } catch {
+    throw new ProtocolError('planId contains invalid URL encoding')
+  }
+  if (!/^plan_[0-9a-f]{64}$/u.test(decoded)) {
+    throw new ProtocolError('planId is invalid')
   }
   return decoded
 }

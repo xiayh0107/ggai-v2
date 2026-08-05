@@ -282,6 +282,8 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
     const close = logPage.entries.find((entry) => entry.event === 'close')?.data as {
       artifacts: string[]
       artifactsComplete: boolean
+      outcome?: unknown
+      suggestedActions: unknown[]
       artifactManifest: {
         version: number
         runId: string
@@ -292,6 +294,14 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
           mediaType: string
         }>
       }
+      projectionPlan: {
+        planId: string
+        runId: string
+        taskId: string
+        status: string
+        outputs: Array<{ pluginId: string; artifactRefs: Array<{ artifactId: string }> }>
+        taskProposals: unknown[]
+      }
     }
     assert.equal(close.artifactsComplete, true)
     assert.equal(close.artifactManifest.version, 1)
@@ -301,6 +311,26 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
       'output.txt',
     ])
     assert.match(close.artifacts[0] ?? '', /\/server-task-run-v2\/files\/output\.txt$/u)
+    assert.equal(close.outcome, undefined)
+    assert.deepEqual(close.suggestedActions, [])
+    assert.equal(close.projectionPlan.runId, intent.runId)
+    assert.equal(close.projectionPlan.taskId, intent.taskId)
+    assert.equal(close.projectionPlan.status, 'complete')
+    assert.equal(close.projectionPlan.outputs[0]?.pluginId, 'text')
+    assert.deepEqual(close.projectionPlan.taskProposals, [])
+    const pendingPlanResponse = await fetch(
+      `${fixture.baseUrl}/projection-plans/${close.projectionPlan.planId}?projectDir=.&branch=main`,
+    )
+    const pendingPlanText = await pendingPlanResponse.text()
+    assert.equal(pendingPlanResponse.status, 200, pendingPlanText)
+    assert.deepEqual(JSON.parse(pendingPlanText), {
+      plan: close.projectionPlan,
+      suggestedActions: close.suggestedActions,
+    })
+    const foreignBranchPlan = await fetch(
+      `${fixture.baseUrl}/projection-plans/${close.projectionPlan.planId}?projectDir=.&branch=other`,
+    )
+    assert.equal(foreignBranchPlan.status, 404)
     const artifactEntry = close.artifactManifest.entries[0]!
     const artifactResponse = await fetch(
       `${fixture.baseUrl}/runs/${intent.runId}/artifacts/${artifactEntry.artifactId}`,

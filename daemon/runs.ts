@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import { lstat } from 'node:fs/promises'
 import path from 'node:path'
-import type { RunOutcome } from '../src/agent/outcome.js'
+import type { RunOutcome, SuggestedAction } from '../src/agent/outcome.js'
+import type { RunOutcomeV2 } from '../src/agent/outcomeV2.js'
 import type { CanvasAgentEvent } from '../src/agent/types.js'
 import type { ArtifactManifestV1 } from './artifactManifestV2.js'
 import { artifactRunRelativeDir, isArtifactControlPath } from './artifactPaths.js'
+import { canvasBranchStorageId } from './canvasStore.js'
 import { readRunOutcome } from './outcome.js'
+import { readRunOutcomeV2 } from './outcomeV2.js'
 import { listArtifactSnapshot, prepareRunContext } from './packer.js'
 import {
   assessWritePath,
@@ -42,6 +45,9 @@ import {
 } from './taskRunTypesV2.js'
 import type { AgentProcessTransport } from './transport/types.js'
 import { watchArtifacts, type ArtifactWatcher } from './watcher.js'
+import { BUILTIN_PROJECTION_PLUGIN_CONTRACTS_V2 } from './projectionPluginsV2.js'
+import type { ProjectionPlanV2, ProjectionSettlementV2 } from './projectionPlanV2.js'
+import { ProjectionPlanStoreV2 } from './projectionPlanStoreV2.js'
 
 const EVENT_HISTORY_LIMIT = 2_000
 const EVENT_HISTORY_BYTES = 1024 * 1024
@@ -104,6 +110,8 @@ export interface RunManagerOptions {
     projectDir: string
     canvasBranch: string
   }) => Promise<string | null>
+  /** Test seam for deterministic artifact settlement without OS watcher limits. */
+  watchArtifacts?: typeof watchArtifacts
 }
 
 export interface RunFinishedEvent {
@@ -133,11 +141,13 @@ export class RunManager {
   readonly #acquireProjectLease?: RunManagerOptions['acquireProjectLease']
   readonly #onRunFinished?: (event: RunFinishedEvent) => Promise<void>
   readonly #resolveSourceProjectDir?: RunManagerOptions['resolveSourceProjectDir']
+  readonly #watchArtifacts: typeof watchArtifacts
   readonly #runs = new Map<string, InternalRun>()
   readonly #tasks = new Map<string, Promise<void>>()
   readonly #sessionStores = new Map<string, SessionStore>()
   readonly #taskSessionStores = new Map<string, TaskSessionStoreV2>()
   readonly #artifactStoresV2 = new Map<string, RunArtifactStoreV2>()
+  readonly #projectionPlanStoresV2 = new Map<string, ProjectionPlanStoreV2>()
   readonly #runLogStores = new Map<string, RunLogStore>()
   readonly #runLogRecovery = new Map<string, Promise<void>>()
   readonly #pendingCreates = new Map<string, PendingRunCreation>()
@@ -151,6 +161,7 @@ export class RunManager {
     this.#acquireProjectLease = options.acquireProjectLease
     this.#onRunFinished = options.onRunFinished
     this.#resolveSourceProjectDir = options.resolveSourceProjectDir
+    this.#watchArtifacts = options.watchArtifacts ?? watchArtifacts
   }
 
   async create(request: RunExecutionRequest): Promise<RunSummary> {
@@ -425,6 +436,19 @@ export class RunManager {
     ).lookup(runId, artifactId) ?? null
   }
 
+  async getPendingProjectionPlan(
+    planId: string,
+    projectDirRequest = '.',
+    canvasBranchRequest = 'main',
+  ): Promise<ProjectionSettlementV2 | null> {
+    const projectDir = await this.#leaseProject(projectDirRequest)
+    const canvasBranch = parseCanvasBranch(canvasBranchRequest)
+    const record = await this.#projectionPlansV2(projectDir, canvasBranch).get(planId)
+    return record?.state === 'pending'
+      ? { plan: record.plan, suggestedActions: record.suggestedActions }
+      : null
+  }
+
   subscribe(runId: string, listener: RunListener, afterId = 0): RunSubscription | null {
     const run = this.#runs.get(runId)
     if (!run) return null
@@ -576,7 +600,7 @@ export class RunManager {
         run.sourceProjectDir ?? run.projectDir,
       )
       throwIfAborted(run.abortController.signal)
-      watcher = await watchArtifacts({
+      watcher = await this.#watchArtifacts({
         projectDir: run.projectDir,
         nodeId: targetId,
         canvasBranch,
@@ -671,7 +695,9 @@ export class RunManager {
       watcher = null
       const artifacts = await this.#collectTerminalArtifacts(run, true)
       const outcome = status === 'done'
-        ? await readRunOutcome(prepared.artifactDir)
+        ? taskOwned
+          ? await readRunOutcomeV2(prepared.artifactDir)
+          : await readRunOutcome(prepared.artifactDir)
         : undefined
       await this.#finish(
         run,
@@ -801,7 +827,7 @@ export class RunManager {
     status: Extract<DaemonRunStatus, 'done' | 'error' | 'cancelled'>,
     artifacts: string[],
     artifactsComplete: boolean,
-    outcome?: RunOutcome,
+    outcome?: RunOutcome | RunOutcomeV2,
     artifactManifest?: ArtifactManifestV1,
   ): Promise<void> {
     if (run.closed) return
@@ -816,6 +842,29 @@ export class RunManager {
     }
     run.summary.status = status
     run.summary.finishedAt = Date.now()
+    let projectionPlan: ProjectionPlanV2 | undefined
+    let suggestedActions: SuggestedAction[] | undefined
+    if (isResolvedTaskRunRequestV2(run.request) && artifactManifest) {
+      try {
+        const created = await this.#projectionPlansV2(
+          run.projectDir,
+          run.request.canvasBranch,
+        ).createPending({
+          taskId: run.request.taskId,
+          runId: run.summary.runId,
+          runStatus: status,
+          manifest: artifactManifest,
+          plugins: BUILTIN_PROJECTION_PLUGIN_CONTRACTS_V2,
+          ...(status === 'done' && outcome ? { outcome } : {}),
+        })
+        projectionPlan = created.plan
+        suggestedActions = created.suggestedActions
+      } catch (error) {
+        status = 'error'
+        run.summary.status = 'error'
+        run.summary.error = `Could not persist the projection plan: ${errorMessage(error)}`
+      }
+    }
     const close: RunClosePayload = {
       runId: run.summary.runId,
       status,
@@ -823,7 +872,9 @@ export class RunManager {
       artifacts,
       artifactsComplete,
       ...(artifactManifest ? { artifactManifest } : {}),
-      ...(status === 'done' && outcome ? { outcome } : {}),
+      ...(isResolvedTaskRunRequestV2(run.request)
+        ? projectionPlan ? { projectionPlan, suggestedActions: suggestedActions ?? [] } : {}
+        : status === 'done' && outcome ? { outcome: outcome as RunOutcome } : {}),
     }
     const buffered: BufferedStreamMessage = {
       event: 'close',
@@ -841,6 +892,8 @@ export class RunManager {
       run.summary.error = `Could not finalize the run log: ${errorMessage(error)}`
       close.status = 'error'
       delete close.outcome
+      delete close.projectionPlan
+      delete close.suggestedActions
     }
     this.#broadcast(run, buffered)
     run.closed = true
@@ -932,6 +985,31 @@ export class RunManager {
     if (!store) {
       store = new RunArtifactStoreV2(projectDir, canvasBranch)
       this.#artifactStoresV2.set(key, store)
+    }
+    return store
+  }
+
+  #projectionPlansV2(projectDir: string, canvasBranch: string): ProjectionPlanStoreV2 {
+    const parsedBranch = parseCanvasBranch(canvasBranch)
+    const key = JSON.stringify([projectDir, parsedBranch])
+    let store = this.#projectionPlanStoresV2.get(key)
+    if (!store) {
+      const branchStorageId = canvasBranchStorageId(parsedBranch)
+      const filePath = path.join(
+        projectDir,
+        '.gg',
+        'runtime',
+        'projection-plans',
+        `${branchStorageId}.json`,
+      )
+      store = new ProjectionPlanStoreV2(filePath, {
+        validatePath: () => assertProjectionPlanStoreV2Path(
+          projectDir,
+          branchStorageId,
+          filePath,
+        ),
+      })
+      this.#projectionPlanStoresV2.set(key, store)
     }
     return store
   }
@@ -1090,7 +1168,22 @@ async function assertManagedPaths(
   canvasBranch: string,
   taskOwned = false,
 ): Promise<void> {
-  if (taskOwned) await assertTaskSessionStoreV2Path(scope.projectDir)
+  if (taskOwned) {
+    await assertTaskSessionStoreV2Path(scope.projectDir)
+    const branchStorageId = canvasBranchStorageId(parseCanvasBranch(canvasBranch))
+    const projectionPlanPath = path.join(
+      scope.projectDir,
+      '.gg',
+      'runtime',
+      'projection-plans',
+      `${branchStorageId}.json`,
+    )
+    await assertProjectionPlanStoreV2Path(
+      scope.projectDir,
+      branchStorageId,
+      projectionPlanPath,
+    )
+  }
   const artifactRoot = taskOwned
     ? new RunArtifactStoreV2(scope.projectDir, canvasBranch)
         .location(runId).projectRelativeFilesRoot
@@ -1188,6 +1281,56 @@ async function assertTaskSessionStoreV2Path(projectDir: string): Promise<void> {
     if (!info.isFile() || info.isSymbolicLink()) {
       throw new ProtocolError(
         'unsafe task sessions path: expected a regular file',
+        'unsafe_managed_path',
+        403,
+      )
+    }
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
+  }
+}
+
+async function assertProjectionPlanStoreV2Path(
+  projectDir: string,
+  branchStorageId: string,
+  expected: string,
+): Promise<void> {
+  if (!/^[0-9a-f]{64}$/u.test(branchStorageId)) {
+    throw new ProtocolError(
+      'unsafe projection plan path: branch storage id is invalid',
+      'unsafe_managed_path',
+      403,
+    )
+  }
+  const runtimeDir = path.join(projectDir, '.gg', 'runtime')
+  const plansDir = path.join(runtimeDir, 'projection-plans')
+  const lexicalExpected = path.join(plansDir, `${branchStorageId}.json`)
+  const [canonicalProject, canonicalRuntime, canonicalPlans, canonicalExpected] =
+    await Promise.all([
+      canonicalizePotentialPath(projectDir),
+      canonicalizePotentialPath(runtimeDir),
+      canonicalizePotentialPath(plansDir),
+      canonicalizePotentialPath(expected),
+    ])
+  if (
+    expected !== lexicalExpected
+    || canonicalProject !== projectDir
+    || canonicalRuntime !== runtimeDir
+    || canonicalPlans !== plansDir
+    || canonicalExpected !== expected
+    || !isPathWithin(path.join(projectDir, '.gg'), expected)
+  ) {
+    throw new ProtocolError(
+      'unsafe projection plan path: path resolves through a symlink',
+      'unsafe_managed_path',
+      403,
+    )
+  }
+  try {
+    const info = await lstat(expected)
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw new ProtocolError(
+        'unsafe projection plan path: expected a regular file',
         'unsafe_managed_path',
         403,
       )

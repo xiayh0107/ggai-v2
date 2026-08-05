@@ -1,5 +1,14 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -7,6 +16,7 @@ import type { CanvasDocumentV2 } from '../../src/canvas-v2/model.js'
 import { ProtocolError } from '../protocol.js'
 import type { AgentRegistry } from '../registry.js'
 import { RunManager } from '../runs.js'
+import { RunArtifactStoreV2 } from '../runArtifactStorageV2.js'
 import type { ResolvedTaskRunRequestV2 } from '../taskRunTypesV2.js'
 import type {
   AgentProcessTransport,
@@ -109,7 +119,11 @@ test('Task-owned runs pin persisted context and resume by branch + task + agent'
       return false
     },
   }
-  const manager = new RunManager({ projectRoot: root, registry: registry(transport) })
+  const manager = new RunManager({
+    projectRoot: root,
+    registry: registry(transport),
+    watchArtifacts: async () => ({ close: async () => undefined }),
+  })
 
   try {
     const canvasDocument = document()
@@ -193,12 +207,162 @@ test('one Task is single-flight while different Tasks may run concurrently', asy
   }
 })
 
+test('successful Task runs persist a trusted plan from the V2 sidecar and verified manifest', async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'ggai-task-runs-v2-plan-'))
+  const root = await realpath(temporaryRoot)
+  const artifactLocation = await new RunArtifactStoreV2(root, 'main')
+    .prepareRun('task-run-plan')
+  await writeFile(path.join(artifactLocation.absoluteFilesRoot, 'plot.R'), 'plot(1:3)\n', 'utf8')
+  await writeFile(
+    path.join(artifactLocation.absoluteFilesRoot, 'preview.png'),
+    'verified png bytes\n',
+    'utf8',
+  )
+  const controlDir = path.join(artifactLocation.absoluteFilesRoot, '.ggai')
+  await mkdir(controlDir, { recursive: true })
+  await writeFile(path.join(controlDir, 'run-result.json'), `${JSON.stringify({
+    schemaVersion: 2,
+    suggestedActions: [{
+      id: 'explain',
+      label: 'Explain',
+      prompt: 'Explain the generated plot.',
+    }],
+    outputs: [
+      {
+        key: 'source',
+        path: 'plot.R',
+        pluginId: 'code',
+        role: 'primary',
+        title: 'Plot source',
+      },
+      {
+        key: 'preview',
+        path: 'preview.png',
+        pluginId: 'image',
+        role: 'primary',
+        derivedFrom: ['source'],
+      },
+    ],
+    taskProposals: [{
+      key: 'annotate',
+      title: 'Annotate preview',
+      prompt: 'Add labels to the important points.',
+      inputOutputKeys: ['preview'],
+    }],
+  })}\n`, 'utf8')
+  const transport: AgentProcessTransport = {
+    kind: 'codex',
+    async run(options: TransportRunOptions): Promise<TransportRunResult> {
+      options.onEvent({ type: 'done', stopReason: 'end_turn' })
+      return { sessionId: null }
+    },
+    async cancel() {
+      return false
+    },
+  }
+  const manager = new RunManager({
+    projectRoot: root,
+    registry: registry(transport),
+    watchArtifacts: async () => ({ close: async () => undefined }),
+  })
+  const reopened = new RunManager({ projectRoot: root, registry: registry(transport) })
+
+  try {
+    const run = await manager.create(request('task-run-plan'))
+    await waitFor(() => manager.get(run.runId)?.status === 'done')
+    let payload: {
+      runId: string
+      outcome?: unknown
+      suggestedActions?: Array<{ id: string; label: string; prompt: string }>
+      artifactManifest?: { entries: Array<{ relativePath: string }> }
+      projectionPlan?: {
+        planId: string
+        runId: string
+        taskId: string
+        status: string
+        outputs: Array<{
+          key: string
+          pluginId: string
+          derivedFrom: string[]
+          artifactRefs: Array<{ runId: string; artifactId: string }>
+        }>
+        taskProposals: Array<{ key: string; dependsOn: string[] }>
+      }
+    } | undefined
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const page = await manager.readRunLog(run.runId)
+      payload = page?.entries.find((entry) => entry.event === 'close')?.data as
+        typeof payload
+      if (payload) break
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    assert.ok(payload)
+    assert.equal(payload.outcome, undefined)
+    assert.deepEqual(payload.suggestedActions, [{
+      id: 'explain',
+      label: 'Explain',
+      prompt: 'Explain the generated plot.',
+    }])
+    assert.deepEqual(payload.artifactManifest?.entries.map((entry) => entry.relativePath), [
+      'plot.R',
+      'preview.png',
+    ])
+    assert.equal(payload.projectionPlan?.runId, run.runId)
+    assert.equal(payload.projectionPlan?.taskId, 'task-a')
+    assert.equal(payload.projectionPlan?.status, 'complete')
+    assert.deepEqual(payload.projectionPlan?.outputs.map((output) => ({
+      key: output.key,
+      pluginId: output.pluginId,
+      derivedFrom: output.derivedFrom,
+    })), [
+      { key: 'source', pluginId: 'code', derivedFrom: [] },
+      { key: 'preview', pluginId: 'image', derivedFrom: ['source'] },
+    ])
+    assert.deepEqual(payload.projectionPlan?.taskProposals, [{
+      key: 'annotate',
+      title: 'Annotate preview',
+      prompt: 'Add labels to the important points.',
+      inputOutputKeys: ['preview'],
+      dependsOn: [],
+    }])
+
+    const planId = payload.projectionPlan?.planId
+    assert.ok(planId)
+    assert.deepEqual(await reopened.getPendingProjectionPlan(planId), {
+      plan: payload.projectionPlan,
+      suggestedActions: payload.suggestedActions,
+    })
+    assert.equal(await reopened.getPendingProjectionPlan(planId, '.', 'other'), null)
+  } finally {
+    await Promise.all([manager.close(), reopened.close()])
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('failed Task runs durably close and retain verified partial artifacts', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-task-runs-v2-partial-'))
   const transport: AgentProcessTransport = {
     kind: 'codex',
     async run(options: TransportRunOptions): Promise<TransportRunResult> {
       await writeFile(path.join(options.artifactDir, 'partial.R'), 'plot(1:3)\n', 'utf8')
+      const controlDir = path.join(options.artifactDir, '.ggai')
+      await mkdir(controlDir, { recursive: true })
+      await writeFile(path.join(controlDir, 'run-result.json'), `${JSON.stringify({
+        schemaVersion: 2,
+        suggestedActions: [{ id: 'unsafe', label: 'Unsafe', prompt: 'Must be discarded.' }],
+        outputs: [{
+          key: 'agent-declared',
+          path: 'partial.R',
+          pluginId: 'code',
+          role: 'primary',
+        }],
+        taskProposals: [{
+          key: 'must-not-survive',
+          title: 'Must not survive',
+          prompt: 'This proposal came from a failed run.',
+          inputOutputKeys: ['agent-declared'],
+        }],
+      })}\n`, 'utf8')
       throw new Error('synthetic task failure')
     },
     async cancel() {
@@ -217,6 +381,13 @@ test('failed Task runs durably close and retain verified partial artifacts', asy
         complete: boolean
         entries: Array<{ artifactId: string; relativePath: string; mediaType: string }>
       }
+      outcome?: unknown
+      suggestedActions?: unknown[]
+      projectionPlan?: {
+        status: string
+        outputs: Array<{ key: string; pluginId: string }>
+        taskProposals: unknown[]
+      }
     } | undefined
     for (let attempt = 0; attempt < 200; attempt += 1) {
       const page = await manager.readRunLog(run.runId)
@@ -232,6 +403,12 @@ test('failed Task runs durably close and retain verified partial artifacts', asy
       mediaType: entry.mediaType,
     })), [{ relativePath: 'partial.R', mediaType: 'text/x-r' }])
     assert.match(close.artifacts[0] ?? '', /\/task-run-partial\/files\/partial\.R$/u)
+    assert.equal(close.outcome, undefined)
+    assert.equal(close.projectionPlan?.status, 'partial')
+    assert.deepEqual(close.suggestedActions, [])
+    assert.deepEqual(close.projectionPlan?.taskProposals, [])
+    assert.equal(close.projectionPlan?.outputs[0]?.pluginId, 'code')
+    assert.match(close.projectionPlan?.outputs[0]?.key ?? '', /^artifact-/u)
     const artifactId = close.artifactManifest?.entries[0]?.artifactId
     assert.ok(artifactId)
     const lookup = await manager.lookupRunArtifact(run.runId, artifactId)
@@ -239,6 +416,38 @@ test('failed Task runs durably close and retain verified partial artifacts', asy
   } finally {
     await manager.close()
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('Task runs reject a symlinked branch-local pending-plan directory', async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'ggai-task-runs-v2-plan-path-'))
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'ggai-task-runs-v2-plan-outside-'))
+  const root = await realpath(temporaryRoot)
+  const transport: AgentProcessTransport = {
+    kind: 'codex',
+    async run(): Promise<TransportRunResult> {
+      throw new Error('transport must not start for an unsafe plan path')
+    },
+    async cancel() {
+      return false
+    },
+  }
+  await mkdir(path.join(root, '.gg', 'runtime'), { recursive: true })
+  await symlink(outside, path.join(root, '.gg', 'runtime', 'projection-plans'), 'dir')
+  const manager = new RunManager({ projectRoot: root, registry: registry(transport) })
+
+  try {
+    await assert.rejects(
+      manager.create(request('task-run-unsafe-plan-path')),
+      (error: unknown) => error instanceof ProtocolError && error.code === 'unsafe_managed_path',
+    )
+    assert.deepEqual(await readdir(outside), [])
+  } finally {
+    await manager.close()
+    await Promise.all([
+      rm(root, { recursive: true, force: true }),
+      rm(outside, { recursive: true, force: true }),
+    ])
   }
 })
 

@@ -1,7 +1,15 @@
 import type { AgentTransport } from './runtime'
 import type { CanvasNode, Edge } from '@/types/canvas'
 import type { AgentSession, CanvasAgentEvent } from './types'
-import { inspectRunOutcome, type RunOutcome } from './outcome'
+import {
+  inspectRunOutcome,
+  MAX_SUGGESTED_ACTION_ID_LENGTH,
+  MAX_SUGGESTED_ACTION_LABEL_LENGTH,
+  MAX_SUGGESTED_ACTION_PROMPT_LENGTH,
+  MAX_SUGGESTED_ACTIONS,
+  type RunOutcome,
+  type SuggestedAction,
+} from './outcome'
 import type { GenerationPanelState } from './generationProgress'
 import { consumeSse } from './sse'
 import {
@@ -229,6 +237,8 @@ export interface DaemonCloseEvent {
   artifactsComplete: boolean
   artifactManifest?: DaemonArtifactManifestV1
   outcome?: RunOutcome
+  projectionPlan?: DaemonProjectionPlanV2
+  suggestedActions?: SuggestedAction[]
 }
 
 export interface DaemonArtifactManifestEntryV1 {
@@ -244,6 +254,52 @@ export interface DaemonArtifactManifestV1 {
   runId: string
   complete: boolean
   entries: DaemonArtifactManifestEntryV1[]
+}
+
+export interface DaemonProjectionArtifactRefV2 {
+  runId: string
+  artifactId: string
+}
+
+export interface DaemonProjectionOutputV2 {
+  key: string
+  pluginId: string
+  role: 'primary' | 'supporting' | 'auxiliary'
+  title: string
+  artifactRefs: DaemonProjectionArtifactRefV2[]
+  derivedFrom: string[]
+  materialize: boolean
+}
+
+export interface DaemonProjectionTaskProposalV2 {
+  key: string
+  title: string
+  prompt: string
+  inputOutputKeys: string[]
+  dependsOn: string[]
+}
+
+export interface DaemonProjectionPlanV2 {
+  schemaVersion: 2
+  planId: string
+  runId: string
+  taskId: string
+  status: 'complete' | 'partial'
+  manifestDigest: string
+  outputs: DaemonProjectionOutputV2[]
+  taskProposals: DaemonProjectionTaskProposalV2[]
+  warnings: string[]
+  digest: string
+}
+
+export interface DaemonProjectionPlanQuery {
+  projectDir?: string
+  branch?: string
+}
+
+export interface DaemonPendingProjectionV2 {
+  plan: DaemonProjectionPlanV2
+  suggestedActions: SuggestedAction[]
 }
 
 export interface DaemonRunStreamOptions {
@@ -443,6 +499,11 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === 'string')
 }
 
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).length === keys.length
+    && keys.every((key) => hasOwn(value, key))
+}
+
 function decodeRunOutcome(value: unknown, context: string): RunOutcome | undefined {
   const inspection = inspectRunOutcome(value)
   // A future semantic-result schema must not make an otherwise valid terminal
@@ -450,6 +511,276 @@ function decodeRunOutcome(value: unknown, context: string): RunOutcome | undefin
   if (inspection.status === 'unsupported') return undefined
   if (inspection.status === 'valid') return inspection.outcome
   throw new DaemonProtocolError(`${context} was not a valid RunOutcome`)
+}
+
+function decodeSuggestedActionsV2(value: unknown): SuggestedAction[] {
+  if (!Array.isArray(value) || value.length > MAX_SUGGESTED_ACTIONS) {
+    throw new DaemonProtocolError('ProjectionPlan V2 suggestedActions were malformed')
+  }
+  const ids = new Set<string>()
+  const contents = new Set<string>()
+  return value.map((candidate) => {
+    if (!isRecord(candidate)
+      || !hasExactKeys(candidate, ['id', 'label', 'prompt'])
+      || !isStableProjectionKey(candidate.id)
+      || candidate.id.length > MAX_SUGGESTED_ACTION_ID_LENGTH
+      || !isDisplayString(candidate.label, MAX_SUGGESTED_ACTION_LABEL_LENGTH)
+      || !isDisplayString(candidate.prompt, MAX_SUGGESTED_ACTION_PROMPT_LENGTH)) {
+      throw new DaemonProtocolError('ProjectionPlan V2 suggestedActions were malformed')
+    }
+    const contentKey = JSON.stringify([candidate.label, candidate.prompt])
+    if (ids.has(candidate.id) || contents.has(contentKey)) {
+      throw new DaemonProtocolError('ProjectionPlan V2 suggestedActions were duplicated')
+    }
+    ids.add(candidate.id)
+    contents.add(contentKey)
+    return { id: candidate.id, label: candidate.label, prompt: candidate.prompt }
+  })
+}
+
+export function decodePendingProjectionV2(value: unknown): DaemonPendingProjectionV2 {
+  if (!isRecord(value) || !hasExactKeys(value, ['plan', 'suggestedActions'])) {
+    throw new DaemonProtocolError('Pending ProjectionPlan V2 response was malformed')
+  }
+  const plan = decodeProjectionPlanV2(value.plan)
+  const suggestedActions = decodeSuggestedActionsV2(value.suggestedActions)
+  if (plan.status === 'partial' && suggestedActions.length > 0) {
+    throw new DaemonProtocolError('Partial ProjectionPlan V2 retained suggestedActions')
+  }
+  return { plan, suggestedActions }
+}
+
+export function decodeProjectionPlanV2(
+  value: unknown,
+  expectedRunId?: string,
+): DaemonProjectionPlanV2 {
+  const rootKeys = [
+    'schemaVersion',
+    'planId',
+    'runId',
+    'taskId',
+    'status',
+    'manifestDigest',
+    'outputs',
+    'taskProposals',
+    'warnings',
+    'digest',
+  ] as const
+  if (!isRecord(value)
+    || !hasExactKeys(value, rootKeys)
+    || value.schemaVersion !== 2
+    || !isProjectionPlanId(value.planId)
+    || !isDaemonIdentifier(value.runId)
+    || !isDaemonIdentifier(value.taskId)
+    || (value.status !== 'complete' && value.status !== 'partial')
+    || !isSha256(value.manifestDigest)
+    || !isSha256(value.digest)
+    || !Array.isArray(value.outputs)
+    || value.outputs.length > 32
+    || !Array.isArray(value.taskProposals)
+    || value.taskProposals.length > 12
+    || !Array.isArray(value.warnings)
+    || value.warnings.length > 1_000) {
+    throw new DaemonProtocolError('ProjectionPlan V2 was malformed')
+  }
+  if (expectedRunId !== undefined && value.runId !== expectedRunId) {
+    throw new DaemonProtocolError('ProjectionPlan V2 belonged to a different run')
+  }
+
+  const outputs = value.outputs.map((candidate, index) =>
+    decodeProjectionOutputV2(candidate, value.runId as string, index))
+  const outputKeys = new Set(outputs.map((output) => output.key))
+  if (outputKeys.size !== outputs.length
+    || outputs.some((output) => output.derivedFrom.some((key) => !outputKeys.has(key)))
+    || hasKeyDependencyCycle(outputs.map((output) => ({
+      key: output.key,
+      dependencies: output.derivedFrom,
+    })))) {
+    throw new DaemonProtocolError('ProjectionPlan V2 had invalid output relations')
+  }
+  const materialized = new Set([
+    ...outputs.filter((output) => output.role === 'primary'),
+    ...outputs.filter((output) => output.role === 'supporting'),
+  ].slice(0, 12).map((output) => output.key))
+  if (outputs.some((output) => output.materialize !== materialized.has(output.key))) {
+    throw new DaemonProtocolError('ProjectionPlan V2 had a non-canonical materialization policy')
+  }
+
+  const taskProposals = value.taskProposals.map((candidate, index) =>
+    decodeProjectionTaskProposalV2(candidate, index))
+  const proposalKeys = new Set(taskProposals.map((proposal) => proposal.key))
+  if (proposalKeys.size !== taskProposals.length
+    || taskProposals.some((proposal) =>
+      proposal.inputOutputKeys.some((key) => !outputKeys.has(key))
+      || proposal.dependsOn.some((key) => !proposalKeys.has(key)))
+    || hasKeyDependencyCycle(taskProposals.map((proposal) => ({
+      key: proposal.key,
+      dependencies: proposal.dependsOn,
+    })))) {
+    throw new DaemonProtocolError('ProjectionPlan V2 had invalid task proposal relations')
+  }
+  if (value.status === 'partial' && taskProposals.length > 0) {
+    throw new DaemonProtocolError('Partial ProjectionPlan V2 retained task proposals')
+  }
+  if (!value.warnings.every((warning) => isDisplayString(warning, 1_000))) {
+    throw new DaemonProtocolError('ProjectionPlan V2 had invalid warnings')
+  }
+
+  return {
+    schemaVersion: 2,
+    planId: value.planId,
+    runId: value.runId,
+    taskId: value.taskId,
+    status: value.status,
+    manifestDigest: value.manifestDigest,
+    outputs,
+    taskProposals,
+    warnings: [...value.warnings] as string[],
+    digest: value.digest,
+  }
+}
+
+function decodeProjectionOutputV2(
+  value: unknown,
+  expectedRunId: string,
+  index: number,
+): DaemonProjectionOutputV2 {
+  if (!isRecord(value)
+    || !hasExactKeys(value, [
+      'key',
+      'pluginId',
+      'role',
+      'title',
+      'artifactRefs',
+      'derivedFrom',
+      'materialize',
+    ])
+    || !isStableProjectionKey(value.key)
+    || !isProjectionPluginId(value.pluginId)
+    || (value.role !== 'primary' && value.role !== 'supporting' && value.role !== 'auxiliary')
+    || !isDisplayString(value.title, 240)
+    || !Array.isArray(value.artifactRefs)
+    || value.artifactRefs.length === 0
+    || value.artifactRefs.length > 8
+    || !Array.isArray(value.derivedFrom)
+    || value.derivedFrom.length > 8
+    || !value.derivedFrom.every(isStableProjectionKey)
+    || new Set(value.derivedFrom).size !== value.derivedFrom.length
+    || typeof value.materialize !== 'boolean') {
+    throw new DaemonProtocolError(`ProjectionPlan V2 output ${index} was malformed`)
+  }
+  const artifactRefs = value.artifactRefs.map((candidate, artifactIndex) => {
+    if (!isRecord(candidate)
+      || !hasExactKeys(candidate, ['runId', 'artifactId'])
+      || candidate.runId !== expectedRunId
+      || !/^artifact_[0-9a-f]{64}$/u.test(candidate.artifactId as string)) {
+      throw new DaemonProtocolError(
+        `ProjectionPlan V2 output ${index} artifact ${artifactIndex} was malformed`,
+      )
+    }
+    return {
+      runId: candidate.runId as string,
+      artifactId: candidate.artifactId as string,
+    }
+  })
+  if (new Set(artifactRefs.map((artifact) => artifact.artifactId)).size !== artifactRefs.length) {
+    throw new DaemonProtocolError(`ProjectionPlan V2 output ${index} duplicated an artifact`)
+  }
+  return {
+    key: value.key,
+    pluginId: value.pluginId,
+    role: value.role,
+    title: value.title,
+    artifactRefs,
+    derivedFrom: [...value.derivedFrom] as string[],
+    materialize: value.materialize,
+  }
+}
+
+function decodeProjectionTaskProposalV2(
+  value: unknown,
+  index: number,
+): DaemonProjectionTaskProposalV2 {
+  if (!isRecord(value)
+    || !hasExactKeys(value, ['key', 'title', 'prompt', 'inputOutputKeys', 'dependsOn'])
+    || !isStableProjectionKey(value.key)
+    || !isDisplayString(value.title, 240)
+    || !isDisplayString(value.prompt, 10_000)
+    || !Array.isArray(value.inputOutputKeys)
+    || value.inputOutputKeys.length > 32
+    || !value.inputOutputKeys.every(isStableProjectionKey)
+    || new Set(value.inputOutputKeys).size !== value.inputOutputKeys.length
+    || !Array.isArray(value.dependsOn)
+    || value.dependsOn.length > 8
+    || !value.dependsOn.every(isStableProjectionKey)
+    || new Set(value.dependsOn).size !== value.dependsOn.length) {
+    throw new DaemonProtocolError(`ProjectionPlan V2 task proposal ${index} was malformed`)
+  }
+  return {
+    key: value.key,
+    title: value.title,
+    prompt: value.prompt,
+    inputOutputKeys: [...value.inputOutputKeys] as string[],
+    dependsOn: [...value.dependsOn] as string[],
+  }
+}
+
+function hasKeyDependencyCycle(
+  entries: readonly { key: string; dependencies: readonly string[] }[],
+): boolean {
+  const dependencies = new Map(entries.map((entry) => [entry.key, entry.dependencies]))
+  const visiting = new Set<string>()
+  const visited = new Set<string>()
+  const visit = (key: string): boolean => {
+    if (visiting.has(key)) return true
+    if (visited.has(key)) return false
+    visiting.add(key)
+    for (const dependency of dependencies.get(key) ?? []) if (visit(dependency)) return true
+    visiting.delete(key)
+    visited.add(key)
+    return false
+  }
+  return entries.some((entry) => visit(entry.key))
+}
+
+function isProjectionPlanId(value: unknown): value is string {
+  return typeof value === 'string' && /^plan_[0-9a-f]{64}$/u.test(value)
+}
+
+function isSha256(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value)
+}
+
+function isDaemonIdentifier(value: unknown): value is string {
+  return typeof value === 'string'
+    && /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,159}$/u.test(value)
+    && !value.includes('..')
+}
+
+function isStableProjectionKey(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length <= 80
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value)
+}
+
+function isProjectionPluginId(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length <= 160
+    && /^@?[A-Za-z0-9][A-Za-z0-9._:@/-]*$/u.test(value)
+    && !value.includes('..')
+    && !value.includes('//')
+}
+
+function isDisplayString(value: unknown, maxLength: number): value is string {
+  if (typeof value !== 'string'
+    || value.length === 0
+    || value.length > maxLength
+    || value !== value.trim()) return false
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code <= 0x1f || code === 0x7f) return false
+  }
+  return true
 }
 
 function isSuggestedActionsCache(value: unknown): boolean {
@@ -823,6 +1154,18 @@ function decodeCloseEvent(value: unknown, expectedRunId: string): DaemonCloseEve
   const artifactManifest = value.artifactManifest === undefined
     ? undefined
     : decodeArtifactManifestV1(value.artifactManifest, expectedRunId)
+  const projectionPlan = value.projectionPlan === undefined
+    ? undefined
+    : decodeProjectionPlanV2(value.projectionPlan, expectedRunId)
+  const suggestedActions = projectionPlan
+    ? decodeSuggestedActionsV2(value.suggestedActions)
+    : undefined
+  if (!projectionPlan && value.suggestedActions !== undefined) {
+    throw new DaemonProtocolError('SSE close event exposed actions without a projection plan')
+  }
+  if (projectionPlan?.status === 'partial' && suggestedActions?.length) {
+    throw new DaemonProtocolError('Partial ProjectionPlan V2 retained suggestedActions')
+  }
   return {
     runId: value.runId,
     status: value.status,
@@ -831,6 +1174,8 @@ function decodeCloseEvent(value: unknown, expectedRunId: string): DaemonCloseEve
     artifactsComplete: value.artifactsComplete,
     ...(artifactManifest ? { artifactManifest } : {}),
     ...(outcome ? { outcome } : {}),
+    ...(projectionPlan ? { projectionPlan } : {}),
+    ...(suggestedActions ? { suggestedActions } : {}),
   }
 }
 
@@ -1070,6 +1415,22 @@ export class DaemonClient implements AgentTransport {
     } catch (error) {
       throw new DaemonProtocolError('Text artifact was not valid UTF-8', { cause: error })
     }
+  }
+
+  /** Read a daemon-authored plan only while it remains pending on this branch. */
+  async getPendingProjectionPlan(
+    planId: string,
+    query: DaemonProjectionPlanQuery = {},
+    signal?: AbortSignal,
+  ): Promise<DaemonPendingProjectionV2> {
+    if (!isProjectionPlanId(planId)) throw new DaemonClientError('planId is invalid')
+    const url = new URL(this.endpoint(`/projection-plans/${encodeURIComponent(planId)}`))
+    if (query.projectDir !== undefined) url.searchParams.set('projectDir', query.projectDir)
+    if (query.branch !== undefined) url.searchParams.set('branch', query.branch)
+    const response = await this.requestUrl(url, { method: 'GET' }, signal)
+    return decodePendingProjectionV2(
+      await this.readJson(response, 'GET /projection-plans/:id response'),
+    )
   }
 
   /** GET /sessions?nodeId=... */
@@ -1828,6 +2189,8 @@ export class DaemonClient implements AgentTransport {
     artifacts: string[]
     artifactsComplete: boolean
     outcome?: RunOutcome
+    projectionPlan?: DaemonProjectionPlanV2
+    suggestedActions?: SuggestedAction[]
   }> {
     const created = await this.startRun(options)
     const result = await this.attachRun(created.runId, {
@@ -1859,6 +2222,10 @@ export class DaemonClient implements AgentTransport {
       artifacts: result.close.artifacts,
       artifactsComplete: result.close.artifactsComplete,
       ...(result.close.outcome ? { outcome: result.close.outcome } : {}),
+      ...(result.close.projectionPlan ? { projectionPlan: result.close.projectionPlan } : {}),
+      ...(result.close.suggestedActions
+        ? { suggestedActions: result.close.suggestedActions }
+        : {}),
     }
   }
 

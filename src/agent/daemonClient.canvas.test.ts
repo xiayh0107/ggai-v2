@@ -36,6 +36,29 @@ function envelope(revision = 0, mutationId: string | null = null) {
   }
 }
 
+function projectionPlan(runId = 'run-projection') {
+  return {
+    schemaVersion: 2,
+    planId: `plan_${'a'.repeat(64)}`,
+    runId,
+    taskId: 'task-projection',
+    status: 'complete',
+    manifestDigest: 'b'.repeat(64),
+    outputs: [{
+      key: 'preview',
+      pluginId: 'image',
+      role: 'primary',
+      title: 'Preview',
+      artifactRefs: [{ runId, artifactId: `artifact_${'c'.repeat(64)}` }],
+      derivedFrom: [],
+      materialize: true,
+    }],
+    taskProposals: [],
+    warnings: [],
+    digest: 'd'.repeat(64),
+  } as const
+}
+
 describe('DaemonClient canvas persistence', () => {
   it('decodes both legacy close events and optional structured outcomes', () => {
     const legacy = decodeDaemonRunLogEntry({
@@ -103,6 +126,63 @@ describe('DaemonClient canvas persistence', () => {
         },
       },
     }, 'run-bad-outcome')).toThrow(DaemonProtocolError)
+  })
+
+  it('strictly decodes trusted projection settlements from close and pending-plan GET', async () => {
+    const plan = projectionPlan()
+    const suggestedActions = [{
+      id: 'refine',
+      label: 'Refine',
+      prompt: 'Refine the generated preview.',
+    }]
+    const decoded = decodeDaemonRunLogEntry({
+      id: 3,
+      recordedAt: 3,
+      event: 'close',
+      data: {
+        runId: plan.runId,
+        status: 'done',
+        sessionId: null,
+        artifacts: [],
+        artifactsComplete: true,
+        projectionPlan: plan,
+        suggestedActions,
+      },
+    }, plan.runId)
+    expect(decoded).toMatchObject({
+      event: 'close',
+      data: { projectionPlan: { planId: plan.planId }, suggestedActions },
+    })
+
+    expect(() => decodeDaemonRunLogEntry({
+      id: 4,
+      recordedAt: 4,
+      event: 'close',
+      data: {
+        runId: plan.runId,
+        status: 'done',
+        sessionId: null,
+        artifacts: [],
+        artifactsComplete: true,
+        projectionPlan: { ...plan, x: 20 },
+        suggestedActions,
+      },
+    }, plan.runId)).toThrow(DaemonProtocolError)
+
+    let requestedInput: RequestInfo | URL | undefined
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      requestedInput = input
+      return response({ plan, suggestedActions })
+    })
+    const client = new DaemonClient({ baseUrl: 'http://127.0.0.1:7380', fetch: fetchMock })
+    await expect(client.getPendingProjectionPlan(plan.planId, {
+      projectDir: 'project-a',
+      branch: 'experiment-a',
+    })).resolves.toEqual({ plan, suggestedActions })
+    const requested = new URL(String(requestedInput))
+    expect(requested.pathname).toBe(`/projection-plans/${plan.planId}`)
+    expect(requested.searchParams.get('projectDir')).toBe('project-a')
+    expect(requested.searchParams.get('branch')).toBe('experiment-a')
   })
 
   it('decodes exact run-owned artifact manifests and reads artifacts by identity', async () => {

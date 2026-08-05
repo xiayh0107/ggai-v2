@@ -1,7 +1,12 @@
 import type { CanvasAgentEvent } from '../src/agent/types.js'
-import { inspectRunOutcome, type RunOutcome } from '../src/agent/outcome.js'
+import {
+  inspectRunOutcome,
+  type RunOutcome,
+  type SuggestedAction,
+} from '../src/agent/outcome.js'
 import type { CanvasNode, Edge } from '../src/types/canvas.js'
 import type { ArtifactManifestV1 } from './artifactManifestV2.js'
+import type { ProjectionPlanV2 } from './projectionPlanV2.js'
 
 export type AgentTransportKind = 'acpx' | 'codex'
 
@@ -154,6 +159,10 @@ export interface RunClosePayload {
   artifactManifest?: ArtifactManifestV1
   /** Optional, bounded semantic result authored by the Agent for a successful run. */
   outcome?: RunOutcome
+  /** Daemon-authored and durably pending plan for a Task-owned V2 run. */
+  projectionPlan?: ProjectionPlanV2
+  /** Trusted successful-run actions persisted beside projectionPlan; partial plans use []. */
+  suggestedActions?: SuggestedAction[]
 }
 
 export type RunStreamMessage =

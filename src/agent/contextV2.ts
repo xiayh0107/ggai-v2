@@ -10,6 +10,14 @@ import {
   type CanvasNodeV2,
   type CanvasTaskV2,
 } from '../canvas-v2/model.js'
+import {
+  MAX_RUN_OUTPUT_HINTS_V2,
+  MAX_RUN_OUTPUT_PARENTS_V2,
+  MAX_RUN_TASK_PROPOSAL_DEPENDENCIES_V2,
+  MAX_RUN_TASK_PROPOSAL_INPUTS_V2,
+  MAX_RUN_TASK_PROPOSALS_V2,
+} from './outcomeV2.js'
+import { MAX_SUGGESTED_ACTIONS } from './outcome.js'
 
 type ContextBearingEdgeV2 = CanvasEdgeV2 & {
   contextRole: Exclude<CanvasEdgeContextRoleV2, 'none'>
@@ -182,6 +190,37 @@ export function renderTaskContextPromptV2(pack: TaskContextPackV2): string {
     relatedGraph: pack.graph,
     truncated: pack.truncated,
   }
+  const outcomeExample = {
+    schemaVersion: 2,
+    suggestedActions: [{
+      id: 'refine-result',
+      label: 'Refine result',
+      prompt: 'Refine the generated result while preserving its key findings.',
+    }],
+    outputs: [
+      {
+        key: 'source',
+        path: 'analysis.R',
+        pluginId: 'code',
+        role: 'primary',
+        title: 'Analysis source',
+      },
+      {
+        key: 'preview',
+        path: 'preview.png',
+        pluginId: 'image',
+        role: 'supporting',
+        title: 'Rendered preview',
+        derivedFrom: ['source'],
+      },
+    ],
+    taskProposals: [{
+      key: 'annotate',
+      title: 'Annotate the preview',
+      prompt: 'Add concise labels to the important points.',
+      inputOutputKeys: ['preview'],
+    }],
+  }
   return [
     '# Canvas Task V2',
     '',
@@ -190,11 +229,23 @@ export function renderTaskContextPromptV2(pack: TaskContextPackV2): string {
     '## Output contract',
     `- Write every deliverable file under the run files directory: ${JSON.stringify(pack.outputContract.runFilesDirectory)}.`,
     `- Submit the RunOutcomeV2 JSON sidecar at: ${JSON.stringify(pack.outputContract.runOutcomeSidecarPath)}.`,
-    '- The RunOutcomeV2 sidecar may contain only schemaVersion, suggestedActions, outputs, and taskProposals.',
-    '- Output entries may declare only a stable key, files-relative path, pluginId, role, optional title, and same-run derivedFrom keys.',
-    '- Task proposals may declare only a stable key, title, prompt, inputOutputKeys, and dependsOn keys.',
+    '- The sidecar is optional metadata: if it is missing or invalid, the run may still succeed and the daemon will project only verified artifact files.',
+    `- Use 0–${MAX_SUGGESTED_ACTIONS} suggestedActions, at most ${MAX_RUN_OUTPUT_HINTS_V2} outputs, and at most ${MAX_RUN_TASK_PROPOSALS_V2} taskProposals.`,
+    '- The root object must contain exactly schemaVersion, suggestedActions, outputs, and taskProposals; use empty arrays when a section has no entries.',
+    '- Each suggested action must contain exactly id, label, and prompt.',
+    '- Each output must contain key, path, pluginId, and role; title and derivedFrom are optional, and no other fields are allowed.',
+    '- Output role must be one of primary, supporting, or auxiliary. Paths are relative to the run files directory.',
+    `- derivedFrom is optional and contains at most ${MAX_RUN_OUTPUT_PARENTS_V2} output keys from this same sidecar; the output graph must be acyclic.`,
+    '- Multiple output keys may intentionally reference the same artifact path when distinct plugin views are useful.',
+    '- Each task proposal must contain key, title, prompt, and inputOutputKeys; dependsOn is optional, and no other fields are allowed.',
+    `- inputOutputKeys contains at most ${MAX_RUN_TASK_PROPOSAL_INPUTS_V2} declared output keys. dependsOn contains at most ${MAX_RUN_TASK_PROPOSAL_DEPENDENCIES_V2} proposal keys and the proposal graph must be acyclic.`,
     '- Never declare or invent Canvas entity IDs, coordinates, payloads, arbitrary edges, Canvas commands, or automatic follow-up runs.',
     '- A task proposal is a draft suggestion only. Do not start it or request an auto-run.',
+    '',
+    'Exact RunOutcomeV2 example (omit only the explicitly optional entry fields):',
+    '```json',
+    JSON.stringify(outcomeExample, null, 2),
+    '```',
     '',
     '## Task and authorized context',
     '```json',
