@@ -1,11 +1,63 @@
+import { useMemo } from 'react'
 import { CanvasCtx, useCanvasStore } from '@/hooks/useCanvasStore'
 import TopBar from '@/components/canvas/TopBar'
 import LeftSidebar from '@/components/canvas/LeftSidebar'
 import CanvasStage from '@/components/canvas/CanvasStage'
 import CanvasVersionManager from '@/components/canvas/CanvasVersionManager'
+import {
+  CanvasModelGateV2,
+  type CanvasV2IncompatibilityReason,
+} from '@/canvas-v2/CanvasModelGateV2'
+import { CanvasV2DaemonClient } from '@/canvas-v2/daemonClient'
+import { CANVAS_V2_FRONTEND_ENABLED } from '@/canvas-v2/featureFlag'
+import { DAEMON_URL } from '@/agent/config'
+import CanvasV2Home from './CanvasV2Home'
 import { Loader2, RotateCcw } from 'lucide-react'
 
 export default function Home() {
+  const capabilityClient = useMemo(
+    () => new CanvasV2DaemonClient({ baseUrl: DAEMON_URL }),
+    [],
+  )
+  return (
+    <CanvasModelGateV2
+      frontendEnabled={CANVAS_V2_FRONTEND_ENABLED}
+      client={capabilityClient}
+      legacy={<CanvasV1Home />}
+      next={<CanvasV2Home />}
+      loading={<CanvasModelLoading />}
+      incompatible={(reason) => <CanvasModelIncompatible reason={reason} />}
+    />
+  )
+}
+
+function CanvasModelIncompatible({ reason }: { reason: CanvasV2IncompatibilityReason }) {
+  return (
+    <main className="flex h-screen w-screen items-center justify-center bg-gg-bg p-6 font-sans">
+      <div role="alert" className="flex max-w-md flex-col gap-2 rounded-[16px] border border-gg-line bg-gg-node p-6 text-center">
+        <h1 className="text-[15px] font-semibold text-gg-ink">Canvas V2 能力不匹配</h1>
+        <p className="text-[12px] leading-5 text-gg-muted">
+          {reason === 'unsupported'
+            ? '前端已显式启用 Canvas V2，但当前 daemon 未声明 canvasModelV2 能力。'
+            : '前端已显式启用 Canvas V2，但无法确认 daemon 的 canvasModelV2 能力。'}
+          为避免 V1/V2 schema 混写，画布已停止加载。
+        </p>
+      </div>
+    </main>
+  )
+}
+
+function CanvasModelLoading() {
+  return (
+    <main className="flex h-screen w-screen items-center justify-center bg-gg-bg font-sans">
+      <div className="flex items-center gap-2 text-[13px] text-gg-muted">
+        <Loader2 size={16} className="animate-spin" /> 正在确认画布能力…
+      </div>
+    </main>
+  )
+}
+
+export function CanvasV1Home() {
   const store = useCanvasStore()
   return (
     <CanvasCtx.Provider value={store}>

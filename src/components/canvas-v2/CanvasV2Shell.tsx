@@ -1,0 +1,72 @@
+import { Boxes, Loader2, RotateCcw } from 'lucide-react'
+import { useCanvasV2State, useCanvasV2Store } from '@/canvas-v2/hooks'
+
+export default function CanvasV2Shell() {
+  const store = useCanvasV2Store()
+  const state = useCanvasV2State()
+
+  if (state.hydration.status === 'idle' || state.hydration.status === 'loading') {
+    return (
+      <main className="flex h-screen w-screen items-center justify-center bg-gg-bg font-sans">
+        <div className="flex items-center gap-2 text-[13px] text-gg-muted">
+          <Loader2 size={16} className="animate-spin" /> 正在加载 Canvas V2…
+        </div>
+      </main>
+    )
+  }
+
+  if (state.hydration.status === 'error') {
+    return (
+      <main className="flex h-screen w-screen items-center justify-center bg-gg-bg p-6 font-sans">
+        <div className="flex max-w-sm flex-col items-center gap-3 rounded-[16px] border border-gg-line bg-gg-node p-6 text-center">
+          <h1 className="text-[15px] font-semibold text-gg-ink">Canvas V2 加载失败</h1>
+          <p className="text-[12px] leading-5 text-gg-muted">
+            {state.hydration.error ?? '无法读取 V2 画布数据'}
+          </p>
+          <button
+            type="button"
+            onClick={() => void store.reload()}
+            className="flex h-8 items-center gap-1.5 rounded-[10px] bg-gg-primary px-3 text-[13px] text-white transition-colors hover:bg-gg-select"
+          >
+            <RotateCcw size={14} /> 重试
+          </button>
+        </div>
+      </main>
+    )
+  }
+
+  return (
+    <main className="relative h-screen w-screen overflow-hidden bg-gg-bg font-sans text-gg-ink">
+      <header className="absolute inset-x-0 top-0 z-10 flex h-[52px] items-center justify-between border-b border-gg-line bg-gg-node/95 px-4">
+        <div className="flex items-center gap-2 text-[13px] font-semibold">
+          <Boxes size={16} className="text-gg-primary" /> Canvas V2
+          <span className="rounded-full bg-gg-subtle px-2 py-0.5 text-[10px] font-medium text-gg-muted">
+            基础数据层
+          </span>
+        </div>
+        <div className="flex items-center gap-3 text-[11px] text-gg-muted">
+          <span>{state.document.tasks.length} 个任务</span>
+          <span>{state.document.nodes.length} 个节点</span>
+          {state.commandSync.pendingCount > 0 && (
+            <span>待同步 {state.commandSync.pendingCount}</span>
+          )}
+        </div>
+      </header>
+      <section
+        aria-label="Canvas V2 workspace foundation"
+        className="absolute inset-0 flex items-center justify-center pt-[52px]"
+        style={{
+          backgroundImage: 'radial-gradient(circle, rgb(208 218 232 / 55%) 1px, transparent 1px)',
+          backgroundSize: '26px 26px',
+        }}
+      >
+        <div className="rounded-[16px] border border-dashed border-gg-line bg-gg-node/85 px-5 py-4 text-center shadow-sm">
+          <p className="text-[13px] font-medium">V2 数据管线已就绪</p>
+          <p className="mt-1 max-w-sm text-[11px] leading-5 text-gg-muted">
+            文档、分支视图状态与运行时投影已隔离。富任务卡片将在后续 UI 阶段接入。
+          </p>
+        </div>
+      </section>
+    </main>
+  )
+}
