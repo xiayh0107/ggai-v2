@@ -6,9 +6,11 @@ import {
   type CanvasEdgeV2,
   type CanvasEntityRef,
   type CanvasNodeV2,
-  type CanvasPointV2,
   type CanvasTaskV2,
 } from './model'
+import { taskOutputFrameV2 } from './layout'
+
+export { TASK_OUTPUT_LAYOUT_V2, taskOutputFrameV2 } from './layout'
 
 export interface CanvasBoundsV2 {
   x: number
@@ -16,16 +18,6 @@ export interface CanvasBoundsV2 {
   w: number
   h: number
 }
-
-export const TASK_OUTPUT_LAYOUT_V2 = Object.freeze({
-  columns: 2,
-  offsetX: 48,
-  offsetY: 96,
-  width: 400,
-  height: 256,
-  columnGap: 56,
-  rowGap: 48,
-})
 
 export type CanvasTaskRunPhaseV2 =
   | 'idle'
@@ -158,22 +150,6 @@ export interface CanvasCollectionMembersV2 {
 
 export interface CanvasCollectionAccessibilityV2 {
   label: string
-}
-
-export function taskOutputFrameV2(
-  anchor: CanvasPointV2,
-  index: number,
-): CanvasBoundsV2 {
-  const column = index % TASK_OUTPUT_LAYOUT_V2.columns
-  const row = Math.floor(index / TASK_OUTPUT_LAYOUT_V2.columns)
-  return {
-    x: anchor.x + TASK_OUTPUT_LAYOUT_V2.offsetX
-      + column * (TASK_OUTPUT_LAYOUT_V2.width + TASK_OUTPUT_LAYOUT_V2.columnGap),
-    y: anchor.y + TASK_OUTPUT_LAYOUT_V2.offsetY
-      + row * (TASK_OUTPUT_LAYOUT_V2.height + TASK_OUTPUT_LAYOUT_V2.rowGap),
-    w: TASK_OUTPUT_LAYOUT_V2.width,
-    h: TASK_OUTPUT_LAYOUT_V2.height,
-  }
 }
 
 export function layoutGhostOutputsV2(

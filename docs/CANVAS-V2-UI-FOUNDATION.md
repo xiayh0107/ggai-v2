@@ -1,8 +1,7 @@
 # Canvas V2 UI foundation
 
-This increment establishes a separate Canvas V2 frontend data path. It does not
-reuse or mutate the V1 React store and intentionally stops before implementing
-the full rich-task visual design.
+This document describes the isolated Canvas V2 frontend data path and its first
+interactive task-centric stage. V2 does not reuse or mutate the V1 React store.
 
 ## Entry gate
 
@@ -60,9 +59,50 @@ a command enqueued in the same event-loop window.
 state transition, satisfying React's cached snapshot requirement. Task hooks
 derive task views from the subscribed snapshot without persisting derived data.
 
-The current V2 shell is deliberately diagnostic: loading/error handling, model
-identity, entity counts, and an empty workspace foundation. It does not yet draw
-rich task containers or enable editing.
+The V2 shell mounts a real, task-centric stage. The smallest visible vocabulary
+is deliberately limited to Task, Node, Edge, and transient Ghost:
+
+- a task with no output is a task card;
+- a task with one output is a title strip plus its node;
+- a task with two or more outputs owns one frame around its child nodes;
+- a collapsed task is one summary card, while its internal nodes and internal
+  edges remain part of the authoritative document;
+- a running task may project non-persistent ghost output slots using the same
+  layout function as trusted materialization.
+
+Node bodies use the plugin registry for their identity and a conservative
+generic renderer for text, code, structured payloads, and visual artifacts.
+Artifact URLs are always run-owned (`runId` + `artifactId`); the UI does not
+reconstruct paths from agent log text.
+
+## Direct manipulation
+
+Camera movement, zoom, selection, collapse state, and drag previews remain
+branch-local view state. A gesture previews movement locally and emits exactly
+one durable command on pointer release:
+
+- dragging a Task emits one `MoveEntities` command for the Task; reducer
+  semantics move the Task and every node whose `homeTaskId` points to it;
+- dragging a Node emits one `MoveEntities` command for that Node;
+- resizing a Node emits one `ResizeNode` command;
+- panning and cursor-anchored zoom only update branch view state;
+- Shift-click toggles typed Task/Node selection, and Shift-drag on empty canvas
+  adds intersecting Tasks and Nodes through marquee selection.
+
+Task and Node are separate selection types even when a Node belongs to a Task.
+This preserves a minimal kernel: the Task is the run/prompt boundary and the
+Node is an editable result, without introducing an additional bundle entity.
+
+## Accessibility and motion
+
+Every interactive entity has a native button as its focus target. One entity is
+in the tab sequence at a time; arrow keys, Home, and End move the roving focus,
+while Enter and Space select the focused entity. Pointer selection explicitly
+focuses the same control, so rerenders and optimistic command acknowledgement do
+not strand keyboard users. Collapse controls expose `aria-expanded` and
+`aria-controls`, task containers expose group labels, and runtime changes are
+coalesced through a throttled live region. Spinners, shimmer descendants, and
+transitions provide reduced-motion variants.
 
 ## Verification
 
@@ -78,12 +118,19 @@ Focused tests cover:
 - transient runtime status and deterministic ghost projection;
 - conflict retention;
 - React provider hydration and runtime-driven hook updates.
+- task-card, title-strip, multi-output frame, collapsed summary, and ghost
+  rendering;
+- run-owned artifact URLs and plugin-aware node content;
+- typed Shift selection, additive marquee selection, roving focus, and focus
+  retention across runtime updates;
+- one-command pointer release for Task move, Node move, and Node resize;
+- rect-aware panning and cursor-anchored zoom.
 
 ## Deferred UI work
 
-- rich task container, title-strip, output-frame, and collection rendering;
-- zoom presentation transitions and direct manipulation;
 - run/SSE adapter that feeds `setTaskRuntime` and ghost updates;
 - proposal review and materialization controls;
+- collection presentation, bundle edge projection, and collection manipulation;
+- specialized editors and viewers beyond the generic plugin-aware node body;
 - V2 branch/version management UI;
 - command conflict resolution UI beyond the exposed store state.

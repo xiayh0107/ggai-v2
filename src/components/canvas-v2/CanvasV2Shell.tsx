@@ -1,5 +1,6 @@
 import { Boxes, Loader2, RotateCcw } from 'lucide-react'
 import { useCanvasV2State, useCanvasV2Store } from '@/canvas-v2/hooks'
+import CanvasV2Stage from './CanvasV2Stage'
 
 export default function CanvasV2Shell() {
   const store = useCanvasV2Store()
@@ -41,7 +42,7 @@ export default function CanvasV2Shell() {
         <div className="flex items-center gap-2 text-[13px] font-semibold">
           <Boxes size={16} className="text-gg-primary" /> Canvas V2
           <span className="rounded-full bg-gg-subtle px-2 py-0.5 text-[10px] font-medium text-gg-muted">
-            基础数据层
+            V2
           </span>
         </div>
         <div className="flex items-center gap-3 text-[11px] text-gg-muted">
@@ -52,21 +53,9 @@ export default function CanvasV2Shell() {
           )}
         </div>
       </header>
-      <section
-        aria-label="Canvas V2 workspace foundation"
-        className="absolute inset-0 flex items-center justify-center pt-[52px]"
-        style={{
-          backgroundImage: 'radial-gradient(circle, rgb(208 218 232 / 55%) 1px, transparent 1px)',
-          backgroundSize: '26px 26px',
-        }}
-      >
-        <div className="rounded-[16px] border border-dashed border-gg-line bg-gg-node/85 px-5 py-4 text-center shadow-sm">
-          <p className="text-[13px] font-medium">V2 数据管线已就绪</p>
-          <p className="mt-1 max-w-sm text-[11px] leading-5 text-gg-muted">
-            文档、分支视图状态与运行时投影已隔离。富任务卡片将在后续 UI 阶段接入。
-          </p>
-        </div>
-      </section>
+      <div className="absolute inset-x-0 bottom-0 top-[52px]">
+        <CanvasV2Stage />
+      </div>
     </main>
   )
 }
