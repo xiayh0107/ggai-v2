@@ -76,9 +76,26 @@ describe('DaemonClient canvas persistence', () => {
     expect(legacy).toMatchObject({ event: 'close', data: { status: 'done' } })
     if (legacy.event === 'close') expect(legacy.data.outcome).toBeUndefined()
 
-    const withOutcome = decodeDaemonRunLogEntry({
+    const interrupted = decodeDaemonRunLogEntry({
       id: 2,
       recordedAt: 2,
+      event: 'close',
+      data: {
+        runId: 'run-interrupted',
+        status: 'interrupted',
+        sessionId: null,
+        artifacts: [],
+        artifactsComplete: false,
+      },
+    }, 'run-interrupted')
+    expect(interrupted).toMatchObject({
+      event: 'close',
+      data: { runId: 'run-interrupted', status: 'interrupted' },
+    })
+
+    const withOutcome = decodeDaemonRunLogEntry({
+      id: 3,
+      recordedAt: 3,
       event: 'close',
       data: {
         runId: 'run-outcome',

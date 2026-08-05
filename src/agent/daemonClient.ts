@@ -134,7 +134,10 @@ export type DaemonRunStatus =
   | 'cancelled'
   | 'interrupted'
 
-export type DaemonCloseStatus = Extract<DaemonRunStatus, 'done' | 'error' | 'cancelled'>
+export type DaemonCloseStatus = Extract<
+  DaemonRunStatus,
+  'done' | 'error' | 'cancelled' | 'interrupted'
+>
 
 export interface DaemonSessionsQuery {
   canvasBranch?: string
@@ -492,7 +495,10 @@ function isRunStatus(value: unknown): value is DaemonRunStatus {
 }
 
 function isCloseStatus(value: unknown): value is DaemonCloseStatus {
-  return value === 'done' || value === 'error' || value === 'cancelled'
+  return value === 'done'
+    || value === 'error'
+    || value === 'cancelled'
+    || value === 'interrupted'
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -2204,6 +2210,15 @@ export class DaemonClient implements AgentTransport {
         created.runId,
         `Run ${created.runId} was cancelled`,
         'cancelled',
+        result.close.artifacts,
+        result.close.artifactsComplete,
+      )
+    }
+    if (result.close.status === 'interrupted') {
+      throw new DaemonRunError(
+        created.runId,
+        `Run ${created.runId} was interrupted`,
+        'interrupted',
         result.close.artifacts,
         result.close.artifactsComplete,
       )

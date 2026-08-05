@@ -14,6 +14,12 @@ import { RunLogStore } from '../runLogs.js'
 
 class PendingRecoveryPlans implements InterruptedProjectionPlanStoreV2 {
   readonly calls: Array<{ taskId: string; runId: string }> = []
+  readonly records = new Map<string, ProjectionPlanRecordV2>()
+
+  async get(planId: string): Promise<ProjectionPlanRecordV2 | undefined> {
+    const record = this.records.get(planId)
+    return record ? structuredClone(record) : undefined
+  }
 
   async recoverInterrupted(
     input: Parameters<InterruptedProjectionPlanStoreV2['recoverInterrupted']>[0],
@@ -30,6 +36,7 @@ class PendingRecoveryPlans implements InterruptedProjectionPlanStoreV2 {
       plan: built.plan,
       suggestedActions: built.suggestedActions,
     }
+    this.records.set(record.plan.planId, record)
     return { record, disposition: 'created' }
   }
 }
@@ -38,6 +45,7 @@ test('recovers Task V2 manifests, partial plans, and closes while leaving V1 unc
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-run-recovery-v2-')))
   const runLogs = new RunLogStore(root)
   const plans = new PendingRecoveryPlans()
+  const materialized: string[] = []
   const artifactStores = new Map<string, RunArtifactStoreV2>()
   const artifactStore = (branch: string) => {
     let store = artifactStores.get(branch)
@@ -81,6 +89,10 @@ test('recovers Task V2 manifests, partial plans, and closes while leaving V1 unc
       runLogs,
       artifactStore,
       projectionPlanStore: () => plans,
+      onProjectionPlanReady: async ({ plan }) => {
+        assert.equal((await runLogs.terminalClose(plan.runId))?.status, 'interrupted')
+        materialized.push(plan.planId)
+      },
     })
     assert.deepEqual(first, {
       candidates: 1,
@@ -89,6 +101,7 @@ test('recovers Task V2 manifests, partial plans, and closes while leaving V1 unc
       failures: [],
     })
     assert.deepEqual(plans.calls, [{ taskId: 'task-recover', runId: 'run-v2-recover' }])
+    assert.deepEqual(materialized, [closePlanId(await runLogs.terminalClose('run-v2-recover'))])
     assert.equal((await runLogs.summary('run-v2-recover'))?.status, 'interrupted')
     assert.equal((await runLogs.summary('run-v1-recover'))?.status, 'interrupted')
 
@@ -117,14 +130,23 @@ test('recovers Task V2 manifests, partial plans, and closes while leaving V1 unc
       runLogs,
       artifactStore,
       projectionPlanStore: () => plans,
+      onProjectionPlanReady: async ({ plan }) => {
+        materialized.push(plan.planId)
+      },
     })
     assert.equal(second.candidates, 1)
     assert.equal(second.appendedCloses, 0)
+    assert.equal(materialized.length, 2)
     assert.equal((await runLogs.page('run-v2-recover'))?.entries.length, 2)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
 })
+
+function closePlanId(close: Awaited<ReturnType<RunLogStore['terminalClose']>>): string {
+  assert.ok(close?.projectionPlan)
+  return close.projectionPlan.planId
+}
 
 test('isolates a corrupt manifest and still recovers missing files for another run', async () => {
   const root = await realpath(

@@ -30,6 +30,16 @@ export interface CreatedProjectionPlanV2 extends BuildProjectionPlanV2Result {
   record: ProjectionPlanRecordV2
 }
 
+export type RecoverInterruptedProjectionPlanV2Input = Pick<
+  BuildProjectionPlanV2Input,
+  'taskId' | 'runId' | 'manifest' | 'plugins'
+>
+
+export interface RecoveredInterruptedProjectionPlanV2 {
+  record: ProjectionPlanRecordV2
+  disposition: 'created' | 'replaced-pending' | 'closed'
+}
+
 export interface ProjectionPlanStoreV2Options {
   now?: () => number
   /** Revalidates daemon-owned parent directories before each read or write. */
@@ -143,6 +153,68 @@ export class ProjectionPlanStoreV2 {
       await this.#persist(next)
       this.#records = next
       return cloneCreatedResult(built, record)
+    })
+  }
+
+  /**
+   * Rebuilds the trusted partial plan for a run interrupted by daemon restart.
+   * Only an existing pending record may be replaced. Any settled record is an
+   * immutable fact and is returned as closed without modification.
+   */
+  async recoverInterrupted(
+    input: RecoverInterruptedProjectionPlanV2Input,
+  ): Promise<RecoveredInterruptedProjectionPlanV2> {
+    const built = buildProjectionPlanV2({
+      ...input,
+      runStatus: 'interrupted',
+    })
+    const inspection = inspectProjectionPlanV2(built.plan)
+    if (inspection.status !== 'valid'
+      || inspection.plan.status !== 'partial'
+      || inspection.plan.taskProposals.length > 0
+      || built.suggestedActions.length > 0) {
+      throw new TypeError('generated interrupted projection plan is invalid')
+    }
+
+    return this.#runExclusive(async () => {
+      await this.#preparePath()
+      await this.#ensureLoaded()
+      const existing = this.#records?.get(inspection.plan.planId)
+      if (existing && existing.state !== 'pending') {
+        return { record: cloneRecord(existing), disposition: 'closed' }
+      }
+      if (existing
+        && (existing.plan.taskId !== inspection.plan.taskId
+          || existing.plan.runId !== inspection.plan.runId)) {
+        throw new ProjectionPlanConflictV2Error(inspection.plan.planId)
+      }
+      if (existing
+        && existing.plan.digest === inspection.plan.digest
+        && JSON.stringify(existing.suggestedActions) === JSON.stringify(built.suggestedActions)) {
+        return { record: cloneRecord(existing), disposition: 'replaced-pending' }
+      }
+      if (!existing && (this.#records?.size ?? 0) >= MAX_STORED_PROJECTION_PLANS_V2) {
+        throw new TypeError('projection plan store has too many records')
+      }
+
+      const now = this.#now()
+      assertTimestamp(now, 'now')
+      if (existing && now < existing.updatedAt) throw new TypeError('now cannot move backwards')
+      const record: ProjectionPlanRecordV2 = {
+        state: 'pending',
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+        plan: inspection.plan,
+        suggestedActions: [],
+      }
+      const next = new Map(this.#records ?? [])
+      next.set(record.plan.planId, record)
+      await this.#persist(next)
+      this.#records = next
+      return {
+        record: cloneRecord(record),
+        disposition: existing ? 'replaced-pending' : 'created',
+      }
     })
   }
 

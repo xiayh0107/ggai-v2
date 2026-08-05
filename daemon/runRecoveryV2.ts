@@ -13,6 +13,7 @@ export type InterruptedProjectionPlanDispositionV2 =
 
 /** Narrow structural contract implemented by the branch-local plan store. */
 export interface InterruptedProjectionPlanStoreV2 {
+  get(planId: string): Promise<ProjectionPlanRecordV2 | undefined>
   recoverInterrupted(input: {
     taskId: string
     runId: string
@@ -29,11 +30,17 @@ export interface RecoverInterruptedTaskRunsV2Options {
   runLogs: RunLogStore
   artifactStore(canvasBranch: string): RunArtifactStoreV2
   projectionPlanStore(canvasBranch: string): InterruptedProjectionPlanStoreV2
+  /** Runs only after the reconstructed close is durable. */
+  onProjectionPlanReady?(input: {
+    plan: ProjectionPlanRecordV2['plan']
+    projectDir: string
+    canvasBranch: string
+  }): Promise<void>
 }
 
 export interface InterruptedTaskRunRecoveryFailureV2 {
   runId: string
-  stage: 'manifest' | 'projection-plan' | 'run-log'
+  stage: 'manifest' | 'projection-plan' | 'run-log' | 'projection-hook'
   message: string
 }
 
@@ -61,6 +68,42 @@ export async function recoverInterruptedTaskRunsV2(
   }
 
   for (const { summary } of candidates) {
+    try {
+      // A terminal close is the authoritative settlement boundary. In
+      // particular, a crash after close+materialization but before summary
+      // rewrite must not downgrade the completed pending plan to partial.
+      const existingClose = await options.runLogs.terminalClose(summary.runId)
+      if (existingClose) {
+        if (existingClose.projectionPlan && options.onProjectionPlanReady) {
+          let record: ProjectionPlanRecordV2 | undefined
+          try {
+            record = await options
+              .projectionPlanStore(summary.canvasBranch ?? 'main')
+              .get(existingClose.projectionPlan.planId)
+            if (!record) throw new TypeError('durable close projection plan is not registered')
+            assertMatchingDurablePlan(record, existingClose)
+          } catch (error) {
+            record = undefined
+            report.failures.push(failure(summary.runId, 'projection-plan', error))
+          }
+          if (record?.state === 'pending') {
+            try {
+              await options.onProjectionPlanReady({
+                plan: record.plan,
+                projectDir: options.projectDir,
+                canvasBranch: summary.canvasBranch ?? 'main',
+              })
+            } catch (error) {
+              report.failures.push(failure(summary.runId, 'projection-hook', error))
+            }
+          }
+        }
+        continue
+      }
+    } catch (error) {
+      report.failures.push(failure(summary.runId, 'run-log', error))
+      continue
+    }
     const baseClose = interruptedClose(summary)
     let manifest: ArtifactManifestV1 | undefined
     let artifacts: string[] = []
@@ -117,8 +160,20 @@ export async function recoverInterruptedTaskRunsV2(
         : {}),
     }
     try {
-      if (await options.runLogs.appendInterruptedCloseIfMissing(summary.runId, close)) {
+      const appended = await options.runLogs.appendInterruptedCloseIfMissing(summary.runId, close)
+      if (appended) {
         report.appendedCloses += 1
+        if (projection && options.onProjectionPlanReady) {
+          try {
+            await options.onProjectionPlanReady({
+              plan: projection.plan,
+              projectDir: options.projectDir,
+              canvasBranch: summary.canvasBranch ?? 'main',
+            })
+          } catch (error) {
+            report.failures.push(failure(summary.runId, 'projection-hook', error))
+          }
+        }
       }
     } catch (error) {
       report.failures.push(failure(summary.runId, 'run-log', error))
@@ -126,6 +181,18 @@ export async function recoverInterruptedTaskRunsV2(
   }
 
   return report
+}
+
+function assertMatchingDurablePlan(
+  record: ProjectionPlanRecordV2,
+  close: RunClosePayload,
+): void {
+  if (!close.projectionPlan
+    || record.plan.digest !== close.projectionPlan.digest
+    || JSON.stringify(record.plan) !== JSON.stringify(close.projectionPlan)
+    || JSON.stringify(record.suggestedActions) !== JSON.stringify(close.suggestedActions ?? [])) {
+    throw new TypeError('registered projection plan does not match its durable close')
+  }
 }
 
 function interruptedClose(

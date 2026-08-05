@@ -27,6 +27,7 @@ import type {
 import { parseCanvasBranch, ProtocolError } from './protocol.js'
 import { AgentRegistry } from './registry.js'
 import { RunLogExistsError, RunLogStore, type RunLogPage } from './runLogs.js'
+import { recoverInterruptedTaskRunsV2 } from './runRecoveryV2.js'
 import {
   RunArtifactStoreV2,
   type RunArtifactLookupV2,
@@ -1106,7 +1107,18 @@ export class RunManager {
     if (!store) {
       store = new RunLogStore(projectDir)
       this.#runLogStores.set(projectDir, store)
-      const recovery = store.markInterrupted().then(() => undefined)
+      const recovery = recoverInterruptedTaskRunsV2({
+        projectDir,
+        runLogs: store,
+        artifactStore: (canvasBranch) => this.#artifactStoreV2(projectDir, canvasBranch),
+        projectionPlanStore: (canvasBranch) => this.#projectionPlansV2(
+          projectDir,
+          canvasBranch,
+        ),
+        ...(this.#onProjectionPlanReady
+          ? { onProjectionPlanReady: this.#onProjectionPlanReady }
+          : {}),
+      }).then(() => undefined)
       this.#runLogRecovery.set(projectDir, recovery)
     }
     return store

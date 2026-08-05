@@ -67,6 +67,15 @@ function input(title = 'Preview'): BuildProjectionPlanV2Input {
   }
 }
 
+function interruptedInput(source = input()) {
+  return {
+    taskId: source.taskId,
+    runId: source.runId,
+    manifest: source.manifest,
+    plugins: source.plugins,
+  }
+}
+
 test('builds, persists, and reloads only a daemon-authored pending plan', async () => {
   const filePath = await temporaryStorePath()
   const store = new ProjectionPlanStoreV2(filePath, {
@@ -109,6 +118,35 @@ test('deduplicates the same trusted plan and rejects identity reuse with differe
   assert.equal((await store.get(first.plan.planId))?.plan.digest, first.plan.digest)
 })
 
+test('creates or replaces only a pending plan with the interrupted partial settlement', async () => {
+  const filePath = await temporaryStorePath()
+  let now = 100
+  const store = new ProjectionPlanStoreV2(filePath, { now: () => now })
+  const complete = await store.createPending(input())
+  now = 200
+
+  const recovered = await store.recoverInterrupted(interruptedInput())
+  assert.equal(recovered.disposition, 'replaced-pending')
+  assert.equal(recovered.record.state, 'pending')
+  assert.equal(recovered.record.plan.status, 'partial')
+  assert.notEqual(recovered.record.plan.digest, complete.plan.digest)
+  assert.deepEqual(recovered.record.plan.taskProposals, [])
+  assert.deepEqual(recovered.record.suggestedActions, [])
+  assert.equal(recovered.record.createdAt, 100)
+  assert.equal(recovered.record.updatedAt, 200)
+
+  now = 300
+  const replayed = await store.recoverInterrupted(interruptedInput())
+  assert.equal(replayed.disposition, 'replaced-pending')
+  assert.deepEqual(replayed.record, recovered.record)
+
+  const freshPath = await temporaryStorePath()
+  const fresh = await new ProjectionPlanStoreV2(freshPath, { now: () => 400 })
+    .recoverInterrupted(interruptedInput())
+  assert.equal(fresh.disposition, 'created')
+  assert.equal(fresh.record.plan.status, 'partial')
+})
+
 test('dismisses idempotently and never resurrects a closed plan', async () => {
   const filePath = await temporaryStorePath()
   let now = 100
@@ -130,6 +168,9 @@ test('dismisses idempotently and never resurrects a closed plan', async () => {
     store.createPending(input()),
     ProjectionPlanNotPendingV2Error,
   )
+  const recovered = await store.recoverInterrupted(interruptedInput())
+  assert.equal(recovered.disposition, 'closed')
+  assert.deepEqual(recovered.record, dismissed)
   assert.equal((await store.get(created.plan.planId))?.updatedAt, 250)
 })
 
