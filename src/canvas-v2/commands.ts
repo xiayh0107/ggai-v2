@@ -10,7 +10,7 @@ import {
   type CanvasPointV2,
   type CanvasReceiptV2,
   type CanvasTaskV2,
-} from './model'
+} from './model.js'
 
 export type TrustedProjectionOutputRoleV2 = 'primary' | 'supporting' | 'auxiliary'
 

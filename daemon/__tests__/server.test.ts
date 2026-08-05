@@ -66,6 +66,86 @@ test('configured development origins remain exact', async () => {
   }
 })
 
+test('Canvas V2 command API persists reducer commands with CAS', async () => {
+  const fixture = await startTestDaemon()
+  try {
+    const health = await (await fetch(`${fixture.baseUrl}/health`)).json() as {
+      capabilities?: { canvasModelV2?: boolean }
+    }
+    assert.equal(health.capabilities?.canvasModelV2, true)
+
+    const emptyResponse = await fetch(`${fixture.baseUrl}/canvas/v2?branch=main`)
+    assert.equal(emptyResponse.status, 200)
+    const empty = await emptyResponse.json() as { revision: number; document: { tasks: unknown[] } }
+    assert.equal(empty.revision, 0)
+    assert.deepEqual(empty.document.tasks, [])
+
+    const commandBody = {
+      branch: 'main',
+      baseRevision: 0,
+      mutationId: 'create-task-1',
+      command: {
+        type: 'CreateTask',
+        task: {
+          id: 'task-1',
+          title: 'Scatter plot',
+          goal: 'Create a classic scatter plot',
+          anchor: { x: 120, y: 160 },
+          origin: { kind: 'user' },
+        },
+      },
+    }
+    const committedResponse = await fetch(`${fixture.baseUrl}/canvas/commands`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(commandBody),
+    })
+    const committedText = await committedResponse.text()
+    assert.equal(committedResponse.status, 200, committedText)
+    const committed = JSON.parse(committedText) as {
+      revision: number
+      document: { tasks: Array<{ id: string }> }
+    }
+    assert.equal(committed.revision, 1)
+    assert.equal(committed.document.tasks[0]?.id, 'task-1')
+
+    const conflict = await fetch(`${fixture.baseUrl}/canvas/commands`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...commandBody,
+        mutationId: 'create-task-2',
+        command: {
+          ...commandBody.command,
+          task: { ...commandBody.command.task, id: 'task-2' },
+        },
+      }),
+    })
+    assert.equal(conflict.status, 409)
+    assert.equal((await conflict.json() as {
+      error: { code: string; currentRevision: number }
+    }).error.currentRevision, 1)
+
+    const forgedPlan = await fetch(`${fixture.baseUrl}/canvas/commands`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        branch: 'main',
+        baseRevision: 1,
+        mutationId: 'forged-plan',
+        command: {
+          type: 'MaterializeProjectionPlan',
+          planId: `plan_${'a'.repeat(64)}`,
+          nodes: [{ id: 'forged' }],
+        },
+      }),
+    })
+    assert.equal(forgedPlan.status, 400)
+  } finally {
+    await fixture.close()
+  }
+})
+
 function runBody(nodeId: string, prompt: string): Record<string, unknown> {
   return {
     nodeId,

@@ -10,6 +10,16 @@ import {
   CanvasRevisionConflictError,
   CanvasStoreManager,
 } from './canvasStore.js'
+import {
+  CanvasMutationReuseV2Error,
+  CanvasRevisionConflictV2Error,
+  CanvasSnapshotV2Error,
+} from './canvasCommandStoreV2.js'
+import { CanvasCommandStoreV2Manager } from './canvasCommandStoreV2Manager.js'
+import {
+  parseCanvasCommandRequestV2,
+  type OrdinaryCanvasCommandV2,
+} from './canvasCommandProtocolV2.js'
 import { isPathWithin, PermissionPolicyError, resolveProjectDir } from './permissions.js'
 import {
   parseCanvasBranch,
@@ -49,6 +59,7 @@ export interface DaemonServerOptions {
   canvasStoreManager?: CanvasStoreManager
   workspaceVersionManager?: WorkspaceVersionManager
   preferencesManager?: WorkspacePreferencesManager
+  canvasCommandStoreV2Manager?: CanvasCommandStoreV2Manager
 }
 
 export interface DaemonServer {
@@ -58,6 +69,7 @@ export interface DaemonServer {
   canvases: CanvasStoreManager
   versions: WorkspaceVersionManager
   preferences: WorkspacePreferencesManager
+  canvasV2: CanvasCommandStoreV2Manager
   close(): Promise<void>
 }
 
@@ -68,6 +80,10 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     ...(options.canvasStoreManager ? { canvasStoreManager: options.canvasStoreManager } : {}),
   })
   const canvases = versions.canvases
+  const canvasV2 = options.canvasCommandStoreV2Manager ?? new CanvasCommandStoreV2Manager({
+    projectRoot: options.projectRoot,
+    acquireProjectLease: (projectDir) => canvases.acquireProjectLease(projectDir),
+  })
   const preferences = options.preferencesManager ?? new WorkspacePreferencesManager(options.projectRoot)
   const runs = options.runManager ?? new RunManager({
     projectRoot: options.projectRoot,
@@ -101,6 +117,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
       registry,
       runs,
       canvases,
+      canvasV2,
       versions,
       preferences,
       allowedOrigins,
@@ -120,8 +137,17 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     canvases,
     versions,
     preferences,
+    canvasV2,
     close() {
-      closePromise ??= closeDaemonServer(server, sockets, runs, versions, preferences, lifecycle)
+      closePromise ??= closeDaemonServer(
+        server,
+        sockets,
+        runs,
+        versions,
+        preferences,
+        canvasV2,
+        lifecycle,
+      )
       return closePromise
     },
   }
@@ -132,6 +158,7 @@ interface RouteContext {
   registry: AgentRegistry
   runs: RunManager
   canvases: CanvasStoreManager
+  canvasV2: CanvasCommandStoreV2Manager
   versions: WorkspaceVersionManager
   preferences: WorkspacePreferencesManager
   allowedOrigins: Set<string>
@@ -170,8 +197,36 @@ async function route(
     writeJson(response, 200, {
       status: 'ok',
       version: 1,
+      capabilities: { canvasModelV2: true },
       projectRoot: context.projectRoot,
     })
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/canvas/v2') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
+    writeJson(response, 200, await context.canvasV2.get(projectDir, branch))
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/canvas/commands') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const parsed = parseCanvasCommandRequestV2(await readJson(request))
+    if (isTrustedPlanWireCommand(parsed.command.type)) {
+      throw new ProtocolError(
+        'the requested projection plan is not available yet',
+        'projection_plan_not_found',
+        404,
+      )
+    }
+    writeJson(response, 200, await context.canvasV2.commit(
+      projectDir,
+      parsed.branch,
+      parsed.baseRevision,
+      parsed.mutationId,
+      parsed.command as OrdinaryCanvasCommandV2,
+    ))
     return
   }
 
@@ -620,9 +675,11 @@ async function closeDaemonServer(
   runs: RunManager,
   versions: WorkspaceVersionManager,
   preferences: WorkspacePreferencesManager,
+  canvasV2: CanvasCommandStoreV2Manager,
   lifecycle: { closing: boolean },
 ): Promise<void> {
   lifecycle.closing = true
+  canvasV2.close()
   const serverClosed = new Promise<void>((resolve, reject) => {
     if (!server.listening) {
       resolve()
@@ -886,6 +943,32 @@ function writeError(response: ServerResponse, error: unknown): void {
     })
     return
   }
+  if (error instanceof CanvasRevisionConflictV2Error) {
+    writeJson(response, 409, {
+      error: {
+        code: 'canvas_v2_revision_conflict',
+        message: error.message,
+        currentRevision: error.currentRevision,
+      },
+    })
+    return
+  }
+  if (error instanceof CanvasMutationReuseV2Error) {
+    writeJson(response, 409, {
+      error: { code: 'canvas_v2_mutation_reused', message: error.message },
+    })
+    return
+  }
+  if (error instanceof CanvasSnapshotV2Error) {
+    writeJson(response, 409, {
+      error: {
+        code: 'canvas_v2_corrupt',
+        message: error.message,
+        filePath: error.filePath,
+      },
+    })
+    return
+  }
   if (error instanceof CanvasRevisionConflictError) {
     writeJson(response, 409, {
       error: {
@@ -927,4 +1010,10 @@ function setSecurityHeaders(response: ServerResponse): void {
 function isAllowedOrigin(origin: string | undefined, configured: Set<string>): boolean {
   if (!origin) return true
   return configured.has(origin) || DEFAULT_BROWSER_ORIGINS.has(origin)
+}
+
+function isTrustedPlanWireCommand(type: string): boolean {
+  return type === 'MaterializeProjectionPlan'
+    || type === 'AcceptTaskProposals'
+    || type === 'DismissPlan'
 }
