@@ -3,6 +3,7 @@ import { lstat, realpath, stat } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
 import path from 'node:path'
+import { CanvasCommandError } from '../src/canvas-v2/commands.js'
 import type { CanvasDocumentV2 } from '../src/canvas-v2/model.js'
 import { isArtifactControlPath } from './artifactPaths.js'
 import {
@@ -19,8 +20,14 @@ import {
 import { CanvasCommandStoreV2Manager } from './canvasCommandStoreV2Manager.js'
 import {
   parseCanvasCommandRequestV2,
+  type CanvasCommandWireV2,
   type OrdinaryCanvasCommandV2,
 } from './canvasCommandProtocolV2.js'
+import {
+  autoMaterializeProjectionPlanV2,
+  commitProjectionPlanCommandV2,
+  ProjectionPlanUnavailableV2Error,
+} from './canvasProjectionCoordinatorV2.js'
 import { isPathWithin, PermissionPolicyError, resolveProjectDir } from './permissions.js'
 import {
   parseCanvasBranch,
@@ -104,6 +111,13 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     acquireProjectLease: (projectDir) => versions.canvases.acquireProjectLease(projectDir),
     resolveSourceProjectDir: ({ projectDir, canvasBranch }) =>
       versions.sourceExecutionProjectDir(projectDir, canvasBranch),
+    onProjectionPlanReady: ({ plan, projectDir, canvasBranch }) =>
+      autoMaterializeProjectionPlanV2({
+        canvases: canvasV2,
+        projectDir,
+        branch: canvasBranch,
+        plan,
+      }).then(() => undefined),
     onRunFinished: async ({ summary, request, projectDir }) => {
       if (isResolvedTaskRunRequestV2(request)) return
       if (summary.status !== 'done' || request.automationMode !== 'auto') return
@@ -227,12 +241,17 @@ async function route(
   if (request.method === 'POST' && pathname === '/canvas/commands') {
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
     const parsed = parseCanvasCommandRequestV2(await readJson(request))
-    if (isTrustedPlanWireCommand(parsed.command.type)) {
-      throw new ProtocolError(
-        'the requested projection plan is not available yet',
-        'projection_plan_not_found',
-        404,
-      )
+    if (isTrustedPlanWireCommand(parsed.command)) {
+      writeJson(response, 200, await commitProjectionPlanCommandV2({
+        canvases: context.canvasV2,
+        plans: context.runs,
+        projectDir,
+        branch: parsed.branch,
+        baseRevision: parsed.baseRevision,
+        mutationId: parsed.mutationId,
+        command: parsed.command,
+      }))
+      return
     }
     writeJson(response, 200, await context.canvasV2.commit(
       projectDir,
@@ -1178,6 +1197,23 @@ function writeError(response: ServerResponse, error: unknown): void {
     })
     return
   }
+  if (error instanceof ProjectionPlanUnavailableV2Error) {
+    writeJson(response, error.reason === 'missing' ? 404 : 409, {
+      error: {
+        code: error.reason === 'missing'
+          ? 'projection_plan_not_found'
+          : 'projection_plan_settled',
+        message: error.message,
+      },
+    })
+    return
+  }
+  if (error instanceof CanvasCommandError) {
+    writeJson(response, 409, {
+      error: { code: `canvas_v2_${error.code}`, message: error.message },
+    })
+    return
+  }
   if (error instanceof CanvasRevisionConflictV2Error) {
     writeJson(response, 409, {
       error: {
@@ -1247,8 +1283,12 @@ function isAllowedOrigin(origin: string | undefined, configured: Set<string>): b
   return configured.has(origin) || DEFAULT_BROWSER_ORIGINS.has(origin)
 }
 
-function isTrustedPlanWireCommand(type: string): boolean {
-  return type === 'MaterializeProjectionPlan'
-    || type === 'AcceptTaskProposals'
-    || type === 'DismissPlan'
+function isTrustedPlanWireCommand(
+  command: CanvasCommandWireV2,
+): command is Extract<CanvasCommandWireV2, {
+  type: 'MaterializeProjectionPlan' | 'AcceptTaskProposals' | 'DismissPlan'
+}> {
+  return command.type === 'MaterializeProjectionPlan'
+    || command.type === 'AcceptTaskProposals'
+    || command.type === 'DismissPlan'
 }

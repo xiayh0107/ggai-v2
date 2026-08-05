@@ -112,6 +112,39 @@ export class CanvasCommandStoreV2 {
     })
   }
 
+  /**
+   * Applies a daemon-authoritative command to the latest durable revision.
+   *
+   * This boundary is intentionally not exposed to browser requests. It lets a
+   * durable run settlement materialize its trusted plan without opening a
+   * read/CAS race with ordinary canvas commands. Trusted receipt replays return
+   * the existing envelope without manufacturing an empty revision.
+   */
+  async commitLatest(
+    mutationId: string,
+    command: CanvasCommandV2,
+  ): Promise<CanvasEnvelopeV2> {
+    validateMutationId(mutationId)
+    return this.#runExclusive(async () => {
+      await this.#ensureLoaded()
+      const current = this.#current()
+      const document = applyCanvasCommandV2(current.document, command)
+      if (document === current.document) return cloneEnvelope(current)
+
+      const updatedAt = new Date(this.#now()).toISOString()
+      const next: CanvasEnvelopeV2 = {
+        branch: this.branch,
+        revision: current.revision + 1,
+        updatedAt,
+        lastMutationId: mutationId,
+        document,
+      }
+      await atomicWriteText(this.filePath, serializeEnvelope(next))
+      this.#envelope = next
+      return cloneEnvelope(next)
+    })
+  }
+
   async #ensureLoaded(): Promise<void> {
     if (this.#envelope) return
     let source: string

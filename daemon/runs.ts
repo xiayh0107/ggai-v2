@@ -47,7 +47,10 @@ import type { AgentProcessTransport } from './transport/types.js'
 import { watchArtifacts, type ArtifactWatcher } from './watcher.js'
 import { BUILTIN_PROJECTION_PLUGIN_CONTRACTS_V2 } from './projectionPluginsV2.js'
 import type { ProjectionPlanV2, ProjectionSettlementV2 } from './projectionPlanV2.js'
-import { ProjectionPlanStoreV2 } from './projectionPlanStoreV2.js'
+import {
+  ProjectionPlanStoreV2,
+  type ProjectionPlanLifecycleV2,
+} from './projectionPlanStoreV2.js'
 
 const EVENT_HISTORY_LIMIT = 2_000
 const EVENT_HISTORY_BYTES = 1024 * 1024
@@ -105,6 +108,11 @@ export interface RunManagerOptions {
   acquireProjectLease?: (projectDir: string) => Promise<string>
   /** Best-effort post-close hook for branch-scoped source checkpointing. */
   onRunFinished?: (event: RunFinishedEvent) => Promise<void>
+  /**
+   * Runs only after a Task Run close and summary are durable. Failures leave
+   * the trusted plan pending for explicit recovery and never change Run status.
+   */
+  onProjectionPlanReady?: (event: ProjectionPlanReadyEvent) => Promise<void>
   /** Resolves an explicitly managed source worktree for a logical canvas branch. */
   resolveSourceProjectDir?: (input: {
     projectDir: string
@@ -118,6 +126,16 @@ export interface RunFinishedEvent {
   summary: RunSummary
   request: RunExecutionRequest
   projectDir: string
+}
+
+export interface ProjectionPlanReadyEvent {
+  plan: ProjectionPlanV2
+  projectDir: string
+  canvasBranch: string
+}
+
+export interface RunProjectionPlanRecordV2 extends ProjectionSettlementV2 {
+  state: ProjectionPlanLifecycleV2
 }
 
 interface PendingRunCreation {
@@ -140,6 +158,7 @@ export class RunManager {
   readonly #registry: AgentRegistry
   readonly #acquireProjectLease?: RunManagerOptions['acquireProjectLease']
   readonly #onRunFinished?: (event: RunFinishedEvent) => Promise<void>
+  readonly #onProjectionPlanReady?: (event: ProjectionPlanReadyEvent) => Promise<void>
   readonly #resolveSourceProjectDir?: RunManagerOptions['resolveSourceProjectDir']
   readonly #watchArtifacts: typeof watchArtifacts
   readonly #runs = new Map<string, InternalRun>()
@@ -160,6 +179,7 @@ export class RunManager {
     this.#registry = options.registry ?? new AgentRegistry()
     this.#acquireProjectLease = options.acquireProjectLease
     this.#onRunFinished = options.onRunFinished
+    this.#onProjectionPlanReady = options.onProjectionPlanReady
     this.#resolveSourceProjectDir = options.resolveSourceProjectDir
     this.#watchArtifacts = options.watchArtifacts ?? watchArtifacts
   }
@@ -441,12 +461,67 @@ export class RunManager {
     projectDirRequest = '.',
     canvasBranchRequest = 'main',
   ): Promise<ProjectionSettlementV2 | null> {
-    const projectDir = await this.#leaseProject(projectDirRequest)
-    const canvasBranch = parseCanvasBranch(canvasBranchRequest)
-    const record = await this.#projectionPlansV2(projectDir, canvasBranch).get(planId)
+    const record = await this.getProjectionPlanRecord(
+      planId,
+      projectDirRequest,
+      canvasBranchRequest,
+    )
     return record?.state === 'pending'
       ? { plan: record.plan, suggestedActions: record.suggestedActions }
       : null
+  }
+
+  async getProjectionPlanRecord(
+    planId: string,
+    projectDirRequest = '.',
+    canvasBranchRequest = 'main',
+  ): Promise<RunProjectionPlanRecordV2 | null> {
+    const projectDir = await this.#leaseProject(projectDirRequest)
+    const canvasBranch = parseCanvasBranch(canvasBranchRequest)
+    const record = await this.#projectionPlansV2(projectDir, canvasBranch).get(planId)
+    if (!record) return null
+
+    // The registry is an indexed lifecycle view. Browser plan commands still
+    // resolve their trusted semantic content from the append-only Run close.
+    const logs = this.#runLogs(projectDir)
+    await this.#runLogRecovery.get(projectDir)
+    const [summary, close] = await Promise.all([
+      logs.summary(record.plan.runId),
+      logs.terminalClose(record.plan.runId),
+    ])
+    const closeActions = close?.suggestedActions ?? []
+    if (!summary
+      || summary.taskId !== record.plan.taskId
+      || (summary.canvasBranch ?? 'main') !== canvasBranch
+      || !close?.projectionPlan
+      || close.projectionPlan.planId !== planId
+      || close.projectionPlan.digest !== record.plan.digest
+      || JSON.stringify(close.projectionPlan) !== JSON.stringify(record.plan)
+      || JSON.stringify(closeActions) !== JSON.stringify(record.suggestedActions)) {
+      throw new ProtocolError(
+        'projection plan registry does not match its durable Run close',
+        'projection_plan_log_mismatch',
+        409,
+      )
+    }
+    return {
+      state: record.state,
+      plan: close.projectionPlan,
+      suggestedActions: closeActions,
+    }
+  }
+
+  async dismissProjectionPlan(
+    planId: string,
+    projectDirRequest = '.',
+    canvasBranchRequest = 'main',
+  ): Promise<boolean> {
+    const projectDir = await this.#leaseProject(projectDirRequest)
+    const canvasBranch = parseCanvasBranch(canvasBranchRequest)
+    const store = this.#projectionPlansV2(projectDir, canvasBranch)
+    if (!await store.get(planId)) return false
+    await store.dismiss(planId)
+    return true
   }
 
   subscribe(runId: string, listener: RunListener, afterId = 0): RunSubscription | null {
@@ -894,6 +969,18 @@ export class RunManager {
       delete close.outcome
       delete close.projectionPlan
       delete close.suggestedActions
+    }
+    if (close.projectionPlan && this.#onProjectionPlanReady) {
+      try {
+        await this.#onProjectionPlanReady({
+          plan: close.projectionPlan,
+          projectDir: run.projectDir,
+          canvasBranch: run.request.canvasBranch ?? 'main',
+        })
+      } catch {
+        // The durable pending plan is the recovery source of truth. Canvas
+        // materialization can be replayed later without changing Run status.
+      }
     }
     this.#broadcast(run, buffered)
     run.closed = true

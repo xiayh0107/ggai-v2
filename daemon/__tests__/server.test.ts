@@ -327,6 +327,45 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
       plan: close.projectionPlan,
       suggestedActions: close.suggestedActions,
     })
+    let materializedCanvas: {
+      revision: number
+      document: {
+        nodes: Array<{ type: string; artifactRefs: Array<{ artifactId: string }> }>
+        receipts: Array<{ kind: string; planId: string }>
+      }
+    } | undefined
+    await waitFor(async () => {
+      const canvasResponse = await fetch(`${fixture.baseUrl}/canvas/v2?branch=main`)
+      if (!canvasResponse.ok) return false
+      materializedCanvas = await canvasResponse.json() as typeof materializedCanvas
+      return materializedCanvas?.document.receipts.some((receipt) =>
+        receipt.kind === 'materialization'
+        && receipt.planId === close.projectionPlan.planId) ?? false
+    })
+    assert.ok(materializedCanvas)
+    assert.equal(materializedCanvas.revision, 2)
+    assert.equal(materializedCanvas.document.nodes.length, 1)
+    assert.equal(materializedCanvas.document.nodes[0]?.type, 'text')
+    assert.equal(
+      materializedCanvas.document.nodes[0]?.artifactRefs[0]?.artifactId,
+      close.artifactManifest.entries[0]?.artifactId,
+    )
+    const materializationReplay = await fetch(`${fixture.baseUrl}/canvas/commands`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        branch: 'main',
+        baseRevision: materializedCanvas.revision,
+        mutationId: 'replay-materialization-v2',
+        command: {
+          type: 'MaterializeProjectionPlan',
+          planId: close.projectionPlan.planId,
+        },
+      }),
+    })
+    const replayText = await materializationReplay.text()
+    assert.equal(materializationReplay.status, 200, replayText)
+    assert.equal((JSON.parse(replayText) as { revision: number }).revision, 2)
     const foreignBranchPlan = await fetch(
       `${fixture.baseUrl}/projection-plans/${close.projectionPlan.planId}?projectDir=.&branch=other`,
     )
@@ -349,7 +388,7 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         branch: 'main',
-        baseRevision: 1,
+        baseRevision: materializedCanvas.revision,
         mutationId: 'create-attachment-task-v2',
         command: {
           type: 'CreateTask',
@@ -363,12 +402,14 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
         },
       }),
     })
-    assert.equal(attachmentTask.status, 200, await attachmentTask.text())
+    const attachmentTaskText = await attachmentTask.text()
+    assert.equal(attachmentTask.status, 200, attachmentTaskText)
+    const attachmentTaskRevision = (JSON.parse(attachmentTaskText) as { revision: number }).revision
     const attachmentIntent = {
       ...intent,
       runId: 'server-task-run-attachment-v2',
       taskId: 'task-attachment-v2',
-      baseRevision: 2,
+      baseRevision: attachmentTaskRevision,
       prompt: 'USE_VERIFIED_ATTACHMENT',
       attachments: [{
         kind: 'artifact',

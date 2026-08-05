@@ -46,6 +46,16 @@ export class CanvasCommandStoreV2Manager {
     return (await this.#resolve(projectDir, branch)).commit(baseRevision, mutationId, command)
   }
 
+  /** Daemon-only latest-revision commit for trusted settlement commands. */
+  async commitLatest(
+    projectDir: string,
+    branch: string,
+    mutationId: string,
+    command: CanvasCommandV2,
+  ): Promise<CanvasEnvelopeV2> {
+    return (await this.#resolve(projectDir, branch)).commitLatest(mutationId, command)
+  }
+
   close(): void {
     this.#closed = true
     this.#stores.clear()

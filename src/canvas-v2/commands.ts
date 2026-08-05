@@ -15,6 +15,7 @@ import {
   type CanvasReceiptV2,
   type CanvasTaskV2,
 } from './model.js'
+import { taskOutputFrameV2 } from './layout.js'
 
 export type TrustedProjectionOutputRoleV2 = 'primary' | 'supporting' | 'auxiliary'
 
@@ -1237,13 +1238,9 @@ function maxNodeZ(document: CanvasDocumentV2): number {
 }
 
 function projectionFrame(anchor: CanvasPointV2, index: number, maxZ: number) {
-  const column = index % 2
-  const row = Math.floor(index / 2)
+  const frame = taskOutputFrameV2(anchor, index)
   return {
-    x: anchor.x + 48 + column * 456,
-    y: anchor.y + 96 + row * 304,
-    w: 400,
-    h: 256,
+    ...frame,
     z: maxZ + index + 1,
   }
 }
