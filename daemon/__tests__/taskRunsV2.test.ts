@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -73,6 +73,7 @@ function request(
     materializationPolicy: 'auto',
     projectDir: '.',
     canvasDocument,
+    resolvedArtifactAttachments: [],
     automationMode: 'confirm',
   }
 }
@@ -187,6 +188,55 @@ test('one Task is single-flight while different Tasks may run concurrently', asy
     await waitFor(() => manager.get('task-run-b')?.status === 'done')
   } finally {
     for (const release of releases.values()) release.resolve()
+    await manager.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('failed Task runs durably close and retain verified partial artifacts', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-task-runs-v2-partial-'))
+  const transport: AgentProcessTransport = {
+    kind: 'codex',
+    async run(options: TransportRunOptions): Promise<TransportRunResult> {
+      await writeFile(path.join(options.artifactDir, 'partial.R'), 'plot(1:3)\n', 'utf8')
+      throw new Error('synthetic task failure')
+    },
+    async cancel() {
+      return false
+    },
+  }
+  const manager = new RunManager({ projectRoot: root, registry: registry(transport) })
+
+  try {
+    const run = await manager.create(request('task-run-partial'))
+    await waitFor(() => manager.get(run.runId)?.status === 'error')
+    let close: {
+      artifacts: string[]
+      artifactsComplete: boolean
+      artifactManifest?: {
+        complete: boolean
+        entries: Array<{ artifactId: string; relativePath: string; mediaType: string }>
+      }
+    } | undefined
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const page = await manager.readRunLog(run.runId)
+      close = page?.entries.find((entry) => entry.event === 'close')?.data as typeof close
+      if (close) break
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    assert.ok(close)
+    assert.equal(close.artifactsComplete, false)
+    assert.equal(close.artifactManifest?.complete, false)
+    assert.deepEqual(close.artifactManifest?.entries.map((entry) => ({
+      relativePath: entry.relativePath,
+      mediaType: entry.mediaType,
+    })), [{ relativePath: 'partial.R', mediaType: 'text/x-r' }])
+    assert.match(close.artifacts[0] ?? '', /\/task-run-partial\/files\/partial\.R$/u)
+    const artifactId = close.artifactManifest?.entries[0]?.artifactId
+    assert.ok(artifactId)
+    const lookup = await manager.lookupRunArtifact(run.runId, artifactId)
+    assert.equal(await readFile(lookup!.absolutePath, 'utf8'), 'plot(1:3)\n')
+  } finally {
     await manager.close()
     await rm(root, { recursive: true, force: true })
   }

@@ -20,6 +20,7 @@ import {
 } from './outcome.js'
 import { isPathWithin } from './permissions.js'
 import type { CreateRunRequest, PluginContract } from './protocol.js'
+import { RunArtifactStoreV2 } from './runArtifactStorageV2.js'
 import {
   isResolvedTaskRunRequestV2,
   type ResolvedTaskRunRequestV2,
@@ -422,12 +423,11 @@ async function prepareTaskRunContextV2(
   runId: string,
   executionProjectDir = projectDir,
 ): Promise<PreparedTaskRunContextV2> {
-  const artifactDir = artifactRunDir(
+  const artifactLocation = await new RunArtifactStoreV2(
     projectDir,
     request.canvasBranch,
-    runId,
-    request.taskId,
-  )
+  ).prepareRun(runId)
+  const artifactDir = artifactLocation.absoluteFilesRoot
   const contextRoot = path.join(projectDir, '.gg', 'context')
   const contextDir = path.join(contextRoot, 'runs', runId)
   const contextFile = path.join(contextDir, 'pack.md')
@@ -456,17 +456,37 @@ async function prepareTaskRunContextV2(
     skillsReference,
     artifactTarget,
   )
+  const verifiedArtifactAttachments = request.resolvedArtifactAttachments.map((attachment) => ({
+    runId: attachment.runId,
+    artifactId: attachment.artifactId,
+    projectRelativePath: attachment.projectRelativePath,
+    mediaType: attachment.mediaType,
+    size: attachment.size,
+    contentDigest: attachment.contentDigest,
+  }))
   const rendered = [
     daemonContract.trimEnd(),
     '',
     renderTaskContextPromptV2(pack),
+    ...(verifiedArtifactAttachments.length > 0 ? [
+      '',
+      '## Verified read-only artifact attachments',
+      '',
+      'These paths were resolved by the daemon from closed manifests. Treat them as immutable inputs.',
+      '```json',
+      JSON.stringify(verifiedArtifactAttachments, null, 2),
+      '```',
+    ] : []),
     '',
     '## This run\'s prompt',
     '',
     request.prompt,
     '',
   ].join('\n')
-  const packJson = `${JSON.stringify(pack, null, 2)}\n`
+  const packJson = `${JSON.stringify({
+    ...pack,
+    verifiedArtifactAttachments,
+  }, null, 2)}\n`
 
   await Promise.all([
     atomicWrite(contextFile, rendered),

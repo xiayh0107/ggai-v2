@@ -227,7 +227,23 @@ export interface DaemonCloseEvent {
   sessionId: string | null
   artifacts: string[]
   artifactsComplete: boolean
+  artifactManifest?: DaemonArtifactManifestV1
   outcome?: RunOutcome
+}
+
+export interface DaemonArtifactManifestEntryV1 {
+  artifactId: string
+  relativePath: string
+  mediaType: string
+  size: number
+  contentDigest: string
+}
+
+export interface DaemonArtifactManifestV1 {
+  version: 1
+  runId: string
+  complete: boolean
+  entries: DaemonArtifactManifestEntryV1[]
 }
 
 export interface DaemonRunStreamOptions {
@@ -438,6 +454,7 @@ function decodeRunOutcome(value: unknown, context: string): RunOutcome | undefin
 
 function isSuggestedActionsCache(value: unknown): boolean {
   if (!isRecord(value)
+    || Object.keys(value).length !== 4
     || Object.keys(value).length !== 2
     || !isNonEmptyString(value.runId)
     || value.runId.length > 160
@@ -803,13 +820,75 @@ function decodeCloseEvent(value: unknown, expectedRunId: string): DaemonCloseEve
   const outcome = value.outcome !== undefined
     ? decodeRunOutcome(value.outcome, 'SSE close event outcome')
     : undefined
+  const artifactManifest = value.artifactManifest === undefined
+    ? undefined
+    : decodeArtifactManifestV1(value.artifactManifest, expectedRunId)
   return {
     runId: value.runId,
     status: value.status,
     sessionId: typeof value.sessionId === 'string' ? value.sessionId : null,
     artifacts: value.artifacts as string[],
     artifactsComplete: value.artifactsComplete,
+    ...(artifactManifest ? { artifactManifest } : {}),
     ...(outcome ? { outcome } : {}),
+  }
+}
+
+function decodeArtifactManifestV1(
+  value: unknown,
+  expectedRunId: string,
+): DaemonArtifactManifestV1 {
+  if (!isRecord(value)
+    || value.version !== 1
+    || value.runId !== expectedRunId
+    || typeof value.complete !== 'boolean'
+    || !Array.isArray(value.entries)) {
+    throw new DaemonProtocolError('SSE close event artifact manifest was malformed')
+  }
+  const paths = new Set<string>()
+  const artifactIds = new Set<string>()
+  const entries = value.entries.map((entry, index): DaemonArtifactManifestEntryV1 => {
+    if (!isRecord(entry)
+      || Object.keys(entry).length !== 5
+      || typeof entry.artifactId !== 'string'
+      || !/^artifact_[0-9a-f]{64}$/u.test(entry.artifactId)
+      || typeof entry.relativePath !== 'string'
+      || entry.relativePath.length === 0
+      || entry.relativePath.startsWith('/')
+      || entry.relativePath.includes('\\')
+      || entry.relativePath.includes('\0')
+      || entry.relativePath.split('/').some((segment) =>
+        segment.length === 0
+        || segment === '.'
+        || segment === '..'
+        || segment.toLowerCase() === '.ggai')
+      || typeof entry.mediaType !== 'string'
+      || !/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/u.test(entry.mediaType)
+      || !Number.isSafeInteger(entry.size)
+      || (entry.size as number) < 0
+      || typeof entry.contentDigest !== 'string'
+      || !/^[0-9a-f]{64}$/u.test(entry.contentDigest)
+      || paths.has(entry.relativePath)
+      || artifactIds.has(entry.artifactId)) {
+      throw new DaemonProtocolError(
+        `SSE close event artifact manifest entry ${index} was malformed`,
+      )
+    }
+    paths.add(entry.relativePath)
+    artifactIds.add(entry.artifactId)
+    return {
+      artifactId: entry.artifactId,
+      relativePath: entry.relativePath,
+      mediaType: entry.mediaType,
+      size: entry.size as number,
+      contentDigest: entry.contentDigest,
+    }
+  })
+  return {
+    version: 1,
+    runId: expectedRunId,
+    complete: value.complete,
+    entries,
   }
 }
 
@@ -946,6 +1025,37 @@ export class DaemonClient implements AgentTransport {
     const url = new URL(this.endpoint('/artifacts'))
     url.searchParams.set('projectDir', projectDir)
     url.searchParams.set('path', artifactPath)
+    const response = await this.requestUrl(url, { method: 'GET' }, signal)
+    const declaredSize = Number(response.headers.get('content-length'))
+    if (Number.isFinite(declaredSize) && declaredSize > MAX_TEXT_ARTIFACT_BYTES) {
+      throw new DaemonProtocolError('Text artifact is too large to preview')
+    }
+    const bytes = await response.arrayBuffer()
+    if (bytes.byteLength > MAX_TEXT_ARTIFACT_BYTES) {
+      throw new DaemonProtocolError('Text artifact is too large to preview')
+    }
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    } catch (error) {
+      throw new DaemonProtocolError('Text artifact was not valid UTF-8', { cause: error })
+    }
+  }
+
+  /** Read one immutable V2 artifact by its daemon-authored manifest identity. */
+  async runArtifactText(
+    runId: string,
+    artifactId: string,
+    projectDir = '.',
+    signal?: AbortSignal,
+  ): Promise<string> {
+    if (!isNonEmptyString(runId)) throw new DaemonClientError('runId must not be empty')
+    if (!/^artifact_[0-9a-f]{64}$/u.test(artifactId)) {
+      throw new DaemonClientError('artifactId is invalid')
+    }
+    const url = new URL(this.endpoint(
+      `/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`,
+    ))
+    url.searchParams.set('projectDir', projectDir)
     const response = await this.requestUrl(url, { method: 'GET' }, signal)
     const declaredSize = Number(response.headers.get('content-length'))
     if (Number.isFinite(declaredSize) && declaredSize > MAX_TEXT_ARTIFACT_BYTES) {

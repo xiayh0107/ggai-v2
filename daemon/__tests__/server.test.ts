@@ -260,6 +260,126 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
     assert.equal(summary.taskId, 'task-server-v2')
     assert.equal(summary.nodeId, 'task-server-v2')
 
+    let logPage: {
+      entries: Array<{
+        event: string
+        data: Record<string, unknown>
+      }>
+    } | undefined
+    await waitFor(async () => {
+      const log = await fetch(`${fixture.baseUrl}/runs/${intent.runId}/log`)
+      if (!log.ok) return false
+      logPage = await log.json() as typeof logPage
+      return logPage?.entries.some((entry) => entry.event === 'close') ?? false
+    })
+    assert.ok(logPage)
+    const fileWrite = logPage.entries.find((entry) =>
+      entry.event === 'agent-event' && entry.data.type === 'file-write')?.data
+    assert.match(
+      typeof fileWrite?.path === 'string' ? fileWrite.path : '',
+      /\/server-task-run-v2\/files\/output\.txt$/u,
+    )
+    const close = logPage.entries.find((entry) => entry.event === 'close')?.data as {
+      artifacts: string[]
+      artifactsComplete: boolean
+      artifactManifest: {
+        version: number
+        runId: string
+        complete: boolean
+        entries: Array<{
+          artifactId: string
+          relativePath: string
+          mediaType: string
+        }>
+      }
+    }
+    assert.equal(close.artifactsComplete, true)
+    assert.equal(close.artifactManifest.version, 1)
+    assert.equal(close.artifactManifest.runId, intent.runId)
+    assert.equal(close.artifactManifest.complete, true)
+    assert.deepEqual(close.artifactManifest.entries.map((entry) => entry.relativePath), [
+      'output.txt',
+    ])
+    assert.match(close.artifacts[0] ?? '', /\/server-task-run-v2\/files\/output\.txt$/u)
+    const artifactEntry = close.artifactManifest.entries[0]!
+    const artifactResponse = await fetch(
+      `${fixture.baseUrl}/runs/${intent.runId}/artifacts/${artifactEntry.artifactId}`,
+    )
+    assert.equal(artifactResponse.status, 200)
+    assert.equal(artifactResponse.headers.get('content-type'), 'text/plain')
+    assert.match(artifactResponse.headers.get('etag') ?? '', /^"sha256-[0-9a-f]{64}"$/u)
+    assert.equal(await artifactResponse.text(), 'created by fake codex\n')
+    const rawPathResponse = await fetch(
+      `${fixture.baseUrl}/artifacts?path=${encodeURIComponent(close.artifacts[0]!)}`,
+    )
+    assert.equal(rawPathResponse.status, 403)
+
+    const attachmentTask = await fetch(`${fixture.baseUrl}/canvas/commands`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        branch: 'main',
+        baseRevision: 1,
+        mutationId: 'create-attachment-task-v2',
+        command: {
+          type: 'CreateTask',
+          task: {
+            id: 'task-attachment-v2',
+            title: 'Attachment task',
+            goal: 'Read a verified prior artifact',
+            anchor: { x: 500, y: 120 },
+            origin: { kind: 'user' },
+          },
+        },
+      }),
+    })
+    assert.equal(attachmentTask.status, 200, await attachmentTask.text())
+    const attachmentIntent = {
+      ...intent,
+      runId: 'server-task-run-attachment-v2',
+      taskId: 'task-attachment-v2',
+      baseRevision: 2,
+      prompt: 'USE_VERIFIED_ATTACHMENT',
+      attachments: [{
+        kind: 'artifact',
+        runId: intent.runId,
+        artifactId: artifactEntry.artifactId,
+      }],
+    }
+    const missingAttachment = await fetch(`${fixture.baseUrl}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...attachmentIntent,
+        runId: 'server-task-run-missing-attachment-v2',
+        attachments: [{
+          kind: 'artifact',
+          runId: intent.runId,
+          artifactId: `artifact_${'f'.repeat(64)}`,
+        }],
+      }),
+    })
+    assert.equal(missingAttachment.status, 404)
+    const attached = await fetch(`${fixture.baseUrl}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(attachmentIntent),
+    })
+    assert.equal(attached.status, 202, await attached.text())
+    await waitFor(async () =>
+      fixture.daemon.runs.get(attachmentIntent.runId)?.status === 'done')
+    const attachmentPack = await readFile(path.join(
+      fixture.root,
+      '.gg',
+      'context',
+      'runs',
+      attachmentIntent.runId,
+      'pack.md',
+    ), 'utf8')
+    assert.match(attachmentPack, /Verified read-only artifact attachments/u)
+    assert.match(attachmentPack, new RegExp(artifactEntry.artifactId, 'u'))
+    assert.match(attachmentPack, /server-task-run-v2\/files\/output\.txt/u)
+
     const pack = await readFile(
       path.join(fixture.root, '.gg', 'context', 'runs', intent.runId, 'pack.md'),
       'utf8',

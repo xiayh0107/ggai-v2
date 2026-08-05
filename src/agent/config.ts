@@ -12,3 +12,16 @@ export function artifactUrl(
   url.searchParams.set('path', artifactPath)
   return url.toString()
 }
+
+export function runArtifactUrl(
+  runId: string,
+  artifactId: string,
+  projectDir = DAEMON_PROJECT_DIR,
+): string {
+  const url = new URL(
+    `/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`,
+    DAEMON_URL,
+  )
+  url.searchParams.set('projectDir', projectDir)
+  return url.toString()
+}

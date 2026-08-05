@@ -2,10 +2,20 @@ import type { CanvasDocumentV2 } from '../src/canvas-v2/model.js'
 import type { CreateRunRequest } from './protocol.js'
 import type { RunIntentV2 } from './taskRunProtocolV2.js'
 
+export interface ResolvedArtifactAttachmentV2 {
+  runId: string
+  artifactId: string
+  projectRelativePath: string
+  mediaType: string
+  size: number
+  contentDigest: string
+}
+
 /** RunIntent after the daemon has pinned and validated its persisted Canvas revision. */
 export interface ResolvedTaskRunRequestV2 extends RunIntentV2 {
   projectDir: string
   canvasDocument: CanvasDocumentV2
+  resolvedArtifactAttachments: ResolvedArtifactAttachmentV2[]
   automationMode: 'confirm'
 }
 

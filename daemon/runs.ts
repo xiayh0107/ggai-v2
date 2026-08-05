@@ -3,6 +3,7 @@ import { lstat } from 'node:fs/promises'
 import path from 'node:path'
 import type { RunOutcome } from '../src/agent/outcome.js'
 import type { CanvasAgentEvent } from '../src/agent/types.js'
+import type { ArtifactManifestV1 } from './artifactManifestV2.js'
 import { artifactRunRelativeDir, isArtifactControlPath } from './artifactPaths.js'
 import { readRunOutcome } from './outcome.js'
 import { listArtifactSnapshot, prepareRunContext } from './packer.js'
@@ -23,6 +24,10 @@ import type {
 import { parseCanvasBranch, ProtocolError } from './protocol.js'
 import { AgentRegistry } from './registry.js'
 import { RunLogExistsError, RunLogStore, type RunLogPage } from './runLogs.js'
+import {
+  RunArtifactStoreV2,
+  type RunArtifactLookupV2,
+} from './runArtifactStorageV2.js'
 import { SessionStore, type SessionRecord } from './sessions.js'
 import {
   TaskSessionStoreV2,
@@ -116,6 +121,12 @@ interface PendingRunCreation {
   promise: Promise<RunSummary>
 }
 
+interface TerminalArtifactSnapshot {
+  files: string[]
+  complete: boolean
+  manifest?: ArtifactManifestV1
+}
+
 export class RunManager {
   readonly #projectRoot: string
   readonly #registry: AgentRegistry
@@ -126,6 +137,7 @@ export class RunManager {
   readonly #tasks = new Map<string, Promise<void>>()
   readonly #sessionStores = new Map<string, SessionStore>()
   readonly #taskSessionStores = new Map<string, TaskSessionStoreV2>()
+  readonly #artifactStoresV2 = new Map<string, RunArtifactStoreV2>()
   readonly #runLogStores = new Map<string, RunLogStore>()
   readonly #runLogRecovery = new Map<string, Promise<void>>()
   readonly #pendingCreates = new Map<string, PendingRunCreation>()
@@ -399,6 +411,20 @@ export class RunManager {
     return store.deleteLog(runId)
   }
 
+  async lookupRunArtifact(
+    runId: string,
+    artifactId: string,
+    projectDirRequest = '.',
+  ): Promise<RunArtifactLookupV2 | null> {
+    const { projectDir, store } = await this.#persistentRunStore(projectDirRequest)
+    const summary = await store.summary(runId)
+    if (!summary) return null
+    return await this.#artifactStoreV2(
+      projectDir,
+      summary.canvasBranch ?? 'main',
+    ).lookup(runId, artifactId) ?? null
+  }
+
   subscribe(runId: string, listener: RunListener, afterId = 0): RunSubscription | null {
     const run = this.#runs.get(runId)
     if (!run) return null
@@ -555,6 +581,12 @@ export class RunManager {
         nodeId: targetId,
         canvasBranch,
         runId: run.summary.runId,
+        ...(taskOwned ? {
+          projectRelativeRoot: this.#artifactStoreV2(
+            run.projectDir,
+            canvasBranch,
+          ).location(run.summary.runId).projectRelativeFilesRoot,
+        } : {}),
         onEvent: (event) => this.#publishAgentEvent(run, event),
         onError: (error) => {
           watcherError = error
@@ -635,15 +667,23 @@ export class RunManager {
         this.#publishAgentEvent(run, { type: 'done', stopReason: terminalReason })
       }
       const status = statusForStopReason(terminalReason)
-      const artifacts = await listArtifactSnapshot(run.projectDir, targetId, {
-        canvasBranch,
-        runId: run.summary.runId,
-      })
+      await watcher?.close()
+      watcher = null
+      const artifacts = await this.#collectTerminalArtifacts(run, true)
       const outcome = status === 'done'
         ? await readRunOutcome(prepared.artifactDir)
         : undefined
-      await this.#finish(run, status, artifacts.files, artifacts.complete, outcome)
+      await this.#finish(
+        run,
+        status,
+        artifacts.files,
+        artifacts.complete,
+        outcome,
+        artifacts.manifest,
+      )
     } catch (error) {
+      await watcher?.close().catch(() => undefined)
+      watcher = null
       if (capturedSessionId) {
         try {
           await this.#persistRunSession(run, capturedSessionId)
@@ -662,28 +702,24 @@ export class RunManager {
         if (!run.doneEventSent) {
           this.#publishAgentEvent(run, { type: 'done', stopReason: terminalReason })
         }
-        const snapshot = await listArtifactSnapshot(run.projectDir, targetId, {
-          canvasBranch,
-          runId: run.summary.runId,
-        })
-          .catch(() => ({ files: [], complete: false }))
-        await this.#finish(run, statusForStopReason(terminalReason), snapshot.files, snapshot.complete)
+        const snapshot = await this.#collectTerminalArtifacts(run, false)
+          .catch((): TerminalArtifactSnapshot => ({ files: [], complete: false }))
+        await this.#finish(
+          run,
+          statusForStopReason(terminalReason),
+          snapshot.files,
+          snapshot.complete,
+          undefined,
+          snapshot.manifest,
+        )
       } else {
         const message = error instanceof Error ? error.message : String(error)
         run.summary.error = message
         this.#publishAgentEvent(run, { type: 'error', message })
         if (!run.doneEventSent) this.#publishAgentEvent(run, { type: 'done', stopReason: 'error' })
-        await this.#finish(
-          run,
-          'error',
-          await listArtifactSnapshot(run.projectDir, targetId, {
-            canvasBranch,
-            runId: run.summary.runId,
-          })
-            .then((snapshot) => snapshot.files)
-            .catch(() => []),
-          false,
-        )
+        const snapshot = await this.#collectTerminalArtifacts(run, false)
+          .catch((): TerminalArtifactSnapshot => ({ files: [], complete: false }))
+        await this.#finish(run, 'error', snapshot.files, false, undefined, snapshot.manifest)
       }
     } finally {
       await watcher?.close().catch(() => undefined)
@@ -718,11 +754,17 @@ export class RunManager {
       ? path.resolve(reportedPath)
       : path.resolve(run.projectDir, reportedPath)
     const relative = path.relative(run.projectDir, absolute).split(path.sep).join('/')
-    const prefix = `${artifactRunRelativeDir(
-      run.request.canvasBranch ?? 'main',
-      run.summary.runId,
-      runTargetId(run.request),
-    )}/`
+    const root = isResolvedTaskRunRequestV2(run.request)
+      ? this.#artifactStoreV2(
+          run.projectDir,
+          run.request.canvasBranch,
+        ).location(run.summary.runId).projectRelativeFilesRoot
+      : artifactRunRelativeDir(
+          run.request.canvasBranch ?? 'main',
+          run.summary.runId,
+          runTargetId(run.request),
+        )
+    const prefix = `${root}/`
     if (!relative.startsWith(prefix) || relative.includes('\0')) return null
     return isArtifactControlPath(relative.slice(prefix.length)) ? null : relative
   }
@@ -760,6 +802,7 @@ export class RunManager {
     artifacts: string[],
     artifactsComplete: boolean,
     outcome?: RunOutcome,
+    artifactManifest?: ArtifactManifestV1,
   ): Promise<void> {
     if (run.closed) return
     try {
@@ -779,6 +822,7 @@ export class RunManager {
       sessionId: run.summary.sessionId,
       artifacts,
       artifactsComplete,
+      ...(artifactManifest ? { artifactManifest } : {}),
       ...(status === 'done' && outcome ? { outcome } : {}),
     }
     const buffered: BufferedStreamMessage = {
@@ -814,6 +858,30 @@ export class RunManager {
         // deliberately best-effort and reports degradation through its own API.
       }
     }
+  }
+
+  async #collectTerminalArtifacts(
+    run: InternalRun,
+    complete: boolean,
+  ): Promise<TerminalArtifactSnapshot> {
+    if (isResolvedTaskRunRequestV2(run.request)) {
+      const closed = await this.#artifactStoreV2(
+        run.projectDir,
+        run.request.canvasBranch,
+      ).closeRun(run.summary.runId, { complete })
+      return {
+        files: closed.manifest.entries.map((entry) => path.posix.join(
+          closed.location.projectRelativeFilesRoot,
+          entry.relativePath,
+        )),
+        complete: closed.manifest.complete,
+        manifest: closed.manifest,
+      }
+    }
+    return listArtifactSnapshot(run.projectDir, run.request.nodeId, {
+      canvasBranch: run.request.canvasBranch ?? 'main',
+      runId: run.summary.runId,
+    })
   }
 
   async #persistRunSession(run: InternalRun, sessionId: string): Promise<void> {
@@ -854,6 +922,16 @@ export class RunManager {
         validatePath: () => assertTaskSessionStoreV2Path(projectDir),
       })
       this.#taskSessionStores.set(projectDir, store)
+    }
+    return store
+  }
+
+  #artifactStoreV2(projectDir: string, canvasBranch: string): RunArtifactStoreV2 {
+    const key = JSON.stringify([projectDir, canvasBranch])
+    let store = this.#artifactStoresV2.get(key)
+    if (!store) {
+      store = new RunArtifactStoreV2(projectDir, canvasBranch)
+      this.#artifactStoresV2.set(key, store)
     }
     return store
   }
@@ -1013,8 +1091,12 @@ async function assertManagedPaths(
   taskOwned = false,
 ): Promise<void> {
   if (taskOwned) await assertTaskSessionStoreV2Path(scope.projectDir)
+  const artifactRoot = taskOwned
+    ? new RunArtifactStoreV2(scope.projectDir, canvasBranch)
+        .location(runId).projectRelativeFilesRoot
+    : artifactRunRelativeDir(canvasBranch, runId, targetId)
   const paths = [
-    artifactRunRelativeDir(canvasBranch, runId, targetId),
+    artifactRoot,
     `.gg/context/runs/${runId}`,
     '.gg/skills',
     ...(!taskOwned ? ['.gg/sessions.json'] : []),

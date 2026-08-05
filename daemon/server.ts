@@ -33,6 +33,7 @@ import {
   type RunStreamMessage,
 } from './protocol.js'
 import { AgentRegistry } from './registry.js'
+import type { RunArtifactLookupV2 } from './runArtifactStorageV2.js'
 import { RunManager } from './runs.js'
 import { SessionsCorruptionError } from './sessions.js'
 import {
@@ -41,7 +42,10 @@ import {
   TaskRunProtocolV2Error,
   type RunIntentV2,
 } from './taskRunProtocolV2.js'
-import { isResolvedTaskRunRequestV2 } from './taskRunTypesV2.js'
+import {
+  isResolvedTaskRunRequestV2,
+  type ResolvedArtifactAttachmentV2,
+} from './taskRunTypesV2.js'
 import { TaskSessionsV2CorruptionError } from './taskSessionsV2.js'
 import { WorkspacePreferencesManager } from './preferences.js'
 import {
@@ -466,11 +470,17 @@ async function route(
       if (!envelope.document.tasks.some((task) => task.id === intent.taskId)) {
         throw new ProtocolError('task does not exist at the requested revision', 'task_not_found', 404)
       }
-      assertRunIntentAttachmentsExist(intent, envelope.document)
+      const resolvedArtifactAttachments = await resolveRunIntentAttachments(
+        intent,
+        envelope.document,
+        context.runs,
+        projectDir,
+      )
       const run = await context.runs.create({
         ...intent,
         projectDir,
         canvasDocument: structuredClone(envelope.document),
+        resolvedArtifactAttachments,
         automationMode: 'confirm',
       })
       writeJson(response, 202, { runId: run.runId })
@@ -510,6 +520,28 @@ async function route(
       limit,
     })
     writeJson(response, 200, { runs })
+    return
+  }
+
+  const runArtifactMatch = pathname.match(/^\/runs\/([^/]+)\/artifacts\/([^/]+)$/)
+  if (request.method === 'GET' && runArtifactMatch) {
+    const runId = runIdFromPath(runArtifactMatch[1])
+    const artifactId = artifactIdFromPath(runArtifactMatch[2])
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    let artifact: RunArtifactLookupV2 | null
+    try {
+      artifact = await context.runs.lookupRunArtifact(runId, artifactId, projectDir)
+    } catch (error) {
+      throw new ProtocolError(
+        `artifact failed its closed-manifest integrity check: ${error instanceof Error
+          ? error.message
+          : String(error)}`,
+        'artifact_integrity_error',
+        409,
+      )
+    }
+    if (!artifact) throw new ProtocolError('artifact not found', 'artifact_not_found', 404)
+    await streamRunArtifactV2(response, artifact)
     return
   }
 
@@ -606,6 +638,19 @@ function runIdFromPath(value: string | undefined): string {
     if (error instanceof ProtocolError) throw error
     throw new ProtocolError('runId contains invalid URL encoding')
   }
+}
+
+function artifactIdFromPath(value: string | undefined): string {
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(value ?? '')
+  } catch {
+    throw new ProtocolError('artifactId contains invalid URL encoding')
+  }
+  if (!/^artifact_[0-9a-f]{64}$/u.test(decoded)) {
+    throw new ProtocolError('artifactId is invalid')
+  }
+  return decoded
 }
 
 function singleQueryParameter(url: URL, name: string): string | undefined {
@@ -872,6 +917,15 @@ async function streamArtifact(
       403,
     )
   }
+  if (/^artifacts\/\.branches\/[0-9a-f]{64}\/[A-Za-z0-9._:@-]+\/files\//u.test(
+    requestedPath,
+  )) {
+    throw new ProtocolError(
+      'run-owned artifacts must be read by runId and artifactId',
+      'artifact_forbidden',
+      403,
+    )
+  }
 
   const projectDir = await resolveProjectDir(projectRoot, url.searchParams.get('projectDir') ?? '.')
   const artifactRoot = path.resolve(projectDir, 'artifacts')
@@ -926,6 +980,47 @@ async function streamArtifact(
   stream.pipe(response)
 }
 
+async function streamRunArtifactV2(
+  response: ServerResponse,
+  artifact: RunArtifactLookupV2,
+): Promise<void> {
+  const previewLimit = isTextMediaType(artifact.mediaType)
+    ? MAX_TEXT_ARTIFACT_BYTES
+    : MAX_ARTIFACT_BYTES
+  if (artifact.size > previewLimit) {
+    throw new ProtocolError('artifact is too large to preview', 'artifact_too_large', 413)
+  }
+  const info = await stat(artifact.absolutePath).catch((error: unknown) => {
+    if (isNodeError(error, 'ENOENT') || isNodeError(error, 'ENOTDIR')) {
+      throw new ProtocolError('artifact not found', 'artifact_not_found', 404)
+    }
+    throw error
+  })
+  if (!info.isFile() || info.size !== artifact.size) {
+    throw new ProtocolError(
+      'artifact no longer matches its closed manifest',
+      'artifact_integrity_error',
+      409,
+    )
+  }
+  response.writeHead(200, {
+    'Content-Type': artifact.mediaType,
+    'Content-Length': artifact.size,
+    'Cache-Control': 'private, immutable',
+    ETag: `"sha256-${artifact.contentDigest}"`,
+    'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+  })
+  const stream = createReadStream(artifact.absolutePath)
+  stream.once('error', () => response.destroy())
+  stream.pipe(response)
+}
+
+function isTextMediaType(mediaType: string): boolean {
+  return mediaType.startsWith('text/')
+    || mediaType === 'application/json'
+    || mediaType === 'application/xml'
+}
+
 function isTextArtifact(filename: string): boolean {
   return new Set([
     '.json', '.csv', '.md', '.txt', '.log', '.ts', '.tsx', '.js', '.jsx', '.py', '.tex',
@@ -978,11 +1073,14 @@ function parseRunIntentV2ForServer(value: unknown): RunIntentV2 {
   }
 }
 
-function assertRunIntentAttachmentsExist(
+async function resolveRunIntentAttachments(
   intent: RunIntentV2,
   document: CanvasDocumentV2,
-): void {
+  runs: RunManager,
+  projectDir: string,
+): Promise<ResolvedArtifactAttachmentV2[]> {
   const nodeIds = new Set(document.nodes.map((node) => node.id))
+  const artifacts: ResolvedArtifactAttachmentV2[] = []
   for (const attachment of intent.attachments) {
     if (attachment.kind === 'node' && !nodeIds.has(attachment.nodeId)) {
       throw new ProtocolError(
@@ -991,7 +1089,30 @@ function assertRunIntentAttachmentsExist(
         404,
       )
     }
+    if (attachment.kind === 'artifact') {
+      const artifact = await runs.lookupRunArtifact(
+        attachment.runId,
+        attachment.artifactId,
+        projectDir,
+      ).catch(() => null)
+      if (!artifact) {
+        throw new ProtocolError(
+          `attachment artifact does not exist or failed verification: ${attachment.artifactId}`,
+          'attachment_not_found',
+          404,
+        )
+      }
+      artifacts.push({
+        runId: artifact.runId,
+        artifactId: artifact.artifactId,
+        projectRelativePath: artifact.projectRelativePath,
+        mediaType: artifact.mediaType,
+        size: artifact.size,
+        contentDigest: artifact.contentDigest,
+      })
+    }
   }
+  return artifacts
 }
 
 function writeError(response: ServerResponse, error: unknown): void {

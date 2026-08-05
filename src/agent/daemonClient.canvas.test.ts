@@ -105,6 +105,79 @@ describe('DaemonClient canvas persistence', () => {
     }, 'run-bad-outcome')).toThrow(DaemonProtocolError)
   })
 
+  it('decodes exact run-owned artifact manifests and reads artifacts by identity', async () => {
+    const artifactId = `artifact_${'a'.repeat(64)}`
+    const decoded = decodeDaemonRunLogEntry({
+      id: 1,
+      recordedAt: 1,
+      event: 'close',
+      data: {
+        runId: 'run-artifact-v2',
+        status: 'done',
+        sessionId: null,
+        artifacts: ['opaque-compatibility-path'],
+        artifactsComplete: true,
+        artifactManifest: {
+          version: 1,
+          runId: 'run-artifact-v2',
+          complete: true,
+          entries: [{
+            artifactId,
+            relativePath: 'source/plot.R',
+            mediaType: 'text/x-r',
+            size: 10,
+            contentDigest: 'b'.repeat(64),
+          }],
+        },
+      },
+    }, 'run-artifact-v2')
+    expect(decoded).toMatchObject({
+      event: 'close',
+      data: {
+        artifactManifest: {
+          runId: 'run-artifact-v2',
+          entries: [{ artifactId, relativePath: 'source/plot.R' }],
+        },
+      },
+    })
+
+    let requestedInput: RequestInfo | URL | undefined
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      requestedInput = input
+      return new Response('plot(1:3)\n', {
+        headers: { 'Content-Type': 'text/x-r', 'Content-Length': '10' },
+      })
+    })
+    const client = new DaemonClient({ baseUrl: 'http://127.0.0.1:7380', fetch: fetchMock })
+    await expect(client.runArtifactText(
+      'run-artifact-v2',
+      artifactId,
+      'project-a',
+    )).resolves.toBe('plot(1:3)\n')
+    const requested = new URL(String(requestedInput))
+    expect(requested.pathname).toBe(`/runs/run-artifact-v2/artifacts/${artifactId}`)
+    expect(requested.searchParams.get('projectDir')).toBe('project-a')
+
+    expect(() => decodeDaemonRunLogEntry({
+      id: 2,
+      recordedAt: 2,
+      event: 'close',
+      data: {
+        runId: 'run-artifact-v2',
+        status: 'done',
+        sessionId: null,
+        artifacts: [],
+        artifactsComplete: true,
+        artifactManifest: {
+          version: 1,
+          runId: 'foreign-run',
+          complete: true,
+          entries: [],
+        },
+      },
+    }, 'run-artifact-v2')).toThrow(DaemonProtocolError)
+  })
+
   it('ignores an unknown outcome schema without losing the terminal close', () => {
     const decoded = decodeDaemonRunLogEntry({
       id: 1,

@@ -1,6 +1,7 @@
 import type { CanvasAgentEvent } from '../src/agent/types.js'
 import { inspectRunOutcome, type RunOutcome } from '../src/agent/outcome.js'
 import type { CanvasNode, Edge } from '../src/types/canvas.js'
+import type { ArtifactManifestV1 } from './artifactManifestV2.js'
 
 export type AgentTransportKind = 'acpx' | 'codex'
 
@@ -149,6 +150,8 @@ export interface RunClosePayload {
   /** Complete terminal snapshot, relative to projectDir. */
   artifacts: string[]
   artifactsComplete: boolean
+  /** Present only for Task-owned V2 runs after durable artifact close. */
+  artifactManifest?: ArtifactManifestV1
   /** Optional, bounded semantic result authored by the Agent for a successful run. */
   outcome?: RunOutcome
 }

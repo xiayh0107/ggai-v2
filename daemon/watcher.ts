@@ -1,7 +1,11 @@
 import path from 'node:path'
 import chokidar, { type FSWatcher } from 'chokidar'
 import type { CanvasAgentEvent } from '../src/agent/types.js'
-import { artifactRunRelativeDir, isArtifactControlPath } from './artifactPaths.js'
+import {
+  artifactRunRelativeDir,
+  isArtifactControlPath,
+  isSafeArtifactReference,
+} from './artifactPaths.js'
 
 export interface ArtifactWatcher {
   close(): Promise<void>
@@ -12,6 +16,8 @@ export interface WatchArtifactsOptions {
   nodeId: string
   canvasBranch: string
   runId: string
+  /** Daemon-authored V2 files root. Legacy callers use the node-owned root. */
+  projectRelativeRoot?: string
   onEvent: (event: Extract<CanvasAgentEvent, { type: 'file-write' }>) => void
   onError?: (error: Error) => void
 }
@@ -22,11 +28,14 @@ function posixPath(value: string): string {
 
 /** Start before spawning the Agent so even very fast writes are observed. */
 export async function watchArtifacts(options: WatchArtifactsOptions): Promise<ArtifactWatcher> {
-  const relativeRoot = artifactRunRelativeDir(
+  const relativeRoot = options.projectRelativeRoot ?? artifactRunRelativeDir(
     options.canvasBranch,
     options.runId,
     options.nodeId,
   )
+  if (!isSafeArtifactReference(relativeRoot)) {
+    throw new TypeError('artifact watcher root is not a safe project artifact path')
+  }
   const absoluteRoot = path.resolve(options.projectDir, ...relativeRoot.split('/'))
   const watcher: FSWatcher = chokidar.watch(relativeRoot, {
     cwd: options.projectDir,
