@@ -3,9 +3,14 @@ import { constants, type Dirent } from 'node:fs'
 import { link, lstat, mkdir, open, readdir, rename, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
+import { inspectRunOutcome } from '../src/agent/outcome.js'
+import { inspectRunOutcomeV2 } from '../src/agent/outcomeV2.js'
+import { inspectArtifactManifestV1 } from './artifactManifestV2.js'
 import { canonicalizePotentialPath, isPathWithin } from './permissions.js'
+import { inspectProjectionPlanV2 } from './projectionPlanV2.js'
 import {
   parseCanvasBranch,
+  type RunClosePayload,
   type RunStreamMessage,
   type RunSummary,
 } from './protocol.js'
@@ -22,10 +27,15 @@ export interface RunLogPage {
   truncated?: boolean
 }
 
+export interface InterruptedRunRecoveryCandidate {
+  summary: RunSummary & { taskId: string }
+}
+
 const DEFAULT_PAGE_SIZE = 500
 const MAX_PAGE_SIZE = 2_000
 const SUMMARY_READ_CONCURRENCY = 16
 const INDEX_VALIDATION_BYTES = 1024 * 1024
+const MAX_TERMINAL_CLOSE_BYTES = 8 * 1024 * 1024
 const TERMINAL_STATUSES = new Set<RunSummary['status']>([
   'done',
   'error',
@@ -74,23 +84,7 @@ export class RunLogStore {
   append(runId: string, message: RunStreamMessage & { id: number }): Promise<void> {
     return this.#enqueue(runId, async () => {
       await this.#assertSafeRunDir(runId, true)
-      const record: PersistedRunMessage = {
-        ...message,
-        recordedAt: Date.now(),
-      }
-      const eventPath = this.#eventsPath(runId)
-      const eventFile = await openNoFollow(
-        eventPath,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND,
-      )
-      let offset: number
-      try {
-        offset = (await eventFile.stat()).size
-        await eventFile.writeFile(`${JSON.stringify(record)}\n`, 'utf8')
-      } finally {
-        await eventFile.close()
-      }
-      await writeEventOffset(this.#indexPath(runId), message.id, offset)
+      await this.#appendRecord(runId, message)
     })
   }
 
@@ -196,6 +190,21 @@ export class RunLogStore {
     }
   }
 
+  /**
+   * Reads the final indexed event without scanning the unbounded JSONL body.
+   * The index and event tail must describe the exact same complete record;
+   * crash-truncated or stale/malformed tails fail explicitly.
+   */
+  async terminalClose(runId: string): Promise<RunClosePayload | null> {
+    await this.flush(runId)
+    if (!await this.#assertSafeRunDir(runId, false)) return null
+    return readIndexedTerminalClose(
+      this.#eventsPath(runId),
+      this.#indexPath(runId),
+      runId,
+    )
+  }
+
   async deleteLog(runId: string): Promise<boolean> {
     await this.flush(runId)
     if (!await this.#assertSafeRunDir(runId, false)) return false
@@ -220,19 +229,52 @@ export class RunLogStore {
     // Startup recovery must inspect every durable summary. Applying the public
     // history page cap here used to leave older active runs permanently marked
     // as running once a project accumulated more than 2,000 runs.
-    const summaries = await this.#readAllSummaries()
-    let changed = 0
-    for (const summary of summaries) {
-      if (TERMINAL_STATUSES.has(summary.status)) continue
-      await this.finish({
-        ...summary,
-        status: 'interrupted',
-        finishedAt: Date.now(),
-        error: summary.error ?? 'daemon restarted before the run completed',
+    return (await this.#interruptActiveSummaries()).changed
+  }
+
+  /**
+   * Marks every unfinished summary interrupted and returns Task-owned V2 runs
+   * that may need their terminal artifacts and close record reconstructed.
+   *
+   * Already-interrupted Task runs remain candidates. This intentionally
+   * closes the crash window between rewriting summary.json and appending the
+   * recovery close event; the idempotent append below decides whether any
+   * durable event is still missing.
+   */
+  async prepareInterruptedRecovery(): Promise<InterruptedRunRecoveryCandidate[]> {
+    const { summaries } = await this.#interruptActiveSummaries()
+    return summaries.flatMap((summary) =>
+      summary.status === 'interrupted'
+        && typeof summary.taskId === 'string'
+        && summary.logAvailable !== false
+        ? [{ summary: summary as RunSummary & { taskId: string } }]
+        : [])
+  }
+
+  /**
+   * Appends one replayable interrupted close after the current durable tail.
+   * Existing interrupted closes win, so repeated daemon startups are a no-op.
+   * A malformed/truncated event log is never repaired in place; callers can
+   * isolate that run without risking its audit trail.
+   */
+  async appendInterruptedCloseIfMissing(
+    runId: string,
+    close: RunClosePayload & { status: 'interrupted' },
+  ): Promise<boolean> {
+    if (close.runId !== runId) throw new TypeError('recovery close belongs to a foreign run')
+    let appended = false
+    await this.#enqueue(runId, async () => {
+      await this.#assertSafeRunDir(runId, true)
+      const tail = await inspectEventLogTail(this.#eventsPath(runId))
+      if (tail.hasInterruptedClose) return
+      await this.#appendRecord(runId, {
+        id: tail.lastEventId + 1,
+        event: 'close',
+        data: close,
       })
-      changed += 1
-    }
-    return changed
+      appended = true
+    })
+    return appended
   }
 
   async flush(runId?: string): Promise<void> {
@@ -251,6 +293,51 @@ export class RunLogStore {
       if (this.#tails.get(runId) === next) this.#tails.delete(runId)
     }).catch(() => undefined)
     return next
+  }
+
+  async #appendRecord(
+    runId: string,
+    message: RunStreamMessage & { id: number },
+  ): Promise<void> {
+    const record: PersistedRunMessage = {
+      ...message,
+      recordedAt: Date.now(),
+    }
+    const eventPath = this.#eventsPath(runId)
+    const eventFile = await openNoFollow(
+      eventPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND,
+    )
+    let offset: number
+    try {
+      offset = (await eventFile.stat()).size
+      await eventFile.writeFile(`${JSON.stringify(record)}\n`, 'utf8')
+    } finally {
+      await eventFile.close()
+    }
+    await writeEventOffset(this.#indexPath(runId), message.id, offset)
+  }
+
+  async #interruptActiveSummaries(): Promise<{
+    summaries: RunSummary[]
+    changed: number
+  }> {
+    const summaries = await this.#readAllSummaries()
+    let changed = 0
+    for (let index = 0; index < summaries.length; index += 1) {
+      const summary = summaries[index]!
+      if (TERMINAL_STATUSES.has(summary.status)) continue
+      const interrupted: RunSummary = {
+        ...summary,
+        status: 'interrupted',
+        finishedAt: Date.now(),
+        error: summary.error ?? 'daemon restarted before the run completed',
+      }
+      await this.finish(interrupted)
+      summaries[index] = interrupted
+      changed += 1
+    }
+    return { summaries, changed }
   }
 
   async #readAllSummaries(): Promise<RunSummary[]> {
@@ -405,6 +492,212 @@ async function fileEndsWithNewline(
   const buffer = Buffer.alloc(1)
   const { bytesRead } = await handle.read(buffer, 0, 1, size - 1)
   return bytesRead === 1 && buffer[0] === 0x0a
+}
+
+async function readIndexedTerminalClose(
+  eventPath: string,
+  indexPath: string,
+  expectedRunId: string,
+): Promise<RunClosePayload | null> {
+  let eventFile: Awaited<ReturnType<typeof open>>
+  try {
+    eventFile = await openNoFollow(eventPath, constants.O_RDONLY)
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) return null
+    throw error
+  }
+  try {
+    const eventInfo = await eventFile.stat()
+    if (!eventInfo.isFile()) throw new Error('run event log must be a regular file')
+    if (eventInfo.size === 0) {
+      const indexSize = await indexedEventCount(indexPath)
+      if (indexSize !== 0) throw new Error('run event index extends beyond an empty log')
+      return null
+    }
+    if (!await fileEndsWithNewline(eventFile, eventInfo.size)) {
+      throw new Error('run event log has an incomplete terminal record')
+    }
+
+    const terminalEventId = await indexedEventCount(indexPath)
+    if (terminalEventId < 1) throw new Error('run event log is missing its terminal index')
+    const offset = await readEventOffset(indexPath, terminalEventId)
+    if (offset === null || offset < 0 || offset >= eventInfo.size) {
+      throw new Error('run event index has an invalid terminal offset')
+    }
+    const recordBytes = eventInfo.size - offset
+    if (recordBytes > MAX_TERMINAL_CLOSE_BYTES) {
+      throw new Error('run terminal event exceeds the supported size')
+    }
+    const buffer = Buffer.alloc(recordBytes)
+    const { bytesRead } = await eventFile.read(buffer, 0, recordBytes, offset)
+    if (bytesRead !== recordBytes) throw new Error('run terminal event could not be read completely')
+    const source = buffer.toString('utf8')
+    if (!source.endsWith('\n') || source.slice(0, -1).includes('\n')) {
+      throw new Error('run event index does not point at the terminal record')
+    }
+    let message: PersistedRunMessage
+    try {
+      message = decodeMessage(source.slice(0, -1))
+    } catch (error) {
+      throw new Error('run log contains an invalid terminal event', { cause: error })
+    }
+    if (message.id !== terminalEventId) {
+      throw new Error('run terminal event id does not match its index')
+    }
+    if (message.event !== 'close') return null
+    return decodeTerminalClose(message.data, expectedRunId)
+  } finally {
+    await eventFile.close()
+  }
+}
+
+async function indexedEventCount(indexPath: string): Promise<number> {
+  let indexFile: Awaited<ReturnType<typeof open>>
+  try {
+    indexFile = await openNoFollow(indexPath, constants.O_RDONLY)
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) return 0
+    throw error
+  }
+  try {
+    const info = await indexFile.stat()
+    if (!info.isFile()) throw new Error('run event index must be a regular file')
+    if (info.size % 8 !== 0) throw new Error('run event index has a partial terminal entry')
+    const count = info.size / 8
+    if (!Number.isSafeInteger(count)) throw new Error('run event index is too large')
+    return count
+  } finally {
+    await indexFile.close()
+  }
+}
+
+function decodeTerminalClose(value: unknown, expectedRunId: string): RunClosePayload {
+  if (!isRecord(value)
+    || value.runId !== expectedRunId
+    || !isTerminalCloseStatus(value.status)
+    || (value.sessionId !== null && typeof value.sessionId !== 'string')
+    || !Array.isArray(value.artifacts)
+    || !value.artifacts.every((artifact) => typeof artifact === 'string')
+    || typeof value.artifactsComplete !== 'boolean') {
+    throw new Error('run log contains an invalid terminal close')
+  }
+  const artifactManifest = value.artifactManifest === undefined
+    ? undefined
+    : inspectArtifactManifestV1(value.artifactManifest)
+  if (artifactManifest?.status === 'invalid'
+    || (artifactManifest?.status === 'valid'
+      && artifactManifest.manifest.runId !== expectedRunId)) {
+    throw new Error('run log contains an invalid terminal artifact manifest')
+  }
+  const outcome = value.outcome === undefined ? undefined : inspectRunOutcome(value.outcome)
+  if (outcome?.status !== undefined && outcome.status !== 'valid') {
+    throw new Error('run log contains an invalid terminal outcome')
+  }
+  const projectionPlan = value.projectionPlan === undefined
+    ? undefined
+    : inspectProjectionPlanV2(value.projectionPlan)
+  if (projectionPlan?.status === 'invalid'
+    || (projectionPlan?.status === 'valid'
+      && projectionPlan.plan.runId !== expectedRunId)) {
+    throw new Error('run log contains an invalid terminal projection plan')
+  }
+  let suggestedActions
+  if (value.suggestedActions !== undefined) {
+    if (projectionPlan?.status !== 'valid') {
+      throw new Error('run log terminal close has actions without a projection plan')
+    }
+    const inspection = inspectRunOutcomeV2({
+      schemaVersion: 2,
+      suggestedActions: value.suggestedActions,
+      outputs: [],
+      taskProposals: [],
+    })
+    if (inspection.status !== 'valid'
+      || (projectionPlan.plan.status === 'partial'
+        && inspection.outcome.suggestedActions.length > 0)) {
+      throw new Error('run log contains invalid terminal suggested actions')
+    }
+    suggestedActions = inspection.outcome.suggestedActions
+  }
+  return {
+    runId: expectedRunId,
+    status: value.status,
+    sessionId: value.sessionId,
+    artifacts: [...value.artifacts],
+    artifactsComplete: value.artifactsComplete,
+    ...(artifactManifest?.status === 'valid'
+      ? { artifactManifest: artifactManifest.manifest }
+      : {}),
+    ...(outcome?.status === 'valid' ? { outcome: outcome.outcome } : {}),
+    ...(projectionPlan?.status === 'valid'
+      ? { projectionPlan: projectionPlan.plan }
+      : {}),
+    ...(suggestedActions ? { suggestedActions } : {}),
+  }
+}
+
+function isTerminalCloseStatus(value: unknown): value is RunClosePayload['status'] {
+  return value === 'done'
+    || value === 'error'
+    || value === 'cancelled'
+    || value === 'interrupted'
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+async function inspectEventLogTail(filePath: string): Promise<{
+  lastEventId: number
+  hasInterruptedClose: boolean
+}> {
+  let eventFile: Awaited<ReturnType<typeof open>>
+  try {
+    eventFile = await openNoFollow(filePath, constants.O_RDONLY)
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) {
+      return { lastEventId: 0, hasInterruptedClose: false }
+    }
+    throw error
+  }
+  const info = await eventFile.stat()
+  const input = eventFile.createReadStream({
+    encoding: 'utf8',
+    autoClose: false,
+  })
+  const lines = createInterface({ input, crlfDelay: Infinity })
+  let lastEventId = 0
+  let hasInterruptedClose = false
+  try {
+    for await (const line of lines) {
+      if (!line) continue
+      let decoded: PersistedRunMessage
+      try {
+        decoded = decodeMessage(line)
+      } catch (error) {
+        throw new Error('run log contains an invalid recovery event', { cause: error })
+      }
+      if (decoded.id <= lastEventId) {
+        throw new Error('run log event ids are not strictly increasing')
+      }
+      lastEventId = decoded.id
+      if (decoded.event === 'close'
+        && typeof decoded.data === 'object'
+        && decoded.data !== null
+        && !Array.isArray(decoded.data)
+        && (decoded.data as { status?: unknown }).status === 'interrupted') {
+        hasInterruptedClose = true
+      }
+    }
+    if (info.size > 0 && !await fileEndsWithNewline(eventFile, info.size)) {
+      throw new Error('run log has an incomplete final event')
+    }
+    return { lastEventId, hasInterruptedClose }
+  } finally {
+    lines.close()
+    input.destroy()
+    await eventFile.close()
+  }
 }
 
 function assertRunId(runId: string): void {

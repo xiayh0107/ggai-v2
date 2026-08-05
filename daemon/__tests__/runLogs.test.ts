@@ -175,6 +175,177 @@ test('startup recovery marks unfinished runs interrupted without deleting logs',
   }
 })
 
+test('V2 startup recovery returns durable Task identity and appends one replayable close', async () => {
+  const subject = await fixture()
+  try {
+    await subject.store.start({
+      ...summary('run-task-recovery'),
+      taskId: 'task-1',
+      nodeId: 'task-1',
+      canvasBranch: 'feature/recovery',
+    })
+    await subject.store.append('run-task-recovery', {
+      id: 1,
+      event: 'agent-event',
+      data: { type: 'thinking', text: 'before restart' },
+    })
+
+    const [candidate] = await subject.store.prepareInterruptedRecovery()
+    assert.deepEqual(candidate?.summary, {
+      ...summary('run-task-recovery', 'interrupted'),
+      taskId: 'task-1',
+      nodeId: 'task-1',
+      canvasBranch: 'feature/recovery',
+      finishedAt: candidate?.summary.finishedAt,
+      error: 'daemon restarted before the run completed',
+    })
+    assert.equal(await subject.store.appendInterruptedCloseIfMissing('run-task-recovery', {
+      runId: 'run-task-recovery',
+      status: 'interrupted',
+      sessionId: null,
+      artifacts: [],
+      artifactsComplete: false,
+    }), true)
+    assert.equal(await subject.store.appendInterruptedCloseIfMissing('run-task-recovery', {
+      runId: 'run-task-recovery',
+      status: 'interrupted',
+      sessionId: null,
+      artifacts: [],
+      artifactsComplete: false,
+    }), false)
+
+    const page = await subject.store.page('run-task-recovery')
+    assert.deepEqual(page?.entries.map(({ id, event }) => ({ id, event })), [
+      { id: 1, event: 'agent-event' },
+      { id: 2, event: 'close' },
+    ])
+    const close = page?.entries.at(-1)
+    assert.ok(close && close.event === 'close')
+    assert.equal(close.data.status, 'interrupted')
+    assert.deepEqual(await subject.store.terminalClose('run-task-recovery'), close.data)
+    assert.equal((await subject.store.prepareInterruptedRecovery()).length, 1)
+  } finally {
+    await subject.close()
+  }
+})
+
+test('terminal close uses the indexed tail and rejects stale or truncated audit state', async () => {
+  const subject = await fixture()
+  try {
+    await subject.store.start(summary('run-tail-open'))
+    await subject.store.append('run-tail-open', {
+      id: 1,
+      event: 'agent-event',
+      data: { type: 'thinking', text: 'not terminal' },
+    })
+    assert.equal(await subject.store.terminalClose('run-tail-open'), null)
+
+    await subject.store.start(summary('run-tail-stale'))
+    await subject.store.append('run-tail-stale', {
+      id: 1,
+      event: 'agent-event',
+      data: { type: 'thinking', text: 'indexed' },
+    })
+    await appendFile(
+      path.join(subject.store.rootDir, 'run-tail-stale', 'events.jsonl'),
+      `${JSON.stringify({
+        id: 2,
+        event: 'close',
+        data: {
+          runId: 'run-tail-stale',
+          status: 'interrupted',
+          sessionId: null,
+          artifacts: [],
+          artifactsComplete: false,
+        },
+        recordedAt: 200,
+      })}\n`,
+      'utf8',
+    )
+    await assert.rejects(
+      subject.store.terminalClose('run-tail-stale'),
+      /index does not point at the terminal record/u,
+    )
+
+    await subject.store.start(summary('run-tail-truncated'))
+    await subject.store.append('run-tail-truncated', {
+      id: 1,
+      event: 'agent-event',
+      data: { type: 'thinking', text: 'indexed' },
+    })
+    await appendFile(
+      path.join(subject.store.rootDir, 'run-tail-truncated', 'events.jsonl'),
+      '{truncated',
+      'utf8',
+    )
+    await assert.rejects(
+      subject.store.terminalClose('run-tail-truncated'),
+      /incomplete terminal record/u,
+    )
+  } finally {
+    await subject.close()
+  }
+})
+
+test('V2 recovery candidates exclude legacy and explicitly deleted logs', async () => {
+  const subject = await fixture()
+  try {
+    await subject.store.start(summary('run-v1-active'))
+    await subject.store.start({
+      ...summary('run-v2-deleted'),
+      taskId: 'task-deleted',
+      nodeId: 'task-deleted',
+      logAvailable: false,
+    })
+
+    assert.deepEqual(await subject.store.prepareInterruptedRecovery(), [])
+    assert.equal((await subject.store.summary('run-v1-active'))?.status, 'interrupted')
+    assert.equal((await subject.store.summary('run-v2-deleted'))?.status, 'interrupted')
+  } finally {
+    await subject.close()
+  }
+})
+
+test('recovery refuses to append over a damaged log without blocking other runs', async () => {
+  const subject = await fixture()
+  try {
+    for (const runId of ['run-damaged-events', 'run-valid-events']) {
+      await subject.store.start({
+        ...summary(runId),
+        taskId: `task-${runId}`,
+        nodeId: `task-${runId}`,
+      })
+    }
+    await appendFile(
+      path.join(subject.store.rootDir, 'run-damaged-events', 'events.jsonl'),
+      '{incomplete',
+      'utf8',
+    )
+    const candidates = await subject.store.prepareInterruptedRecovery()
+    assert.equal(candidates.length, 2)
+    await assert.rejects(subject.store.appendInterruptedCloseIfMissing('run-damaged-events', {
+      runId: 'run-damaged-events',
+      status: 'interrupted',
+      sessionId: null,
+      artifacts: [],
+      artifactsComplete: false,
+    }), /invalid|incomplete/u)
+    assert.equal(await subject.store.appendInterruptedCloseIfMissing('run-valid-events', {
+      runId: 'run-valid-events',
+      status: 'interrupted',
+      sessionId: null,
+      artifacts: [],
+      artifactsComplete: false,
+    }), true)
+    assert.equal(
+      (await subject.store.page('run-valid-events'))?.entries.at(-1)?.event,
+      'close',
+    )
+  } finally {
+    await subject.close()
+  }
+})
+
 test('startup recovery scans active runs beyond the public 2,000-entry history cap', async () => {
   const subject = await fixture()
   try {

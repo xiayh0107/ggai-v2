@@ -150,7 +150,7 @@ export interface RunSummary {
 
 export interface RunClosePayload {
   runId: string
-  status: Extract<DaemonRunStatus, 'done' | 'error' | 'cancelled'>
+  status: Extract<DaemonRunStatus, 'done' | 'error' | 'cancelled' | 'interrupted'>
   sessionId: string | null
   /** Complete terminal snapshot, relative to projectDir. */
   artifacts: string[]
