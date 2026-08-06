@@ -232,6 +232,23 @@ export interface DaemonCreateRunResponse {
   sessionId?: string
 }
 
+export type DaemonRunIntentAttachmentV2 =
+  | { kind: 'artifact'; runId: string; artifactId: string }
+  | { kind: 'node'; nodeId: string }
+
+/** Exact Canvas V2 POST /runs body. Project scope belongs in the query string. */
+export interface DaemonRunIntentV2 {
+  schemaVersion: 2
+  runId: string
+  taskId: string
+  agentId: string
+  canvasBranch: string
+  baseRevision: number
+  prompt: string
+  attachments: DaemonRunIntentAttachmentV2[]
+  materializationPolicy: 'auto'
+}
+
 export interface DaemonCloseEvent {
   runId: string
   status: DaemonCloseStatus
@@ -307,6 +324,8 @@ export interface DaemonPendingProjectionV2 {
 
 export interface DaemonRunStreamOptions {
   onEvent: (event: CanvasAgentEvent) => void
+  /** Exact daemon event identity, unlike the legacy split event/id callbacks. */
+  onEventEnvelope?: (entry: { id: number | null; data: CanvasAgentEvent }) => void
   signal?: AbortSignal
   projectDir?: string
   afterEventId?: number
@@ -324,6 +343,8 @@ export interface DaemonRunStreamResult {
 
 export interface DaemonRunSummary {
   runId: string
+  /** Required and strictly decoded by the Canvas V2 task-run methods. */
+  taskId?: string
   nodeId: string
   agentId: string
   /** Legacy summaries without this field are normalized to `main` at decode time. */
@@ -339,8 +360,16 @@ export interface DaemonRunSummary {
 export interface DaemonRunsQuery {
   projectDir?: string
   nodeId?: string
+  taskId?: string
   branch?: string
   limit?: number
+}
+
+export interface DaemonTaskRunsV2Query {
+  projectDir: string
+  taskId: string
+  branch: string
+  limit: number
 }
 
 export interface DaemonRunLogEntry {
@@ -1135,6 +1164,73 @@ function decodeSessionId(value: unknown, context: string): string {
   throw new DaemonProtocolError(`${context} did not contain a non-empty sessionId`)
 }
 
+function canonicalRunIntentV2(intent: DaemonRunIntentV2): DaemonRunIntentV2 {
+  if (!isRecord(intent)
+    || intent.schemaVersion !== 2
+    || !isDaemonIdentifier(intent.runId)
+    || !isDaemonIdentifier(intent.taskId)
+    || !isDaemonIdentifier(intent.agentId)
+    || !isCanvasBranchV2(intent.canvasBranch)
+    || !Number.isSafeInteger(intent.baseRevision)
+    || intent.baseRevision < 0
+    || typeof intent.prompt !== 'string'
+    || intent.prompt.length > 250_000
+    || !Array.isArray(intent.attachments)
+    || intent.attachments.length > 100
+    || intent.materializationPolicy !== 'auto') {
+    throw new DaemonClientError('RunIntent V2 is invalid')
+  }
+  const attachments = intent.attachments.map((attachment): DaemonRunIntentAttachmentV2 => {
+    if (!isRecord(attachment) || typeof attachment.kind !== 'string') {
+      throw new DaemonClientError('RunIntent V2 attachment is invalid')
+    }
+    if (attachment.kind === 'node' && isDaemonIdentifier(attachment.nodeId)) {
+      return { kind: 'node', nodeId: attachment.nodeId }
+    }
+    if (attachment.kind === 'artifact'
+      && isDaemonIdentifier(attachment.runId)
+      && typeof attachment.artifactId === 'string'
+      && /^artifact_[0-9a-f]{64}$/u.test(attachment.artifactId)) {
+      return {
+        kind: 'artifact',
+        runId: attachment.runId,
+        artifactId: attachment.artifactId,
+      }
+    }
+    throw new DaemonClientError('RunIntent V2 attachment is invalid')
+  })
+  const keys = attachments.map((attachment) => attachment.kind === 'node'
+    ? `node:${attachment.nodeId}`
+    : `artifact:${attachment.runId}:${attachment.artifactId}`)
+  if (new Set(keys).size !== keys.length) {
+    throw new DaemonClientError('RunIntent V2 attachments contain duplicates')
+  }
+  return {
+    schemaVersion: 2,
+    runId: intent.runId,
+    taskId: intent.taskId,
+    agentId: intent.agentId,
+    canvasBranch: intent.canvasBranch,
+    baseRevision: intent.baseRevision,
+    prompt: intent.prompt,
+    attachments,
+    materializationPolicy: 'auto',
+  }
+}
+
+function isCanvasBranchV2(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 120
+    && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(value)
+    && !value.includes('..')
+    && !value.includes('//')
+    && !value.endsWith('/')
+    && !value.endsWith('.')
+    && !value.endsWith('.lock')
+    && value.split('/').every((part) => part !== '.' && !part.endsWith('.'))
+}
+
 function decodeCloseEvent(value: unknown, expectedRunId: string): DaemonCloseEvent {
   if (!isRecord(value)
     || !isNonEmptyString(value.runId)
@@ -1252,7 +1348,7 @@ function decodeEventId(value: string | undefined): number | null {
   return parsed
 }
 
-function decodeRunSummary(value: unknown): DaemonRunSummary {
+function decodeRunSummary(value: unknown, requireTaskId = false): DaemonRunSummary {
   if (!isRecord(value)
     || !isNonEmptyString(value.runId)
     || !isNonEmptyString(value.nodeId)
@@ -1268,6 +1364,10 @@ function decodeRunSummary(value: unknown): DaemonRunSummary {
   if (value.canvasBranch !== undefined && !isNonEmptyString(value.canvasBranch)) {
     throw new DaemonProtocolError('GET /runs/:id response had an invalid canvasBranch')
   }
+  if ((requireTaskId && !isDaemonIdentifier(value.taskId))
+    || (value.taskId !== undefined && !isDaemonIdentifier(value.taskId))) {
+    throw new DaemonProtocolError('GET /runs/:id response had an invalid taskId')
+  }
   if (value.error !== undefined && typeof value.error !== 'string') {
     throw new DaemonProtocolError('GET /runs/:id response had an invalid error')
   }
@@ -1276,6 +1376,7 @@ function decodeRunSummary(value: unknown): DaemonRunSummary {
   }
   return {
     runId: value.runId,
+    ...(typeof value.taskId === 'string' ? { taskId: value.taskId } : {}),
     nodeId: value.nodeId,
     agentId: value.agentId,
     canvasBranch: typeof value.canvasBranch === 'string' ? value.canvasBranch : 'main',
@@ -1849,6 +1950,93 @@ export class DaemonClient implements AgentTransport {
     await this.permissions(permissionId, resolution, signal)
   }
 
+  /** POST /runs?projectDir= with the exact Task-owned V2 intent. */
+  async createTaskRunV2(
+    intent: DaemonRunIntentV2,
+    projectDir: string,
+    signal?: AbortSignal,
+  ): Promise<DaemonCreateRunResponse> {
+    if (!projectDir) throw new DaemonClientError('projectDir must not be empty')
+    const body = canonicalRunIntentV2(intent)
+    const url = new URL(this.endpoint('/runs'))
+    url.searchParams.set('projectDir', projectDir)
+    const timeout = new AbortController()
+    const timeoutId = setTimeout(() => {
+      timeout.abort(new DOMException('Creating the Task Run timed out', 'TimeoutError'))
+    }, CREATE_RUN_TIMEOUT_MS)
+    const combined = combineAbortSignals([signal, timeout.signal])
+    try {
+      const response = await this.requestUrl(url, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }, combined.signal)
+      const payload = await this.readJson(response, 'POST /runs V2 response')
+      if (!isRecord(payload)
+        || !hasExactKeys(payload, ['runId'])
+        || payload.runId !== body.runId) {
+        throw new DaemonProtocolError('POST /runs V2 response did not match its RunIntent')
+      }
+      return { runId: body.runId }
+    } finally {
+      clearTimeout(timeoutId)
+      combined.dispose()
+    }
+  }
+
+  /** GET /runs/:id with Task ownership required rather than inferred from nodeId. */
+  async getTaskRunV2(
+    runId: string,
+    projectDir: string,
+    signal?: AbortSignal,
+  ): Promise<DaemonRunSummary & { taskId: string }> {
+    if (!isDaemonIdentifier(runId)) throw new DaemonClientError('runId is invalid')
+    if (!projectDir) throw new DaemonClientError('projectDir must not be empty')
+    const url = new URL(this.endpoint(`/runs/${encodeURIComponent(runId)}`))
+    url.searchParams.set('projectDir', projectDir)
+    const response = await this.requestUrl(url, { method: 'GET' }, signal)
+    const summary = decodeRunSummary(
+      await this.readJson(response, 'GET /runs/:id V2 response'),
+      true,
+    )
+    if (summary.runId !== runId || summary.taskId === undefined) {
+      throw new DaemonProtocolError('GET /runs/:id V2 response had mismatched identity')
+    }
+    return summary as DaemonRunSummary & { taskId: string }
+  }
+
+  /** GET /runs with all V2 ownership filters explicit and every summary strict. */
+  async listTaskRunsV2(
+    query: DaemonTaskRunsV2Query,
+    signal?: AbortSignal,
+  ): Promise<Array<DaemonRunSummary & { taskId: string }>> {
+    if (!query.projectDir) throw new DaemonClientError('projectDir must not be empty')
+    if (!isDaemonIdentifier(query.taskId)) throw new DaemonClientError('taskId is invalid')
+    if (!isCanvasBranchV2(query.branch)) throw new DaemonClientError('branch is invalid')
+    if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 2_000) {
+      throw new DaemonClientError('limit must be between 1 and 2000')
+    }
+    const url = new URL(this.endpoint('/runs'))
+    url.searchParams.set('projectDir', query.projectDir)
+    url.searchParams.set('taskId', query.taskId)
+    url.searchParams.set('branch', query.branch)
+    url.searchParams.set('limit', String(query.limit))
+    const response = await this.requestUrl(url, { method: 'GET' }, signal)
+    const payload = await this.readJson(response, 'GET /runs V2 response')
+    if (!isRecord(payload) || !hasExactKeys(payload, ['runs']) || !Array.isArray(payload.runs)) {
+      throw new DaemonProtocolError('GET /runs V2 response did not contain an exact run list')
+    }
+    return payload.runs.map((candidate) => {
+      const summary = decodeRunSummary(candidate, true)
+      if (summary.taskId !== query.taskId || summary.canvasBranch !== query.branch) {
+        throw new DaemonProtocolError('GET /runs V2 response escaped its Task or branch filter')
+      }
+      if (summary.nodeId !== summary.taskId) {
+        throw new DaemonProtocolError('GET /runs V2 response had an invalid legacy identity mirror')
+      }
+      return summary as DaemonRunSummary & { taskId: string }
+    })
+  }
+
   /** POST /runs */
   async createRun(
     request: DaemonCreateRunRequest,
@@ -1995,6 +2183,7 @@ export class DaemonClient implements AgentTransport {
     const url = new URL(this.endpoint('/runs'))
     if (query.projectDir !== undefined) url.searchParams.set('projectDir', query.projectDir)
     if (query.nodeId !== undefined) url.searchParams.set('nodeId', query.nodeId)
+    if (query.taskId !== undefined) url.searchParams.set('taskId', query.taskId)
     if (query.branch !== undefined) url.searchParams.set('branch', query.branch)
     if (query.limit !== undefined) url.searchParams.set('limit', String(query.limit))
     const response = await this.requestUrl(url, { method: 'GET' }, signal)
@@ -2002,7 +2191,7 @@ export class DaemonClient implements AgentTransport {
     if (!isRecord(payload) || !Array.isArray(payload.runs)) {
       throw new DaemonProtocolError('GET /runs response did not contain a run list')
     }
-    return payload.runs.map(decodeRunSummary)
+    return payload.runs.map((candidate) => decodeRunSummary(candidate))
   }
 
   /** GET /runs/:id/log, used to rebuild progress before resuming the live stream. */
@@ -2086,6 +2275,7 @@ export class DaemonClient implements AgentTransport {
           stopReason = decoded.event.stopReason
         }
         options.onEvent(decoded.event)
+        options.onEventEnvelope?.({ id: eventId, data: decoded.event })
         acknowledge()
         return false
       }
@@ -2157,6 +2347,7 @@ export class DaemonClient implements AgentTransport {
             if (entry.event === 'agent-event') {
               if (entry.data.type === 'done') stopReason = entry.data.stopReason
               options.onEvent(entry.data)
+              options.onEventEnvelope?.({ id: entry.id, data: entry.data })
             } else if (entry.event === 'session') {
               active.sessionId = entry.data.sessionId
               options.onSessionId?.(entry.data.sessionId)
