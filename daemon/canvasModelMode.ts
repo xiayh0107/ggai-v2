@@ -39,10 +39,18 @@ export function parseCanvasModelMode(value: unknown): CanvasModelMode {
 }
 
 export function parseCanvasModelV2Flag(value: unknown): CanvasModelMode {
-  if (typeof value !== 'string') return 'v1'
+  if (value === undefined) return 'v2'
+  if (typeof value !== 'string') {
+    throw new CanvasModelBootError(
+      'GGAI_CANVAS_MODEL_V2 must be 0, 1, false, or true',
+      'canvas_model_mismatch',
+      false,
+    )
+  }
   const normalized = value.trim().toLowerCase()
   if (normalized === '1' || normalized === 'true') return 'v2'
-  if (normalized === '0' || normalized === 'false' || normalized === '') return 'v1'
+  if (normalized === '') return 'v2'
+  if (normalized === '0' || normalized === 'false') return 'v1'
   throw new CanvasModelBootError(
     'GGAI_CANVAS_MODEL_V2 must be 0, 1, false, or true',
     'canvas_model_mismatch',

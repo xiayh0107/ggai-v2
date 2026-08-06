@@ -73,6 +73,8 @@ function parseConfig(argv: string[]): DaemonConfig {
         '                   [--canvas-model v1|v2]',
         '',
         'The server always binds to 127.0.0.1.',
+        'Canvas V2 is the default; V1 is available only as an explicit archive/rollback diagnostic.',
+        'A project without the V2 marker must first run: npm run canvas:v2:reset -- --apply',
         'acpx adapters are experimental and disabled until --acpx-agent is provided.',
       ].join('\n'))
       process.exit(0)

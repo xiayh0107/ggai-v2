@@ -36,10 +36,12 @@ async function writeV2Marker(projectDir: string): Promise<void> {
 test('model selection flags are explicit and reject ambiguous values', () => {
   assert.equal(parseCanvasModelMode('v1'), 'v1')
   assert.equal(parseCanvasModelMode('2'), 'v2')
-  assert.equal(parseCanvasModelV2Flag(undefined), 'v1')
+  assert.equal(parseCanvasModelV2Flag(undefined), 'v2')
+  assert.equal(parseCanvasModelV2Flag('  '), 'v2')
   assert.equal(parseCanvasModelV2Flag('TRUE'), 'v2')
   assert.equal(parseCanvasModelV2Flag('0'), 'v1')
   assert.throws(() => parseCanvasModelV2Flag('enabled'), CanvasModelBootError)
+  assert.throws(() => parseCanvasModelV2Flag(null), CanvasModelBootError)
 })
 
 test('V2 requires the reset marker and V1 refuses a V2 project', async () => {
@@ -49,7 +51,8 @@ test('V2 requires the reset marker and V1 refuses a V2 project', async () => {
     assertCanvasModelReady(projectDir, 'v2'),
     (error: unknown) => error instanceof CanvasModelBootError
       && error.code === 'canvas_reset_required'
-      && error.resetRequired,
+      && error.resetRequired
+      && error.message.includes('npm run canvas:v2:reset -- --apply'),
   )
 
   await writeV2Marker(projectDir)

@@ -64,14 +64,27 @@ test('rejects invalid Vite ports before starting either process', () => {
   }
 })
 
-test('uses one explicit Canvas model for both development child processes', () => {
+test('defaults both development child processes to Canvas V2', () => {
   assert.deepEqual(resolveCanvasModelEnvironment({}), {
-    model: 'v1',
+    model: 'v2',
     environment: {
-      GGAI_CANVAS_MODEL_V2: '0',
-      VITE_GGAI_CANVAS_MODEL_V2: '0',
+      GGAI_CANVAS_MODEL_V2: '1',
+      VITE_GGAI_CANVAS_MODEL_V2: '1',
     },
   })
+  assert.deepEqual(resolveCanvasModelEnvironment({
+    GGAI_CANVAS_MODEL_V2: '  ',
+    VITE_GGAI_CANVAS_MODEL_V2: '',
+  }), {
+    model: 'v2',
+    environment: {
+      GGAI_CANVAS_MODEL_V2: '1',
+      VITE_GGAI_CANVAS_MODEL_V2: '1',
+    },
+  })
+})
+
+test('mirrors an explicit model for diagnostic development launches', () => {
   assert.deepEqual(resolveCanvasModelEnvironment({
     GGAI_CANVAS_MODEL_V2: 'true',
     KEEP_ME: 'yes',
@@ -87,6 +100,13 @@ test('uses one explicit Canvas model for both development child processes', () =
     resolveCanvasModelEnvironment({ VITE_GGAI_CANVAS_MODEL_V2: '1' }).model,
     'v2',
   )
+  assert.deepEqual(resolveCanvasModelEnvironment({ GGAI_CANVAS_MODEL_V2: 'false' }), {
+    model: 'v1',
+    environment: {
+      GGAI_CANVAS_MODEL_V2: '0',
+      VITE_GGAI_CANVAS_MODEL_V2: '0',
+    },
+  })
 })
 
 test('rejects invalid or contradictory Canvas model flags before startup', () => {
