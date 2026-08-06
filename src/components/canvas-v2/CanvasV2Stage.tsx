@@ -442,11 +442,15 @@ export default function CanvasV2Stage() {
     const selection = canonicalSelectionForStateV2(stateRef.current)
     const alreadySelected = selection.some((target) =>
       target.kind === 'task' && target.id === task.id)
+    const coveredBySelection = selectionCoverageV2(
+      stateRef.current.document,
+      selection,
+    ).taskIds.has(task.id)
     if (event.shiftKey) {
       selectTask(task, true)
       return
     }
-    if (alreadySelected && selection.length > 1
+    if ((alreadySelected || coveredBySelection) && selection.length > 1
       && beginSelectionDrag(event)) return
     selectTask(task, false)
     beginGesture({
@@ -469,11 +473,15 @@ export default function CanvasV2Stage() {
     const selection = canonicalSelectionForStateV2(stateRef.current)
     const alreadySelected = selection.some((target) =>
       target.kind === 'node' && target.id === node.id)
+    const coveredBySelection = selectionCoverageV2(
+      stateRef.current.document,
+      selection,
+    ).nodeIds.has(node.id)
     if (event.shiftKey) {
       selectTarget({ kind: 'node', id: node.id }, true)
       return
     }
-    if (alreadySelected && selection.length > 1
+    if ((alreadySelected || coveredBySelection) && selection.length > 1
       && beginSelectionDrag(event)) return
     selectTarget({ kind: 'node', id: node.id }, false)
     beginGesture({
@@ -856,6 +864,15 @@ export default function CanvasV2Stage() {
     return bounds.length > 0 ? unionBoundsV2(bounds) : null
   })()
   const compoundSelection = effectiveSelection.length > 1 && contextSelectionBounds !== null
+  const compoundCoverage = selectionCoverageV2(stageDocument, effectiveSelection)
+  const compoundSelectedTaskIds = new Set([
+    ...selectedTaskIds,
+    ...compoundCoverage.taskIds,
+  ])
+  const compoundSelectedNodeIds = new Set([
+    ...selectedNodeIds,
+    ...compoundCoverage.nodeIds,
+  ])
   const selectionSurfaceBounds = contextSelectionBounds
     ? compoundSelection
       ? padBoundsV2(contextSelectionBounds, 14)
@@ -1355,6 +1372,7 @@ export default function CanvasV2Stage() {
                 && currentEdgeDraft.id === effectiveSelection[0]?.id
                 ? currentEdgeDraft.portSide ?? null
                 : null}
+            onDragStart={compoundSelection ? beginSelectionDrag : undefined}
             onPortActivate={(side: CanvasV2SelectionPortSide) => {
               if (compoundSelection && temporarySelectionEndpoint) {
                 onPortActivate({ ...temporarySelectionEndpoint, portSide: side })
@@ -1371,11 +1389,13 @@ export default function CanvasV2Stage() {
             view={view}
             projectDir={state.scope.projectDir}
             selectedTask={selectedTaskIds.has(view.task.id)}
-            compoundSelectedTask={compoundSelection && selectedTaskIds.has(view.task.id)}
+            compoundSelectedTask={compoundSelection
+              && compoundSelectedTaskIds.has(view.task.id)}
             compoundSelection={compoundSelection}
             showRunPanel={!compoundSelection && effectiveSelection.length === 1
               && selectedTaskIds.has(view.task.id)}
             selectedNodeIds={selectedNodeIds}
+            compoundSelectedNodeIds={compoundSelectedNodeIds}
             explicitlyCollapsed={state.view.collapsedTaskIds.includes(view.task.id)}
             activeKey={activeKey}
             offset={taskPreviewOffsetV2(view.task, preview)}
@@ -1405,14 +1425,15 @@ export default function CanvasV2Stage() {
             frame={nodeFrames.get(node.id)}
             projectDir={state.scope.projectDir}
             selected={selectedNodeIds.has(node.id)}
-            compoundSelected={compoundSelection && selectedNodeIds.has(node.id)}
+            compoundSelected={compoundSelection && compoundSelectedNodeIds.has(node.id)}
             tabIndex={activeKey === `node:${node.id}` ? 0 : -1}
             onFocus={() => setRovingKey(`node:${node.id}`)}
             onKeyDown={(event) => onEntityKeyDown(`node:${node.id}`, event)}
             onDragStart={beginNodeDrag}
             onResizeStart={beginNodeResize}
             onPortActivate={(entry) => onPortActivate({ kind: 'node', id: entry.id })}
-            showInlinePort={!selectedNodeIds.has(node.id)}
+            showInlinePort={!selectedNodeIds.has(node.id)
+              && !(compoundSelection && compoundSelectedNodeIds.has(node.id))}
             connectionActive={currentEdgeDraft?.kind === 'node'
               && currentEdgeDraft.id === node.id}
             onMenuAction={onNodeMenuAction}
@@ -1786,6 +1807,31 @@ function canonicalSelectionForStateV2(
     collapsedTaskIds: state.view.collapsedTaskIds,
     collapsedCollectionIds: state.view.collapsedCollectionIds,
   })
+}
+
+function selectionCoverageV2(
+  document: CanvasDocumentV2,
+  selection: readonly CanvasV2SelectionTarget[],
+): { taskIds: Set<string>; nodeIds: Set<string> } {
+  const selectedTaskIds = new Set(selection
+    .filter((target) => target.kind === 'task')
+    .map((target) => target.id))
+  const selectedCollectionIds = new Set(selection
+    .filter((target) => target.kind === 'collection')
+    .map((target) => target.id))
+  const tasksById = new Map(document.tasks.map((task) => [task.id, task]))
+  const taskIds = new Set(document.tasks
+    .filter((task) => task.collectionId && selectedCollectionIds.has(task.collectionId))
+    .map((task) => task.id))
+  const nodeIds = new Set(document.nodes
+    .filter((node) => {
+      if (node.homeTaskId && selectedTaskIds.has(node.homeTaskId)) return true
+      const collectionId = node.collectionId
+        ?? (node.homeTaskId ? tasksById.get(node.homeTaskId)?.collectionId : undefined)
+      return Boolean(collectionId && selectedCollectionIds.has(collectionId))
+    })
+    .map((node) => node.id))
+  return { taskIds, nodeIds }
 }
 
 function expandedCollectionSelectionBoundsV2(bounds: CanvasBoundsV2): CanvasBoundsV2 {

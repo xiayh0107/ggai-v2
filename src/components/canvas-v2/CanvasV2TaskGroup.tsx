@@ -31,6 +31,7 @@ export interface CanvasV2TaskGroupProps {
   compoundSelection?: boolean
   showRunPanel?: boolean
   selectedNodeIds: ReadonlySet<string>
+  compoundSelectedNodeIds?: ReadonlySet<string>
   explicitlyCollapsed: boolean
   activeKey: string | null
   offset?: { dx: number; dy: number }
@@ -58,6 +59,7 @@ export default function CanvasV2TaskGroup({
   compoundSelection = false,
   showRunPanel = selectedTask,
   selectedNodeIds,
+  compoundSelectedNodeIds = selectedNodeIds,
   explicitlyCollapsed,
   activeKey,
   offset,
@@ -117,7 +119,10 @@ export default function CanvasV2TaskGroup({
       data-presentation={view.presentation}
       data-selected={selectedTask ? 'true' : 'false'}
       className="pointer-events-none absolute left-0 top-0"
-      style={offset ? { transform: `translate(${offset.dx}px, ${offset.dy}px)` } : undefined}
+      style={{
+        zIndex: 10,
+        ...(offset ? { transform: `translate(${offset.dx}px, ${offset.dy}px)` } : {}),
+      }}
     >
       {collapsed ? (
         <div
@@ -221,7 +226,7 @@ export default function CanvasV2TaskGroup({
               frame={nodeFrames?.get(node.id)}
               projectDir={projectDir}
               selected={selectedNodeIds.has(node.id)}
-              compoundSelected={selectedNodeIds.has(node.id) && compoundSelection}
+              compoundSelected={compoundSelection && compoundSelectedNodeIds.has(node.id)}
               compact={compact}
               tabIndex={activeKey === `node:${node.id}` ? 0 : -1}
               onFocus={() => onEntityFocus(`node:${node.id}`)}
@@ -229,7 +234,8 @@ export default function CanvasV2TaskGroup({
               onDragStart={onNodeDragStart}
               onResizeStart={onNodeResizeStart}
               onPortActivate={onNodePortActivate}
-              showInlinePort={!selectedNodeIds.has(node.id)}
+              showInlinePort={!selectedNodeIds.has(node.id)
+                && !(compoundSelection && compoundSelectedNodeIds.has(node.id))}
               connectionActive={activeConnectionKey === `node:${node.id}`}
               onMenuAction={onNodeMenuAction}
               registerFocusable={(element) => registerFocusable(`node:${node.id}`, element)}

@@ -65,7 +65,10 @@ export default function CanvasV2CollectionFrame({
       data-selected={selected ? 'true' : 'false'}
       data-compound-selected={compoundSelected ? 'true' : 'false'}
       className="pointer-events-none absolute left-0 top-0"
-      style={offset ? { transform: `translate(${offset.dx}px, ${offset.dy}px)` } : undefined}
+      style={{
+        zIndex: 10,
+        ...(offset ? { transform: `translate(${offset.dx}px, ${offset.dy}px)` } : {}),
+      }}
     >
       <div
         data-collection-border={collection.id}

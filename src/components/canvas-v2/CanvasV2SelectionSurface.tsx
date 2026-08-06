@@ -6,6 +6,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
+import type { PointerEvent } from 'react'
 import type { CanvasV2CameraState } from '@/canvas-v2/persistence'
 import type { CanvasBoundsV2 } from '@/canvas-v2/selectors'
 
@@ -44,6 +45,7 @@ export function CanvasV2SelectionWorldSurface({
   solid = true,
   count,
   activePortSide,
+  onDragStart,
   onPortActivate,
 }: {
   bounds: CanvasBoundsV2
@@ -51,6 +53,7 @@ export function CanvasV2SelectionWorldSurface({
   solid?: boolean
   count: number
   activePortSide: CanvasV2SelectionPortSide | null
+  onDragStart?: (event: PointerEvent<HTMLDivElement>) => void
   onPortActivate: (side: CanvasV2SelectionPortSide) => void
 }) {
   return (
@@ -59,19 +62,23 @@ export function CanvasV2SelectionWorldSurface({
       aria-label={compound ? `临时选择组，${count} 个画布实体` : undefined}
       data-testid={compound ? 'canvas-v2-selection-hull' : 'canvas-v2-single-selection-ports'}
       data-selection-count={count}
-      className={`pointer-events-none absolute rounded-[18px] ${
+      className={`absolute rounded-[18px] ${
         compound
-          ? `border-[1.5px] border-gg-select ${
+          ? `pointer-events-auto border-[1.5px] border-gg-select ${
               solid ? 'bg-gg-node shadow-float' : 'bg-transparent'
             }`
-          : ''
+          : 'pointer-events-none'
       }`}
       style={{
         left: bounds.x,
         top: bounds.y,
         width: bounds.w,
         height: bounds.h,
-        zIndex: compound ? 0 : 30,
+        zIndex: compound ? 1 : 30,
+      }}
+      onPointerDown={(event) => {
+        if (!compound || (event.target as HTMLElement).closest('button')) return
+        onDragStart?.(event)
       }}
     >
       {PORTS.map(({ side, label, className }) => (

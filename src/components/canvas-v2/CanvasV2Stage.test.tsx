@@ -566,10 +566,10 @@ describe('Canvas V2 interactive stage', () => {
     expect(image.dataset.compoundSelected).toBe('true')
     expect(code.dataset.compoundSelected).toBe('true')
     expect(hull.querySelectorAll('[data-selection-port]')).toHaveLength(4)
+    expect(hull.className).toContain('pointer-events-auto')
 
     const dispatch = vi.spyOn(store, 'dispatchCommand').mockResolvedValue({ mutationId: 'group-move' })
-    const imageHandle = required<HTMLElement>(host, '[data-focus-key="node:node-image"]')
-    act(() => dispatchPointer(imageHandle, 'pointerdown', { clientX: 100, clientY: 100 }))
+    act(() => dispatchPointer(hull, 'pointerdown', { clientX: 100, clientY: 100 }))
     act(() => dispatchPointer(window, 'pointermove', { clientX: 145, clientY: 125 }))
     expect(dispatch).not.toHaveBeenCalled()
     await act(async () => dispatchPointer(window, 'pointerup', { clientX: 145, clientY: 125 }))
@@ -591,6 +591,69 @@ describe('Canvas V2 interactive stage', () => {
     expect(store.getSnapshot().document.collections).toEqual(beforeCollections)
   })
 
+  it('routes a selected Task descendant drag and ports through the compound surface', async () => {
+    const { store, host } = await createSubject({ camera: { x: 0, y: 0, zoom: 1 } })
+    act(() => store.setSelection([
+      { kind: 'task', id: 'task-multi' },
+      { kind: 'node', id: 'node-top' },
+    ]))
+    expect(host.querySelector(
+      '[aria-label="从节点Weight vs. fuel economy scatter plot开始或完成连接"]',
+    )).toBeNull()
+    expect(host.querySelector(
+      '[aria-label="从任务多产物开始或完成连接"]',
+    )).toBeNull()
+
+    const dispatch = vi.spyOn(store, 'dispatchCommand').mockResolvedValue({ mutationId: 'task-group-move' })
+    const childHandle = required<HTMLElement>(host, '[data-focus-key="node:node-image"]')
+    act(() => dispatchPointer(childHandle, 'pointerdown', { clientX: 100, clientY: 100 }))
+    act(() => dispatchPointer(window, 'pointermove', { clientX: 130, clientY: 120 }))
+    await act(async () => dispatchPointer(window, 'pointerup', { clientX: 130, clientY: 120 }))
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'MoveEntities',
+      entities: [
+        { kind: 'task', id: 'task-multi' },
+        { kind: 'node', id: 'node-top' },
+      ],
+      dx: 30,
+      dy: 20,
+    })
+  })
+
+  it('routes selected Collection descendants through the group without blocking controls', async () => {
+    const { store, host } = await createSubject(
+      { camera: { x: 0, y: 0, zoom: 1 } },
+      collectionFixture(),
+    )
+    act(() => store.setSelection([
+      { kind: 'collection', id: 'collection-1' },
+      { kind: 'task', id: 'task-b' },
+    ]))
+    const hull = required<HTMLElement>(host, '[data-testid="canvas-v2-selection-hull"]')
+    const collection = required<HTMLElement>(host, '[data-collection-id="collection-1"]')
+    const memberTask = required<HTMLElement>(host, '[data-task-id="task-a"]')
+    expect(Number(collection.style.zIndex)).toBeGreaterThan(Number(hull.style.zIndex))
+    expect(Number(memberTask.style.zIndex)).toBeGreaterThan(Number(hull.style.zIndex))
+    expect(host.querySelector('[aria-label="从节点集合节点开始或完成连接"]')).toBeNull()
+    expect(host.querySelector('[aria-label="从任务集合任务开始或完成连接"]')).toBeNull()
+    expect(host.querySelector('[aria-label="从节点任务内部节点开始或完成连接"]')).toBeNull()
+
+    const dispatch = vi.spyOn(store, 'dispatchCommand').mockResolvedValue({ mutationId: 'collection-group-move' })
+    const memberHandle = required<HTMLElement>(host, '[data-focus-key="node:node-a"]')
+    act(() => dispatchPointer(memberHandle, 'pointerdown', { clientX: 100, clientY: 100 }))
+    act(() => dispatchPointer(window, 'pointermove', { clientX: 125, clientY: 115 }))
+    await act(async () => dispatchPointer(window, 'pointerup', { clientX: 125, clientY: 115 }))
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'MoveEntities',
+      entities: [{ kind: 'task', id: 'task-b' }],
+      collectionIds: ['collection-1'],
+      dx: 25,
+      dy: 15,
+    })
+  })
+
   it('expands a temporary selection port into ordinary typed edges', async () => {
     const { store, host } = await createSubject()
     act(() => store.setSelection([
@@ -603,7 +666,7 @@ describe('Canvas V2 interactive stage', () => {
       '[data-selection-port="right"]',
     )
     expect(required(host, '[data-testid="canvas-v2-selection-hull"]')
-      .className).toContain('pointer-events-none')
+      .className).toContain('pointer-events-auto')
     expect(rightPort.className).toContain('pointer-events-auto')
     await act(async () => rightPort.click())
     expect(rightPort.getAttribute('aria-pressed')).toBe('true')
