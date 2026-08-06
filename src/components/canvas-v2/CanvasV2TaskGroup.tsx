@@ -119,10 +119,7 @@ export default function CanvasV2TaskGroup({
       data-presentation={view.presentation}
       data-selected={selectedTask ? 'true' : 'false'}
       className="pointer-events-none absolute left-0 top-0"
-      style={{
-        zIndex: 10,
-        ...(offset ? { transform: `translate(${offset.dx}px, ${offset.dy}px)` } : {}),
-      }}
+      style={offset ? { transform: `translate(${offset.dx}px, ${offset.dy}px)` } : undefined}
     >
       {collapsed ? (
         <div

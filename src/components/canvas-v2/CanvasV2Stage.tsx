@@ -733,8 +733,13 @@ export default function CanvasV2Stage() {
     if (event.button !== 0) return
     const target = event.target as HTMLElement
     if (target.closest('[data-v2-entity], [data-task-border], button, a, [data-no-drag]')) return
-    stageRef.current?.focus({ preventScroll: true })
     const camera = stateRef.current.view.camera
+    if (compoundSelection && selectionSurfaceBounds) {
+      const point = screenToWorldV2(event, camera, viewportRect())
+      if (pointInsideBoundsV2(point, selectionSurfaceBounds)
+        && beginSelectionDrag(event)) return
+    }
+    stageRef.current?.focus({ preventScroll: true })
     if (event.shiftKey) {
       const viewport = viewportRect()
       const startWorld = screenToWorldV2(event, camera, viewport)
@@ -1380,7 +1385,6 @@ export default function CanvasV2Stage() {
                 && currentEdgeDraft.id === effectiveSelection[0]?.id
                 ? currentEdgeDraft.portSide ?? null
                 : null}
-            onDragStart={compoundSelection ? beginSelectionDrag : undefined}
             onPortActivate={(side: CanvasV2SelectionPortSide) => {
               if (compoundSelection && temporarySelectionEndpoint) {
                 onPortActivate({ ...temporarySelectionEndpoint, portSide: side })
@@ -1849,6 +1853,13 @@ function expandedCollectionSelectionBoundsV2(bounds: CanvasBoundsV2): CanvasBoun
     w: COLLECTION_CHROME_LAYOUT_V2.minimumWidth,
     h: 64,
   }
+}
+
+function pointInsideBoundsV2(point: CanvasPointV2, bounds: CanvasBoundsV2): boolean {
+  return point.x >= bounds.x
+    && point.x <= bounds.x + bounds.w
+    && point.y >= bounds.y
+    && point.y <= bounds.y + bounds.h
 }
 
 function sameSelectionV2(

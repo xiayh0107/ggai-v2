@@ -511,6 +511,19 @@ describe('Canvas V2 interactive stage', () => {
     }
   })
 
+  it('keeps Task output Node z-order in the global canvas stacking context', async () => {
+    const canvasDocument = fixtureDocument()
+    canvasDocument.nodes.find((node) => node.id === 'node-image')!.frame.z = 100
+    canvasDocument.nodes.find((node) => node.id === 'node-top')!.frame.z = 1
+    const { host } = await createSubject(undefined, canvasDocument)
+    const task = required<HTMLElement>(host, '[data-task-id="task-multi"]')
+    const taskOutput = required<HTMLElement>(host, '[data-node-id="node-image"]')
+    const topLevel = required<HTMLElement>(host, '[data-node-id="node-top"]')
+
+    expect(task.style.zIndex).toBe('')
+    expect(Number(taskOutput.style.zIndex)).toBeGreaterThan(Number(topLevel.style.zIndex))
+  })
+
   it('removes selected descendants as soon as their owning Task is collapsed', async () => {
     const { store, host } = await createSubject({
       selection: [
@@ -566,13 +579,18 @@ describe('Canvas V2 interactive stage', () => {
     expect(image.dataset.compoundSelected).toBe('true')
     expect(code.dataset.compoundSelected).toBe('true')
     expect(hull.querySelectorAll('[data-selection-port]')).toHaveLength(4)
-    expect(hull.className).toContain('pointer-events-auto')
+    expect(hull.className).toContain('pointer-events-none')
 
     const dispatch = vi.spyOn(store, 'dispatchCommand').mockResolvedValue({ mutationId: 'group-move' })
-    act(() => dispatchPointer(hull, 'pointerdown', { clientX: 100, clientY: 100 }))
-    act(() => dispatchPointer(window, 'pointermove', { clientX: 145, clientY: 125 }))
+    const startX = 50 + Number.parseFloat(hull.style.left) + 4
+    const startY = 20 + Number.parseFloat(hull.style.top) + 4
+    act(() => dispatchPointer(hull, 'pointerdown', { clientX: startX, clientY: startY }))
+    act(() => dispatchPointer(window, 'pointermove', { clientX: startX + 45, clientY: startY + 25 }))
     expect(dispatch).not.toHaveBeenCalled()
-    await act(async () => dispatchPointer(window, 'pointerup', { clientX: 145, clientY: 125 }))
+    await act(async () => dispatchPointer(window, 'pointerup', {
+      clientX: startX + 45,
+      clientY: startY + 25,
+    }))
 
     expect(dispatch).toHaveBeenCalledOnce()
     expect(dispatch).toHaveBeenCalledWith({
@@ -630,11 +648,10 @@ describe('Canvas V2 interactive stage', () => {
       { kind: 'collection', id: 'collection-1' },
       { kind: 'task', id: 'task-b' },
     ]))
-    const hull = required<HTMLElement>(host, '[data-testid="canvas-v2-selection-hull"]')
     const collection = required<HTMLElement>(host, '[data-collection-id="collection-1"]')
     const memberTask = required<HTMLElement>(host, '[data-task-id="task-a"]')
-    expect(Number(collection.style.zIndex)).toBeGreaterThan(Number(hull.style.zIndex))
-    expect(Number(memberTask.style.zIndex)).toBeGreaterThan(Number(hull.style.zIndex))
+    expect(collection.style.zIndex).toBe('')
+    expect(memberTask.style.zIndex).toBe('')
     expect(host.querySelector('[aria-label="从节点集合节点开始或完成连接"]')).toBeNull()
     expect(host.querySelector('[aria-label="从任务集合任务开始或完成连接"]')).toBeNull()
     expect(host.querySelector('[aria-label="从节点任务内部节点开始或完成连接"]')).toBeNull()
@@ -666,7 +683,7 @@ describe('Canvas V2 interactive stage', () => {
       '[data-selection-port="right"]',
     )
     expect(required(host, '[data-testid="canvas-v2-selection-hull"]')
-      .className).toContain('pointer-events-auto')
+      .className).toContain('pointer-events-none')
     expect(rightPort.className).toContain('pointer-events-auto')
     await act(async () => rightPort.click())
     expect(rightPort.getAttribute('aria-pressed')).toBe('true')
