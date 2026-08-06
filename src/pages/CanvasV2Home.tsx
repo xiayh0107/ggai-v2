@@ -6,24 +6,29 @@ import { CanvasV2Provider } from '@/canvas-v2/provider'
 import { CanvasV2TaskRunProvider } from '@/canvas-v2/runProvider'
 import { CanvasV2Store } from '@/canvas-v2/store'
 import { DaemonClient } from '@/agent/daemonClient'
-import { DAEMON_PROJECT_DIR, DAEMON_URL } from '@/agent/config'
+import { DAEMON_URL } from '@/agent/config'
 
-export default function CanvasV2Home() {
+export interface CanvasV2HomeProps {
+  projectDir: string
+  projectTitle: string
+}
+
+export default function CanvasV2Home({ projectDir, projectTitle }: CanvasV2HomeProps) {
   const branch = canvasV2BranchFromSearch(window.location.search)
   const store = useMemo(() => {
     const client = new CanvasV2DaemonClient({ baseUrl: DAEMON_URL })
     return new CanvasV2Store({
       daemonBaseUrl: DAEMON_URL,
-      scope: { projectDir: DAEMON_PROJECT_DIR, branch },
+      scope: { projectDir, branch },
       client,
     })
-  }, [branch])
+  }, [branch, projectDir])
   const taskRunClient = useMemo(() => new DaemonClient({ baseUrl: DAEMON_URL }), [])
 
   return (
     <CanvasV2Provider store={store}>
       <CanvasV2TaskRunProvider store={store} daemonClient={taskRunClient}>
-        <CanvasV2Shell />
+        <CanvasV2Shell projectTitle={projectTitle} />
       </CanvasV2TaskRunProvider>
     </CanvasV2Provider>
   )

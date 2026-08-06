@@ -23,6 +23,7 @@ Canvas V2 以 Task 为提示与运行边界，Node 只承载内容，typed Edge 
 src/
   canvas-v2/             # V2 model / command reducer / outbox / Run / selectors
   components/canvas-v2/  # Task-centric stage、容器、Edge、proposal、版本 UI
+  workspace/             # Project catalog 浏览器客户端与严格协议解码
   agent/                   # Agent 接入层（见 docs/AGENT-ARCHITECTURE.md）
     types.ts               # 统一事件 / 上下文包 / 会话
     context.ts             # 上下文打包器（三层裁剪，画布→Agent）
@@ -47,6 +48,7 @@ daemon/
   runLogs.ts               # 永久 JSONL 运行日志与摘要
   canvasGitV2.ts           # 独立 V2 Canvas Git 历史与受管 worktree
   taskSessionsV2.ts        # branch + Task + Agent 会话
+  projectCatalog.ts        # Workspace Project 身份、受管目录与最近打开
   pluginCapabilitiesV2.ts  # Run-fixed artifact claim snapshot
   packer.ts / watcher.ts   # 上下文落盘与 artifact 对账
   permissions.ts           # projectRoot、路径与命令安全策略
@@ -60,6 +62,11 @@ Canvas 编译上下文 → `file-write` 只显示 ghost → durable close 生成
 ProjectionPlan → daemon 原子创建 Node/Edge/receipt。Node 只保存 `{runId, artifactId}`，不保存
 prompt、phase、session、日志或磁盘路径。插件通过 data-only `artifactClaims`、纯
 `projectArtifact` 与 `views.Artifact` 渲染 verified artifact；核心不按 plugin id 分支。
+
+Workspace 的 Project 边界见 `docs/WORKSPACE-PROJECTS.md`。Project 不等于 Canvas branch、
+Task 或 Collection；首页只读取 daemon catalog，禁止用静态数组、localStorage 或目录扫描
+伪造项目。浏览器路由只保存 opaque project id，Canvas store 必须在 daemon 成功 open 后
+才能用受控 `projectDir` 挂载。
 
 ## 多选与成组
 

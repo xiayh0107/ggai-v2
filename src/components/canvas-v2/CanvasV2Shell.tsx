@@ -1,5 +1,6 @@
-import { Boxes, History, Loader2, RotateCcw } from 'lucide-react'
+import { Boxes, ChevronLeft, History, Loader2, RotateCcw } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import { Link } from 'react-router'
 import { DAEMON_URL } from '@/agent/config'
 import { useCanvasV2State, useCanvasV2Store } from '@/canvas-v2/hooks'
 import {
@@ -13,11 +14,13 @@ import CanvasV2VersioningPanel from './CanvasV2VersioningPanel'
 export interface CanvasV2ShellProps {
   versioningClient?: CanvasV2VersioningClient
   branchNavigationCommit?: CanvasV2BranchNavigationCommit
+  projectTitle?: string
 }
 
 export default function CanvasV2Shell({
   versioningClient: injectedVersioningClient,
   branchNavigationCommit,
+  projectTitle = '当前项目',
 }: CanvasV2ShellProps = {}) {
   const store = useCanvasV2Store()
   const state = useCanvasV2State()
@@ -61,10 +64,22 @@ export default function CanvasV2Shell({
   return (
     <main className="relative h-screen w-screen overflow-hidden bg-gg-bg font-sans text-gg-ink">
       <header className="absolute inset-x-0 top-0 z-10 flex h-[52px] items-center justify-between border-b border-gg-line bg-gg-node/95 px-4">
-        <div className="flex items-center gap-2 text-[13px] font-semibold">
+        <div className="flex min-w-0 items-center gap-2 text-[13px] font-semibold">
+          <Link
+            to="/"
+            title="返回工作空间"
+            aria-label="返回工作空间"
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] text-gg-muted transition-colors hover:bg-gg-subtle hover:text-gg-ink"
+          >
+            <ChevronLeft size={16} />
+          </Link>
           <Boxes size={16} className="text-gg-primary" /> Canvas V2
           <span className="rounded-full bg-gg-subtle px-2 py-0.5 text-[10px] font-medium text-gg-muted">
             V2
+          </span>
+          <span className="h-4 w-px shrink-0 bg-gg-line" />
+          <span className="max-w-[260px] truncate font-medium text-gg-ink" title={projectTitle}>
+            {projectTitle}
           </span>
         </div>
         <div className="flex items-center gap-3 text-[11px] text-gg-muted">

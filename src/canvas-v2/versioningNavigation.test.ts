@@ -26,10 +26,10 @@ afterEach(() => {
 describe('Canvas V2 branch navigation', () => {
   it('updates only the branch search parameter', () => {
     expect(canvasV2BranchNavigationHref(
-      'http://localhost:3000/canvas?canvasModel=v2&branch=main#viewport',
+      'http://localhost:3000/canvas?project=project_root&branch=main#viewport',
       'feature/chart',
     )).toBe(
-      'http://localhost:3000/canvas?canvasModel=v2&branch=feature%2Fchart#viewport',
+      'http://localhost:3000/canvas?project=project_root&branch=feature%2Fchart#viewport',
     )
   })
 
