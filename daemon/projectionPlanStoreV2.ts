@@ -14,6 +14,7 @@ import {
 
 export const PROJECTION_PLAN_STORE_V2_SCHEMA_VERSION = 2
 export const MAX_STORED_PROJECTION_PLANS_V2 = 1_000
+export const RETAINED_SETTLED_PROJECTION_PLANS_V2 = 900
 export const MAX_PROJECTION_PLAN_STORE_BYTES_V2 = 64 * 1024 * 1024
 
 export type ProjectionPlanLifecycleV2 = 'pending' | 'dismissed'
@@ -135,12 +136,18 @@ export class ProjectionPlanStoreV2 {
         }
         return cloneCreatedResult(built, existing)
       }
-      if ((this.#records?.size ?? 0) >= MAX_STORED_PROJECTION_PLANS_V2) {
-        throw new TypeError('projection plan store has too many records')
-      }
-
       const now = this.#now()
       assertTimestamp(now, 'now')
+      const next = new Map(this.#records ?? [])
+      for (const [planId, record] of next) {
+        if (record.state !== 'pending' || record.plan.taskId !== inspection.plan.taskId) continue
+        if (now < record.updatedAt) throw new TypeError('now cannot move backwards')
+        next.set(planId, { ...record, state: 'dismissed', updatedAt: now })
+      }
+      pruneSettledRecords(next)
+      if (next.size >= MAX_STORED_PROJECTION_PLANS_V2) {
+        throw new TypeError('projection plan store has too many pending records')
+      }
       const record: ProjectionPlanRecordV2 = {
         state: 'pending',
         createdAt: now,
@@ -148,7 +155,6 @@ export class ProjectionPlanStoreV2 {
         plan: inspection.plan,
         suggestedActions: built.suggestedActions.map((action) => ({ ...action })),
       }
-      const next = new Map(this.#records ?? [])
       next.set(record.plan.planId, record)
       await this.#persist(next)
       this.#records = next
@@ -311,6 +317,19 @@ export class ProjectionPlanStoreV2 {
     )
     return result
   }
+}
+
+function pruneSettledRecords(records: Map<string, ProjectionPlanRecordV2>): void {
+  if (records.size < MAX_STORED_PROJECTION_PLANS_V2) return
+  const removable = [...records.values()]
+    .filter((record) => record.state !== 'pending')
+    .sort((left, right) => left.updatedAt - right.updatedAt
+      || left.plan.planId.localeCompare(right.plan.planId))
+  const removeCount = Math.max(
+    0,
+    records.size - RETAINED_SETTLED_PROJECTION_PLANS_V2,
+  )
+  for (const record of removable.slice(0, removeCount)) records.delete(record.plan.planId)
 }
 
 function parseStore(source: string): Map<string, ProjectionPlanRecordV2> {

@@ -39,6 +39,14 @@ class PendingRecoveryPlans implements InterruptedProjectionPlanStoreV2 {
     this.records.set(record.plan.planId, record)
     return { record, disposition: 'created' }
   }
+
+  async dismiss(planId: string): Promise<ProjectionPlanRecordV2> {
+    const record = this.records.get(planId)
+    if (!record) throw new Error(`missing plan ${planId}`)
+    const dismissed = { ...record, state: 'dismissed' as const, updatedAt: record.updatedAt + 1 }
+    this.records.set(planId, dismissed)
+    return structuredClone(dismissed)
+  }
 }
 
 test('recovers Task V2 manifests, partial plans, and closes while leaving V1 unchanged', async () => {
@@ -136,7 +144,7 @@ test('recovers Task V2 manifests, partial plans, and closes while leaving V1 unc
     })
     assert.equal(second.candidates, 1)
     assert.equal(second.appendedCloses, 0)
-    assert.equal(materialized.length, 2)
+    assert.equal(materialized.length, 1)
     assert.equal((await runLogs.page('run-v2-recover'))?.entries.length, 2)
   } finally {
     await rm(root, { recursive: true, force: true })

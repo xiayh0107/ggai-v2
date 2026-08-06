@@ -14,6 +14,7 @@ export type InterruptedProjectionPlanDispositionV2 =
 /** Narrow structural contract implemented by the branch-local plan store. */
 export interface InterruptedProjectionPlanStoreV2 {
   get(planId: string): Promise<ProjectionPlanRecordV2 | undefined>
+  dismiss(planId: string): Promise<ProjectionPlanRecordV2>
   recoverInterrupted(input: {
     taskId: string
     runId: string
@@ -93,6 +94,11 @@ export async function recoverInterruptedTaskRunsV2(
                 projectDir: options.projectDir,
                 canvasBranch: summary.canvasBranch ?? 'main',
               })
+              if (record.plan.taskProposals.length === 0) {
+                await options
+                  .projectionPlanStore(summary.canvasBranch ?? 'main')
+                  .dismiss(record.plan.planId)
+              }
             } catch (error) {
               report.failures.push(failure(summary.runId, 'projection-hook', error))
             }
@@ -170,6 +176,11 @@ export async function recoverInterruptedTaskRunsV2(
               projectDir: options.projectDir,
               canvasBranch: summary.canvasBranch ?? 'main',
             })
+            if (projection.plan.taskProposals.length === 0) {
+              await options
+                .projectionPlanStore(summary.canvasBranch ?? 'main')
+                .dismiss(projection.plan.planId)
+            }
           } catch (error) {
             report.failures.push(failure(summary.runId, 'projection-hook', error))
           }

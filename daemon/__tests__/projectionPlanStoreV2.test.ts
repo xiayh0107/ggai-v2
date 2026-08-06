@@ -76,6 +76,28 @@ function interruptedInput(source = input()) {
   }
 }
 
+function inputFor(taskId: string, runId: string): BuildProjectionPlanV2Input {
+  const source = input()
+  return {
+    ...source,
+    taskId,
+    runId,
+    manifest: buildArtifactManifestV1({
+      runId,
+      complete: true,
+      files: [{
+        ownerRunId: runId,
+        relativePath: 'preview.png',
+        kind: 'file',
+        temporary: false,
+        mediaType: 'image/png',
+        size: 128,
+        contentDigest: 'a'.repeat(64),
+      }],
+    }),
+  }
+}
+
 test('builds, persists, and reloads only a daemon-authored pending plan', async () => {
   const filePath = await temporaryStorePath()
   const store = new ProjectionPlanStoreV2(filePath, {
@@ -172,6 +194,22 @@ test('dismisses idempotently and never resurrects a closed plan', async () => {
   assert.equal(recovered.disposition, 'closed')
   assert.deepEqual(recovered.record, dismissed)
   assert.equal((await store.get(created.plan.planId))?.updatedAt, 250)
+})
+
+test('a newer Run supersedes only pending plans for the same Task', async () => {
+  const filePath = await temporaryStorePath()
+  let now = 100
+  const store = new ProjectionPlanStoreV2(filePath, { now: () => now })
+  const old = await store.createPending(inputFor('task-shared', 'run-old'))
+  const other = await store.createPending(inputFor('task-other', 'run-other'))
+  now = 200
+
+  const latest = await store.createPending(inputFor('task-shared', 'run-latest'))
+
+  assert.equal((await store.get(old.plan.planId))?.state, 'dismissed')
+  assert.equal((await store.get(old.plan.planId))?.updatedAt, 200)
+  assert.equal((await store.get(other.plan.planId))?.state, 'pending')
+  assert.equal((await store.get(latest.plan.planId))?.state, 'pending')
 })
 
 test('rejects unknown plan ids and invalid stored data without overwriting it', async () => {

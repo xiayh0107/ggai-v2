@@ -70,10 +70,7 @@ test('RunManager startup recovers Task V2 by branch and isolates corrupt/V1 runs
 
     const planId = goodClose?.projectionPlan?.planId
     assert.ok(planId)
-    assert.equal(
-      (await manager.getPendingProjectionPlan(planId, '.', 'feature/recovery'))?.plan.digest,
-      goodClose?.projectionPlan?.digest,
-    )
+    assert.equal(await manager.getPendingProjectionPlan(planId, '.', 'feature/recovery'), null)
     assert.equal(await manager.getPendingProjectionPlan(planId, '.', 'main'), null)
 
     const corruptClose = await logs.terminalClose('run-recover-corrupt')
@@ -90,7 +87,7 @@ test('RunManager startup recovers Task V2 by branch and isolates corrupt/V1 runs
       onProjectionPlanReady: async ({ plan }) => { replayed.push(plan.planId) },
     })
     assert.equal((await reopened.getPersisted('run-recover-good'))?.status, 'interrupted')
-    assert.deepEqual(replayed, [planId])
+    assert.deepEqual(replayed, [])
     assert.equal((await logs.page('run-recover-good'))?.entries.length, 2)
     await reopened.close()
   } finally {
@@ -165,7 +162,7 @@ test('startup preserves durable completed and dismissed projection settlements',
 
     const reopenedPlans = projectionStore(root, 'main')
     const completedRecord = await reopenedPlans.get(completedPlan.plan.planId)
-    assert.equal(completedRecord?.state, 'pending')
+    assert.equal(completedRecord?.state, 'dismissed')
     assert.equal(completedRecord?.plan.status, 'complete')
     assert.equal(completedRecord?.plan.digest, completedPlan.plan.digest)
     assert.equal((await logs.page('run-completed-close'))?.entries.length, 1)
@@ -232,7 +229,7 @@ test('replayed startup materialization is idempotent and never revives Canvas en
     const reopened = new RunManager({ projectRoot: root, onProjectionPlanReady })
     await reopened.getPersisted('run-materialized')
     const replayedCanvas = await canvases.get('.', 'main')
-    assert.equal(hookCalls, 2)
+    assert.equal(hookCalls, 1)
     assert.equal(replayedCanvas.revision, firstCanvas.revision)
     assert.deepEqual(replayedCanvas.document.nodes, firstCanvas.document.nodes)
     assert.deepEqual(replayedCanvas.document.receipts, firstCanvas.document.receipts)

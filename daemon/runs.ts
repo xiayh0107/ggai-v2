@@ -1048,6 +1048,12 @@ export class RunManager {
           projectDir: run.projectDir,
           canvasBranch: run.request.canvasBranch ?? 'main',
         })
+        if (close.projectionPlan.taskProposals.length === 0) {
+          await this.#projectionPlansV2(
+            run.projectDir,
+            run.request.canvasBranch ?? 'main',
+          ).dismiss(close.projectionPlan.planId)
+        }
       } catch {
         // The durable pending plan is the recovery source of truth. Canvas
         // materialization can be replayed later without changing Run status.
