@@ -192,6 +192,54 @@ test('replays a conflicted command journal from its durable base into a new bran
   )
 })
 
+test('checkpoints the exact pre-delete document for durable history recovery', async () => {
+  const { projectDir, workspace } = await harness()
+  const initial = await workspace.getCanvas(projectDir, 'main')
+  const created = await workspace.commitCanvas(
+    projectDir,
+    'main',
+    initial.canvas.revision,
+    'history-create-before-delete',
+    createTask('task-history-delete'),
+  )
+  assert.equal(created.canvas.lastCheckpoint, null)
+
+  const deleted = await workspace.commitCanvas(
+    projectDir,
+    'main',
+    created.canvas.revision,
+    'history-delete-task',
+    { type: 'DeleteTask', taskId: 'task-history-delete' },
+  )
+  assert.equal(deleted.canvas.document.tasks.length, 0)
+  assert.match(deleted.canvas.lastCheckpoint ?? '', /^[0-9a-f]{40,64}$/u)
+
+  const beforeDeleteCommit = deleted.canvas.lastCheckpoint!
+  const history = await workspace.history(projectDir, { branch: 'main', limit: 10 })
+  assert.equal(history.ok, true)
+  assert.equal(history.ok ? history.value.entries[0]?.commit : '', beforeDeleteCommit)
+
+  const restored = await workspace.restoreAsNewBranch(projectDir, {
+    sourceBranch: 'main',
+    checkpoint: beforeDeleteCommit,
+    newBranch: 'restore/before-delete',
+  })
+  assert.equal(restored.ok, true)
+  assert.equal(
+    restored.ok ? restored.value.canvas.document.tasks[0]?.id : '',
+    'task-history-delete',
+  )
+
+  const replay = await workspace.commitCanvas(
+    projectDir,
+    'main',
+    created.canvas.revision,
+    'history-delete-task',
+    { type: 'DeleteTask', taskId: 'task-history-delete' },
+  )
+  assert.equal(replay.canvas.revision, deleted.canvas.revision)
+})
+
 test('keeps main-branch commands and execution available when Canvas Git is degraded', async () => {
   const { projectDir, canvases, workspace } = await harness({
     canvasGitFactory: (canonicalProjectDir) => new CanvasGitStoreV2(
@@ -217,6 +265,16 @@ test('keeps main-branch commands and execution available when Canvas Git is degr
   const checkpoint = await workspace.manualCheckpoint(projectDir, 'main')
   assert.equal(checkpoint.ok, false)
   assert.equal(checkpoint.ok ? '' : checkpoint.error.code, 'GIT_UNAVAILABLE')
+  await assert.rejects(
+    workspace.commitCanvas(
+      projectDir,
+      'main',
+      saved.canvas.revision,
+      'reject-unrecoverable-delete',
+      { type: 'DeleteTask', taskId: 'task-without-git' },
+    ),
+    expectGitError('GIT_UNAVAILABLE'),
+  )
   assert.equal((await canvases.get(projectDir, 'main')).document.tasks.length, 1)
 })
 

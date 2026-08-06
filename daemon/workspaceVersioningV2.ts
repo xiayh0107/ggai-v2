@@ -235,7 +235,14 @@ export class WorkspaceVersionManagerV2 {
     const branch = parseCanvasBranch(branchRequest)
     const project = await this.#project(projectDir)
     return this.#withBranchLocks(project, [branch], async () => {
-      await this.#loadBranchCanvas(project, branch)
+      const current = await this.#loadBranchCanvas(project, branch)
+      if (isDestructiveCanvasCommandV2(command) && current.revision === baseRevision) {
+        // Validate before touching Git, then make the exact pre-delete state
+        // recoverable even when the normal debounced checkpoint has not fired.
+        applyCanvasCommandV2(current.document, command)
+        this.#cancelScheduled(project, branch)
+        await this.#checkpoint(project, branch, `before-${command.type}`)
+      }
       const canvas = await this.canvases.commit(
         project.projectDir,
         branch,
@@ -1255,6 +1262,17 @@ function workspaceError(error: unknown): WorkspaceOperationErrorV2 {
           ? 'canvas_snapshot_invalid'
           : 'versioning_failed'
   return { code, message: errorMessage(error) }
+}
+
+function isDestructiveCanvasCommandV2(command: CanvasCommandV2): boolean {
+  return command.type === 'DeleteNode'
+    || command.type === 'DeleteEdge'
+    || command.type === 'DeleteEdges'
+    || command.type === 'DissolveCollection'
+    || command.type === 'DeleteTask'
+    || command.type === 'DeleteTaskAndViews'
+    || command.type === 'DeleteCollection'
+    || command.type === 'DeleteCollectionAndContents'
 }
 
 function errorMessage(error: unknown): string {
