@@ -56,17 +56,63 @@ export class CanvasCommandStoreV2Manager {
     return (await this.#resolve(projectDir, branch)).commitLatest(mutationId, command)
   }
 
+  async setLastCheckpoint(
+    projectDir: string,
+    branch: string,
+    expectedRevision: number,
+    commit: string,
+  ): Promise<CanvasEnvelopeV2> {
+    return (await this.#resolve(projectDir, branch))
+      .setLastCheckpoint(expectedRevision, commit)
+  }
+
+  async materialize(
+    projectDir: string,
+    branch: string,
+    document: CanvasEnvelopeV2['document'],
+    checkpoint: string,
+  ): Promise<CanvasEnvelopeV2> {
+    return (await this.#resolve(projectDir, branch)).materialize(document, checkpoint)
+  }
+
+  async applyCheckpoint(
+    projectDir: string,
+    branch: string,
+    document: CanvasEnvelopeV2['document'],
+    checkpoint: string,
+    expectedRevision: number,
+  ): Promise<CanvasEnvelopeV2> {
+    return (await this.#resolve(projectDir, branch))
+      .applyCheckpoint(document, checkpoint, expectedRevision)
+  }
+
+  /** Returns the same canonical, leased project directory used by V2 stores. */
+  async acquireProjectLease(projectDir: string): Promise<string> {
+    this.#assertOpen()
+    const canonicalProjectDir = await this.#acquireProjectLease(projectDir)
+    const scope = await createProjectScope({
+      projectRoot: this.#projectRoot,
+      projectDir: canonicalProjectDir,
+    })
+    this.#assertOpen()
+    return scope.projectDir
+  }
+
   close(): void {
     this.#closed = true
     this.#stores.clear()
   }
 
-  async #resolve(projectDir: string, requestedBranch: string): Promise<CanvasCommandStoreV2> {
+  #assertOpen(): void {
     if (this.#closed) {
       throw new ProtocolError('daemon is shutting down', 'daemon_shutting_down', 503)
     }
+  }
+
+  async #resolve(projectDir: string, requestedBranch: string): Promise<CanvasCommandStoreV2> {
+    this.#assertOpen()
     const branch = parseCanvasBranch(requestedBranch)
-    const canonicalProjectDir = await this.#acquireProjectLease(projectDir)
+    const canonicalProjectDir = await this.acquireProjectLease(projectDir)
     const scope = await createProjectScope({
       projectRoot: this.#projectRoot,
       projectDir: canonicalProjectDir,

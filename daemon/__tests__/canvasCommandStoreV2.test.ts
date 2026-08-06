@@ -46,6 +46,7 @@ test('serializes concurrent commits with revision CAS', async () => {
     revision: 0,
     updatedAt: '1970-01-01T00:00:00.000Z',
     lastMutationId: null,
+    lastCheckpoint: null,
     document: emptyCanvasDocumentV2(),
   })
 
@@ -133,4 +134,54 @@ test('fails explicitly without overwriting an invalid stored snapshot', async ()
 
   await assert.rejects(store.get(), CanvasSnapshotV2Error)
   assert.equal(await readFile(filePath, 'utf8'), source)
+})
+
+test('anchors checkpoints without changing the semantic revision', async () => {
+  const filePath = await temporarySnapshot()
+  const store = new CanvasCommandStoreV2('main', { filePath })
+  const committed = await store.commit(0, 'mutation-1', createTask('task-1'))
+  const checkpoint = 'a'.repeat(40)
+  const anchored = await store.setLastCheckpoint(committed.revision, checkpoint)
+
+  assert.equal(anchored.revision, committed.revision)
+  assert.equal(anchored.updatedAt, committed.updatedAt)
+  assert.equal(anchored.lastCheckpoint, checkpoint)
+  assert.deepEqual(await store.setLastCheckpoint(committed.revision, checkpoint), anchored)
+  await assert.rejects(
+    store.setLastCheckpoint(0, 'b'.repeat(40)),
+    CanvasRevisionConflictV2Error,
+  )
+})
+
+test('materializes and applies Git documents behind revision CAS', async () => {
+  const filePath = await temporarySnapshot()
+  let now = Date.parse('2026-08-05T12:00:00.000Z')
+  const store = new CanvasCommandStoreV2('restored', { filePath, now: () => now })
+  const document = emptyCanvasDocumentV2()
+  document.tasks.push(createTask('task-1').task)
+  document.everCreated = true
+  const firstCommit = 'c'.repeat(40)
+
+  const materialized = await store.materialize(document, firstCommit)
+  assert.equal(materialized.revision, 1)
+  assert.equal(materialized.lastMutationId, null)
+  assert.equal(materialized.lastCheckpoint, firstCommit)
+  await assert.rejects(
+    store.materialize(document, firstCommit),
+    CanvasRevisionConflictV2Error,
+  )
+
+  now += 1_000
+  const mergedDocument = structuredClone(document)
+  mergedDocument.tasks[0]!.goal = 'Merged goal'
+  const secondCommit = 'd'.repeat(40)
+  const applied = await store.applyCheckpoint(mergedDocument, secondCommit, 1)
+  assert.equal(applied.revision, 2)
+  assert.equal(applied.lastMutationId, null)
+  assert.equal(applied.lastCheckpoint, secondCommit)
+  assert.equal(applied.document.tasks[0]?.goal, 'Merged goal')
+  await assert.rejects(
+    store.applyCheckpoint(document, firstCommit, 1),
+    CanvasRevisionConflictV2Error,
+  )
 })

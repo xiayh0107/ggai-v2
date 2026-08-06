@@ -19,6 +19,7 @@ export interface CanvasEnvelopeV2 {
   revision: number
   updatedAt: string
   lastMutationId: string | null
+  lastCheckpoint: string | null
   document: CanvasDocumentV2
 }
 
@@ -104,6 +105,7 @@ export class CanvasCommandStoreV2 {
         revision: current.revision + 1,
         updatedAt,
         lastMutationId: mutationId,
+        lastCheckpoint: current.lastCheckpoint,
         document,
       }
       await atomicWriteText(this.filePath, serializeEnvelope(next))
@@ -137,12 +139,96 @@ export class CanvasCommandStoreV2 {
         revision: current.revision + 1,
         updatedAt,
         lastMutationId: mutationId,
+        lastCheckpoint: current.lastCheckpoint,
         document,
       }
       await atomicWriteText(this.filePath, serializeEnvelope(next))
       this.#envelope = next
       return cloneEnvelope(next)
     })
+  }
+
+  /** Persists a Git anchor without manufacturing a semantic Canvas revision. */
+  async setLastCheckpoint(
+    expectedRevision: number,
+    commit: string,
+  ): Promise<CanvasEnvelopeV2> {
+    validateRevision(expectedRevision)
+    validateCheckpoint(commit)
+    return this.#runExclusive(async () => {
+      await this.#ensureLoaded()
+      const current = this.#current()
+      if (current.revision !== expectedRevision) {
+        throw new CanvasRevisionConflictV2Error(current.revision)
+      }
+      if (current.lastCheckpoint === commit) return cloneEnvelope(current)
+
+      const next: CanvasEnvelopeV2 = { ...current, lastCheckpoint: commit }
+      await atomicWriteText(this.filePath, serializeEnvelope(next))
+      this.#envelope = next
+      return cloneEnvelope(next)
+    })
+  }
+
+  /** Materializes a Git-only branch while refusing to overwrite runtime state. */
+  async materialize(
+    document: CanvasDocumentV2,
+    checkpoint: string,
+  ): Promise<CanvasEnvelopeV2> {
+    validateCheckpoint(checkpoint)
+    const parsed = parseCanvasDocumentV2(document)
+    return this.#runExclusive(async () => {
+      await this.#ensureLoaded()
+      const current = this.#current()
+      if (current.revision !== 0) {
+        throw new CanvasRevisionConflictV2Error(current.revision)
+      }
+      const materialized: CanvasEnvelopeV2 = {
+        branch: this.branch,
+        revision: 1,
+        updatedAt: new Date(this.#now()).toISOString(),
+        lastMutationId: null,
+        lastCheckpoint: checkpoint,
+        document: parsed,
+      }
+      await atomicWriteText(this.filePath, serializeEnvelope(materialized))
+      this.#envelope = materialized
+      return cloneEnvelope(materialized)
+    })
+  }
+
+  /** Applies an explicit restore or merge result behind revision CAS. */
+  async applyCheckpoint(
+    document: CanvasDocumentV2,
+    checkpoint: string,
+    expectedRevision: number,
+  ): Promise<CanvasEnvelopeV2> {
+    validateCheckpoint(checkpoint)
+    validateRevision(expectedRevision)
+    const parsed = parseCanvasDocumentV2(document)
+    return this.#runExclusive(async () => {
+      await this.#ensureLoaded()
+      const current = this.#current()
+      if (current.revision !== expectedRevision) {
+        throw new CanvasRevisionConflictV2Error(current.revision)
+      }
+      const applied: CanvasEnvelopeV2 = {
+        branch: this.branch,
+        revision: current.revision + 1,
+        updatedAt: new Date(this.#now()).toISOString(),
+        lastMutationId: null,
+        lastCheckpoint: checkpoint,
+        document: parsed,
+      }
+      await atomicWriteText(this.filePath, serializeEnvelope(applied))
+      this.#envelope = applied
+      return cloneEnvelope(applied)
+    })
+  }
+
+  /** Waits until all operations already queued for this branch have settled. */
+  async drain(): Promise<void> {
+    await this.#operationTail
   }
 
   async #ensureLoaded(): Promise<void> {
@@ -183,6 +269,7 @@ function emptyEnvelope(branch: string): CanvasEnvelopeV2 {
     revision: 0,
     updatedAt: EMPTY_UPDATED_AT,
     lastMutationId: null,
+    lastCheckpoint: null,
     document: emptyCanvasDocumentV2(),
   }
 }
@@ -194,6 +281,7 @@ function parseStoredEnvelope(source: string, expectedBranch: string): CanvasEnve
     'revision',
     'updatedAt',
     'lastMutationId',
+    'lastCheckpoint',
     'document',
   ])) throw new TypeError('Canvas V2 snapshot has an invalid envelope')
   const branch = parseCanvasBranch(value.branch)
@@ -203,11 +291,13 @@ function parseStoredEnvelope(source: string, expectedBranch: string): CanvasEnve
     throw new TypeError('Canvas V2 snapshot updatedAt is invalid')
   }
   if (value.lastMutationId !== null) validateMutationId(value.lastMutationId)
+  if (value.lastCheckpoint !== null) validateCheckpoint(value.lastCheckpoint)
   return {
     branch,
     revision: value.revision,
     updatedAt: value.updatedAt,
     lastMutationId: value.lastMutationId,
+    lastCheckpoint: value.lastCheckpoint,
     document: parseCanvasDocumentV2(value.document),
   }
 }
@@ -224,6 +314,12 @@ function validateMutationId(value: unknown): asserts value is string {
     || value.length > 160
     || !/^[A-Za-z0-9][A-Za-z0-9._:@-]*$/u.test(value)
     || value.includes('..')) throw new TypeError('Canvas V2 mutationId is invalid')
+}
+
+function validateCheckpoint(value: unknown): asserts value is string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{40,64}$/u.test(value)) {
+    throw new TypeError('Canvas V2 checkpoint must be a full hexadecimal Git object id')
+  }
 }
 
 function serializeEnvelope(envelope: CanvasEnvelopeV2): string {
