@@ -6,7 +6,6 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
-import type { PointerEvent } from 'react'
 import type { CanvasV2CameraState } from '@/canvas-v2/persistence'
 import type { CanvasBoundsV2 } from '@/canvas-v2/selectors'
 
@@ -44,16 +43,14 @@ export function CanvasV2SelectionWorldSurface({
   compound,
   solid = true,
   count,
-  connectionActive,
-  onDragStart,
+  activePortSide,
   onPortActivate,
 }: {
   bounds: CanvasBoundsV2
   compound: boolean
   solid?: boolean
   count: number
-  connectionActive: boolean
-  onDragStart?: (event: PointerEvent<HTMLDivElement>) => void
+  activePortSide: CanvasV2SelectionPortSide | null
   onPortActivate: (side: CanvasV2SelectionPortSide) => void
 }) {
   return (
@@ -62,23 +59,19 @@ export function CanvasV2SelectionWorldSurface({
       aria-label={compound ? `临时选择组，${count} 个画布实体` : undefined}
       data-testid={compound ? 'canvas-v2-selection-hull' : 'canvas-v2-single-selection-ports'}
       data-selection-count={count}
-      className={`absolute rounded-[18px] ${
+      className={`pointer-events-none absolute rounded-[18px] ${
         compound
-          ? `pointer-events-auto border-[1.5px] border-gg-select ${
+          ? `border-[1.5px] border-gg-select ${
               solid ? 'bg-gg-node shadow-float' : 'bg-transparent'
             }`
-          : 'pointer-events-none'
+          : ''
       }`}
       style={{
         left: bounds.x,
         top: bounds.y,
         width: bounds.w,
         height: bounds.h,
-        zIndex: compound ? 1 : 30,
-      }}
-      onPointerDown={(event) => {
-        if (!compound || (event.target as HTMLElement).closest('button')) return
-        onDragStart?.(event)
+        zIndex: compound ? 0 : 30,
       }}
     >
       {PORTS.map(({ side, label, className }) => (
@@ -86,14 +79,14 @@ export function CanvasV2SelectionWorldSurface({
           key={side}
           type="button"
           aria-label={`${label}${compound ? '临时选择组' : '所选节点'}连接端口`}
-          aria-pressed={connectionActive}
+          aria-pressed={activePortSide === side}
           title={compound ? '连接全部选中项' : '从节点连接或创建关系'}
           data-selection-port={side}
           data-no-drag
           onPointerDown={(event) => event.stopPropagation()}
           onClick={() => onPortActivate(side)}
           className={`pointer-events-auto absolute z-30 flex h-[18px] w-[18px] items-center justify-center rounded-full border-[1.5px] border-gg-select bg-white text-gg-select outline-none hover:scale-110 hover:bg-[#EAF1FD] focus-visible:ring-2 focus-visible:ring-gg-primary/40 motion-reduce:transform-none ${className} ${
-            connectionActive ? 'bg-[#EAF1FD]' : ''
+            activePortSide === side ? 'bg-[#EAF1FD]' : ''
           }`}
         >
           <Plus size={11} strokeWidth={2.2} aria-hidden="true" />
@@ -130,7 +123,7 @@ export function CanvasV2SelectionToolbar({
   const top = camera.y + bounds.y * camera.zoom
   return (
     <div
-      role="toolbar"
+      role="group"
       aria-label={compound ? `${count} 个选中项的工具栏` : '所选节点工具栏'}
       data-testid="canvas-v2-selection-toolbar"
       data-selection-mode={compound ? 'compound' : 'single'}
@@ -142,7 +135,6 @@ export function CanvasV2SelectionToolbar({
       <button
         type="button"
         aria-label={compound ? `使用 ${count} 个选中项创建任务` : '打开节点提示词控件'}
-        aria-pressed
         onClick={onFocusComposer}
         className={`flex h-7 items-center justify-center gap-1.5 rounded-[8px] bg-gg-subtle text-gg-primary outline-none focus-visible:ring-2 focus-visible:ring-gg-primary/35 ${
           compound ? 'px-2 text-[11px] font-medium' : 'w-7'

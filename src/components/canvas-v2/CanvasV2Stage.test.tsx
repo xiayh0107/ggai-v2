@@ -475,7 +475,8 @@ describe('Canvas V2 interactive stage', () => {
     expect(hull.querySelectorAll('[data-selection-port]')).toHaveLength(4)
 
     const dispatch = vi.spyOn(store, 'dispatchCommand').mockResolvedValue({ mutationId: 'group-move' })
-    act(() => dispatchPointer(hull, 'pointerdown', { clientX: 100, clientY: 100 }))
+    const imageHandle = required<HTMLElement>(host, '[data-focus-key="node:node-image"]')
+    act(() => dispatchPointer(imageHandle, 'pointerdown', { clientX: 100, clientY: 100 }))
     act(() => dispatchPointer(window, 'pointermove', { clientX: 145, clientY: 125 }))
     expect(dispatch).not.toHaveBeenCalled()
     await act(async () => dispatchPointer(window, 'pointerup', { clientX: 145, clientY: 125 }))
@@ -504,10 +505,17 @@ describe('Canvas V2 interactive stage', () => {
       { kind: 'node', id: 'node-code' },
     ]))
     const dispatch = vi.spyOn(store, 'dispatchCommand')
-    await act(async () => required<HTMLButtonElement>(
+    const rightPort = required<HTMLButtonElement>(
       host,
       '[data-selection-port="right"]',
-    ).click())
+    )
+    expect(required(host, '[data-testid="canvas-v2-selection-hull"]')
+      .className).toContain('pointer-events-none')
+    expect(rightPort.className).toContain('pointer-events-auto')
+    await act(async () => rightPort.click())
+    expect(rightPort.getAttribute('aria-pressed')).toBe('true')
+    expect(required(host, '[data-selection-port="left"]')
+      .getAttribute('aria-pressed')).toBe('false')
     await act(async () => required<HTMLButtonElement>(
       host,
       '[aria-label="从节点独立资料开始或完成连接"]',
@@ -530,6 +538,23 @@ describe('Canvas V2 interactive stage', () => {
         }),
       ]),
     })))
+  })
+
+  it('returns focus to the stage when the temporary large node is dismissed', async () => {
+    const { store, host } = await createSubject()
+    act(() => store.setSelection([
+      { kind: 'node', id: 'node-image' },
+      { kind: 'node', id: 'node-code' },
+    ]))
+    const toolbar = required<HTMLElement>(host, '[data-testid="canvas-v2-selection-toolbar"]')
+    expect(toolbar.getAttribute('role')).toBe('group')
+    const dismiss = required<HTMLButtonElement>(toolbar, '[aria-label="取消临时成组"]')
+    dismiss.focus()
+
+    await act(async () => dismiss.click())
+
+    expect(store.getSnapshot().view.selection).toEqual([])
+    expect(document.activeElement).toBe(required(host, '[data-testid="canvas-v2-stage"]'))
   })
 
   it('keeps camera, selection, and Task focus across materialization shape changes', async () => {

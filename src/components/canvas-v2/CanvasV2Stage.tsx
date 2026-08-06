@@ -141,10 +141,13 @@ type GesturePreview =
   | { kind: 'resize'; id: string; frame: CanvasNodeV2['frame'] }
   | null
 
-type EdgeEndpointV2 = CanvasV2EdgeEndpoint | {
+type EdgeEndpointV2 = (CanvasV2EdgeEndpoint & {
+  portSide?: CanvasV2SelectionPortSide
+}) | {
   kind: 'selection'
   id: string
   members: CanvasEntityRef[]
+  portSide?: CanvasV2SelectionPortSide
 }
 
 interface CollectionViewV2 {
@@ -234,11 +237,11 @@ export default function CanvasV2Stage() {
     if (selection.length !== state.view.selection.length) store.setSelection(selection)
   }, [state.document, state.view.selection, store])
 
-  useEffect(() => {
-    if (edgeDraft?.kind !== 'selection') return
-    const selectionId = state.view.selection.map(selectionKeyV2).sort().join('|')
-    if (edgeDraft.id !== selectionId) setEdgeDraft(null)
-  }, [edgeDraft, state.view.selection])
+  const selectionDraftId = state.view.selection.map(selectionKeyV2).sort().join('|')
+  const currentEdgeDraft = edgeDraft?.kind === 'selection'
+    && edgeDraft.id !== selectionDraftId
+    ? null
+    : edgeDraft
 
   useEffect(() => () => {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current)
@@ -1041,20 +1044,20 @@ export default function CanvasV2Stage() {
   const expandEndpoint = (endpoint: EdgeEndpointV2): CanvasEntityRef[] => {
     if (endpoint.kind === 'collection') return collectionMembers(endpoint.id)
     if (endpoint.kind === 'selection') return endpoint.members
-    return [endpoint]
+    return [{ kind: endpoint.kind, id: endpoint.id }]
   }
   const onPortActivate = (endpoint: EdgeEndpointV2) => {
-    if (!edgeDraft) {
+    if (!currentEdgeDraft) {
       setEdgeDraft(endpoint)
       setNotice(`已选择${endpointLabelV2(stageDocument, endpoint)}作为连接起点`)
       return
     }
-    if (edgeEndpointKeyV2(edgeDraft) === edgeEndpointKeyV2(endpoint)) {
+    if (edgeEndpointKeyV2(currentEdgeDraft) === edgeEndpointKeyV2(endpoint)) {
       setEdgeDraft(null)
       setNotice('已取消连接')
       return
     }
-    const fromEndpoints = expandEndpoint(edgeDraft)
+    const fromEndpoints = expandEndpoint(currentEdgeDraft)
     const toEndpoints = expandEndpoint(endpoint)
     if (fromEndpoints.length * toEndpoints.length > MAX_CANVAS_EDGE_BATCH_V2) {
       setNotice(
@@ -1260,8 +1263,8 @@ export default function CanvasV2Stage() {
             artifactCount={view.artifactCount}
             offset={collectionPreviewOffsetV2(view.collection.id, preview) ?? undefined}
             tabIndex={activeKey === `collection:${view.collection.id}` ? 0 : -1}
-            connectionActive={edgeDraft?.kind === 'collection'
-              && edgeDraft.id === view.collection.id}
+            connectionActive={currentEdgeDraft?.kind === 'collection'
+              && currentEdgeDraft.id === view.collection.id}
             onFocus={() => setRovingKey(`collection:${view.collection.id}`)}
             onKeyDown={(event) => onEntityKeyDown(`collection:${view.collection.id}`, event)}
             onDragStart={beginCollectionDrag}
@@ -1306,19 +1309,22 @@ export default function CanvasV2Stage() {
             compound={compoundSelection}
             solid={selectedCollectionIds.size === 0}
             count={state.view.selection.length}
-            connectionActive={compoundSelection
-              ? edgeDraft?.kind === 'selection'
-              : edgeDraft?.kind === 'node'
-                && edgeDraft.id === state.view.selection[0]?.id}
-            onDragStart={compoundSelection ? beginSelectionDrag : undefined}
+            activePortSide={compoundSelection
+              ? currentEdgeDraft?.kind === 'selection'
+                && currentEdgeDraft.id === temporarySelectionEndpoint?.id
+                ? currentEdgeDraft.portSide ?? null
+                : null
+              : currentEdgeDraft?.kind === 'node'
+                && currentEdgeDraft.id === state.view.selection[0]?.id
+                ? currentEdgeDraft.portSide ?? null
+                : null}
             onPortActivate={(side: CanvasV2SelectionPortSide) => {
-              void side
               if (compoundSelection && temporarySelectionEndpoint) {
-                onPortActivate(temporarySelectionEndpoint)
+                onPortActivate({ ...temporarySelectionEndpoint, portSide: side })
                 return
               }
               const target = state.view.selection[0]
-              if (target?.kind === 'node') onPortActivate(target)
+              if (target?.kind === 'node') onPortActivate({ ...target, portSide: side })
             }}
           />
         )}
@@ -1345,8 +1351,8 @@ export default function CanvasV2Stage() {
             onNodeResizeStart={beginNodeResize}
             onTaskPortActivate={(task) => onPortActivate({ kind: 'task', id: task.id })}
             onNodePortActivate={(node) => onPortActivate({ kind: 'node', id: node.id })}
-            activeConnectionKey={edgeDraft && edgeDraft.kind !== 'selection'
-              ? visualEntityKeyV2(edgeDraft)
+            activeConnectionKey={currentEdgeDraft && currentEdgeDraft.kind !== 'selection'
+              ? visualEntityKeyV2(currentEdgeDraft)
               : null}
             onTaskMenuAction={onTaskMenuAction}
             onNodeMenuAction={onNodeMenuAction}
@@ -1370,7 +1376,8 @@ export default function CanvasV2Stage() {
             onResizeStart={beginNodeResize}
             onPortActivate={(entry) => onPortActivate({ kind: 'node', id: entry.id })}
             showInlinePort={!selectedNodeIds.has(node.id)}
-            connectionActive={edgeDraft?.kind === 'node' && edgeDraft.id === node.id}
+            connectionActive={currentEdgeDraft?.kind === 'node'
+              && currentEdgeDraft.id === node.id}
             onMenuAction={onNodeMenuAction}
             registerFocusable={(element) => registerFocusable(`node:${node.id}`, element)}
           />
@@ -1441,6 +1448,7 @@ export default function CanvasV2Stage() {
           onClear={() => {
             store.setSelection([])
             setRovingKey(null)
+            stageRef.current?.focus({ preventScroll: true })
           }}
         />
       )}
@@ -1530,7 +1538,7 @@ export default function CanvasV2Stage() {
               <option value="none">不进上下文</option>
             </select>
           </label>
-          {edgeDraft && (
+          {currentEdgeDraft && (
             <button
               type="button"
               aria-label="取消创建连接"
