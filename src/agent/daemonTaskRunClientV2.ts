@@ -102,6 +102,13 @@ export class DaemonTaskRunClientV2 implements CanvasV2TaskRunClient {
     })).map(taskSummary)
   }
 
+  async readTaskRunSummary(input: {
+    projectDir: string
+    runId: string
+  }): Promise<CanvasV2TaskRunSummary> {
+    return taskSummary(await this.#client.getTaskRunV2(input.runId, input.projectDir))
+  }
+
   async readTaskRunLog(input: {
     projectDir: string
     runId: string
@@ -166,6 +173,8 @@ function taskSummary(summary: {
   taskId: string
   agentId: string
   canvasBranch: string
+  baseRevision?: number
+  prompt?: string
   status: CanvasV2TaskRunSummary['status']
   startedAt: number
   error?: string
@@ -175,6 +184,8 @@ function taskSummary(summary: {
     taskId: summary.taskId,
     agentId: summary.agentId,
     canvasBranch: summary.canvasBranch,
+    ...(summary.baseRevision === undefined ? {} : { baseRevision: summary.baseRevision }),
+    ...(summary.prompt === undefined ? {} : { prompt: summary.prompt }),
     status: summary.status,
     startedAt: summary.startedAt,
     ...(summary.error === undefined ? {} : { error: summary.error }),

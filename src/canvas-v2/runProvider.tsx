@@ -18,6 +18,7 @@ import {
   type CanvasV2TaskRunClose,
   type CanvasV2TaskRunHandle,
   type CanvasV2TaskRunLogEntry,
+  type CanvasV2TaskRunSummary,
 } from './runController'
 import type { CanvasV2Store } from './store'
 import { CanvasV2TaskRunContext } from './runHooks'
@@ -53,6 +54,7 @@ export interface CanvasV2TaskRunControllerLike {
   recoverAll(): Promise<CanvasV2TaskRunHandle[]>
   cancelTask(taskId: string): Promise<CanvasV2TaskRunClose | null>
   getRunLog(runId: string): readonly CanvasV2TaskRunLogEntry[]
+  readTaskRunSummary(runId: string): Promise<CanvasV2TaskRunSummary>
   dispose(): void
 }
 
@@ -198,6 +200,11 @@ export class CanvasV2TaskRunLifecycle {
 
   getRunLog(runId: string): readonly CanvasV2TaskRunLogEntry[] {
     return this.#controller.getRunLog(runId)
+  }
+
+  readTaskRunSummary(runId: string): Promise<CanvasV2TaskRunSummary> {
+    this.#assertUsable()
+    return this.#controller.readTaskRunSummary(runId)
   }
 
   getProjectionReviewForTask(taskId: string): CanvasV2ProjectionReview | null {

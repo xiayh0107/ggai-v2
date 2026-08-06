@@ -23,6 +23,7 @@ import type {
   CanvasV2TaskRunClose,
   CanvasV2TaskRunHandle,
   CanvasV2TaskRunLogEntry,
+  CanvasV2TaskRunSummary,
 } from '@/canvas-v2/runController'
 import { CanvasV2Store } from '@/canvas-v2/store'
 import { taskComposerDraftKeyV2 } from '@/canvas-v2/taskRunUi'
@@ -136,6 +137,17 @@ class FakeController implements CanvasV2TaskRunControllerLike {
   getRunLog(runId: string): readonly CanvasV2TaskRunLogEntry[] {
     void runId
     return this.logs
+  }
+
+  async readTaskRunSummary(runId: string): Promise<CanvasV2TaskRunSummary> {
+    return {
+      runId,
+      taskId: task.id,
+      agentId: 'codex',
+      canvasBranch: branch,
+      status: 'done',
+      startedAt: 1,
+    }
   }
 
   dispose(): void {

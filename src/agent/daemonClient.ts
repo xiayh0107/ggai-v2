@@ -349,6 +349,10 @@ export interface DaemonRunSummary {
   runId: string
   /** Required and strictly decoded by the Canvas V2 task-run methods. */
   taskId?: string
+  /** Persisted Canvas revision accepted for this Task-owned V2 run. */
+  baseRevision?: number
+  /** Exact prompt accepted for this Task-owned V2 run. */
+  prompt?: string
   nodeId: string
   agentId: string
   /** Legacy summaries without this field are normalized to `main` at decode time. */
@@ -1378,6 +1382,18 @@ function decodeRunSummary(value: unknown, requireTaskId = false): DaemonRunSumma
     || (value.taskId !== undefined && !isDaemonIdentifier(value.taskId))) {
     throw new DaemonProtocolError('GET /runs/:id response had an invalid taskId')
   }
+  const hasBaseRevision = value.baseRevision !== undefined
+  const hasPrompt = value.prompt !== undefined
+  if (hasBaseRevision !== hasPrompt
+    || ((hasBaseRevision || hasPrompt) && value.taskId === undefined)
+    || (hasBaseRevision
+      && (!Number.isSafeInteger(value.baseRevision) || (value.baseRevision as number) < 0))) {
+    throw new DaemonProtocolError('GET /runs/:id response had invalid V2 intent metadata')
+  }
+  if (hasPrompt
+    && (typeof value.prompt !== 'string' || value.prompt.length > 250_000)) {
+    throw new DaemonProtocolError('GET /runs/:id response had invalid V2 intent metadata')
+  }
   if (value.error !== undefined && typeof value.error !== 'string') {
     throw new DaemonProtocolError('GET /runs/:id response had an invalid error')
   }
@@ -1387,6 +1403,8 @@ function decodeRunSummary(value: unknown, requireTaskId = false): DaemonRunSumma
   return {
     runId: value.runId,
     ...(typeof value.taskId === 'string' ? { taskId: value.taskId } : {}),
+    ...(typeof value.baseRevision === 'number' ? { baseRevision: value.baseRevision } : {}),
+    ...(typeof value.prompt === 'string' ? { prompt: value.prompt } : {}),
     nodeId: value.nodeId,
     agentId: value.agentId,
     canvasBranch: typeof value.canvasBranch === 'string' ? value.canvasBranch : 'main',

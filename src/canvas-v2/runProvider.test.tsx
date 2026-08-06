@@ -22,6 +22,7 @@ import type {
   CanvasV2RunTaskInput,
   CanvasV2TaskRunClose,
   CanvasV2TaskRunHandle,
+  CanvasV2TaskRunSummary,
 } from './runController'
 import { CanvasV2Store } from './store'
 
@@ -130,6 +131,16 @@ class FakeController implements CanvasV2TaskRunControllerLike {
       text: 'working',
     }]
   })
+  readonly readTaskRunSummaryMock = vi.fn(async (runId: string): Promise<CanvasV2TaskRunSummary> => ({
+    runId,
+    taskId: 'task-1',
+    agentId: 'codex',
+    canvasBranch: 'main',
+    baseRevision: 4,
+    prompt: 'Create a scatter plot.',
+    status: 'done',
+    startedAt: 1,
+  }))
   readonly disposeMock = vi.fn()
 
   factory = (input: CanvasV2TaskRunControllerFactoryInput) => {
@@ -151,6 +162,10 @@ class FakeController implements CanvasV2TaskRunControllerLike {
 
   getRunLog(runId: string) {
     return this.getRunLogMock(runId)
+  }
+
+  readTaskRunSummary(runId: string): Promise<CanvasV2TaskRunSummary> {
+    return this.readTaskRunSummaryMock(runId)
   }
 
   dispose(): void {
@@ -469,5 +484,19 @@ describe('Canvas V2 Task Run provider', () => {
       text: 'working',
     }])
     expect(controller.getRunLogMock).toHaveBeenCalledWith('run-1')
+  })
+
+  it('exposes immutable Task Run summaries without copying them into Provider state', async () => {
+    const { controller } = await renderHarness()
+    const before = exposedLifecycle?.getSnapshot()
+
+    await expect(exposedLifecycle?.readTaskRunSummary('run-origin')).resolves.toMatchObject({
+      runId: 'run-origin',
+      taskId: 'task-1',
+      baseRevision: 4,
+      prompt: 'Create a scatter plot.',
+    })
+    expect(controller.readTaskRunSummaryMock).toHaveBeenCalledWith('run-origin')
+    expect(exposedLifecycle?.getSnapshot()).toBe(before)
   })
 })

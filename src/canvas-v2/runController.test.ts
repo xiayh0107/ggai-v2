@@ -129,8 +129,19 @@ class FakeClient implements CanvasV2TaskRunClient {
   readonly attaches = new Map<string, PendingAttach>()
   readonly cancelled: string[] = []
   readonly readRunIds: string[] = []
+  readonly summaryReads: Array<{ projectDir: string; runId: string }> = []
   readCount = 0
   summaries: CanvasV2TaskRunSummary[] = []
+  summary: CanvasV2TaskRunSummary = {
+    runId: 'run-origin',
+    taskId: 'task-a',
+    agentId: 'codex',
+    canvasBranch: 'main',
+    baseRevision: 7,
+    prompt: 'Create the original chart.',
+    status: 'done',
+    startedAt: 1,
+  }
   createError: unknown = null
   reconcileSummary: CanvasV2TaskRunSummary | null = null
   logEntries: Awaited<ReturnType<CanvasV2TaskRunClient['readTaskRunLog']>> = {
@@ -153,6 +164,14 @@ class FakeClient implements CanvasV2TaskRunClient {
 
   async listTaskRuns(): Promise<readonly CanvasV2TaskRunSummary[]> {
     return this.summaries
+  }
+
+  async readTaskRunSummary(input: {
+    projectDir: string
+    runId: string
+  }): Promise<CanvasV2TaskRunSummary> {
+    this.summaryReads.push(structuredClone(input))
+    return { ...this.summary, runId: input.runId }
   }
 
   async readTaskRunLog(input: {
@@ -208,6 +227,17 @@ function controller(
 }
 
 describe('CanvasV2TaskRunController', () => {
+  it('reads one immutable Task Run summary without changing runtime state', async () => {
+    const store = new FakeStore()
+    const client = new FakeClient()
+    const subject = controller(store, client)
+
+    await expect(subject.readTaskRunSummary('run-origin')).resolves.toEqual(client.summary)
+    expect(client.summaryReads).toEqual([{ projectDir: '/project', runId: 'run-origin' }])
+    expect(store.snapshot.runtimeByTaskId).toEqual({})
+    expect(store.order).toEqual([])
+  })
+
   it('flushes first and sends the exact revision-owned RunIntent V2 without a snapshot', async () => {
     const store = new FakeStore()
     const client = new FakeClient()

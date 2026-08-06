@@ -39,6 +39,8 @@ function summary(overrides: Record<string, unknown> = {}): Record<string, unknow
     nodeId: 'task-v2',
     agentId: 'codex',
     canvasBranch: 'feature/task-v2',
+    baseRevision: 17,
+    prompt: 'Generate the requested outputs.',
     status: 'running',
     startedAt: 10,
     sessionId: null,
@@ -193,6 +195,8 @@ describe('DaemonTaskRunClientV2', () => {
       taskId: 'task-v2',
       agentId: 'codex',
       canvasBranch: 'feature/task-v2',
+      baseRevision: 17,
+      prompt: 'Generate the requested outputs.',
       status: 'running',
       startedAt: 10,
     }])
@@ -204,6 +208,57 @@ describe('DaemonTaskRunClientV2', () => {
       branch: 'feature/task-v2',
       limit: '37',
     })
+  })
+
+  it('reads immutable intent metadata for one Task-owned run', async () => {
+    let requested: URL | null = null
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      requested = new URL(String(input))
+      return response(summary({
+        status: 'done',
+        finishedAt: 20,
+      }))
+    })
+    const { adapter } = subject(fetchMock)
+
+    await expect(adapter.readTaskRunSummary({
+      projectDir: '/project',
+      runId: 'run-v2',
+    })).resolves.toEqual({
+      runId: 'run-v2',
+      taskId: 'task-v2',
+      agentId: 'codex',
+      canvasBranch: 'feature/task-v2',
+      baseRevision: 17,
+      prompt: 'Generate the requested outputs.',
+      status: 'done',
+      startedAt: 10,
+    })
+    const capturedUrl = requireUrl(requested)
+    expect(capturedUrl.pathname).toBe('/runs/run-v2')
+    expect(capturedUrl.searchParams.get('projectDir')).toBe('/project')
+  })
+
+  it.each([
+    ['missing prompt', { prompt: undefined }],
+    ['missing revision', { baseRevision: undefined }],
+    ['negative revision', { baseRevision: -1 }],
+    ['oversized prompt', { prompt: 'x'.repeat(250_001) }],
+  ])('rejects run summaries with %s', async (_label, overrides) => {
+    const candidate = summary(overrides)
+    if ('prompt' in overrides && overrides.prompt === undefined) {
+      delete candidate.prompt
+    }
+    if ('baseRevision' in overrides && overrides.baseRevision === undefined) {
+      delete candidate.baseRevision
+    }
+    const fetchMock = vi.fn(async () => response(candidate))
+    const { adapter } = subject(fetchMock)
+
+    await expect(adapter.readTaskRunSummary({
+      projectDir: '/project',
+      runId: 'run-v2',
+    })).rejects.toBeInstanceOf(DaemonProtocolError)
   })
 
   it('fails before Run creation when the capability handshake is malformed', async () => {

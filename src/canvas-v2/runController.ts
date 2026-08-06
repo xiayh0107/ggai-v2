@@ -34,6 +34,10 @@ export interface CanvasV2TaskRunSummary {
   taskId: string
   agentId: string
   canvasBranch: string
+  /** Optional only for task-run records created before intent metadata became durable. */
+  baseRevision?: number
+  /** Exact accepted prompt; optional only for legacy task-run records. */
+  prompt?: string
   status: CanvasV2TaskRunStatus
   startedAt: number
   error?: string
@@ -72,6 +76,10 @@ export interface CanvasV2TaskRunClient {
     branch: string
     taskId: string
   }): Promise<readonly CanvasV2TaskRunSummary[]>
+  readTaskRunSummary(input: {
+    projectDir: string
+    runId: string
+  }): Promise<CanvasV2TaskRunSummary>
   readTaskRunLog(input: {
     projectDir: string
     runId: string
@@ -336,6 +344,19 @@ export class CanvasV2TaskRunController {
 
   getRunLog(runId: string): readonly CanvasV2TaskRunLogEntry[] {
     return (this.#logsByRunId.get(runId) ?? []).map((entry) => ({ ...entry }))
+  }
+
+  async readTaskRunSummary(runId: string): Promise<CanvasV2TaskRunSummary> {
+    this.#assertUsable()
+    assertIdentifier(runId, 'runId')
+    const summary = await this.#client.readTaskRunSummary({
+      projectDir: this.#store.getSnapshot().scope.projectDir,
+      runId,
+    })
+    if (summary.runId !== runId) {
+      throw new Error(`Daemon returned unexpected run id ${summary.runId}`)
+    }
+    return structuredClone(summary)
   }
 
   dispose(): void {
