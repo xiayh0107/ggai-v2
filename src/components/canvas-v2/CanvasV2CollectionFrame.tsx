@@ -11,6 +11,7 @@ export default function CanvasV2CollectionFrame({
   bounds,
   collapsed,
   selected,
+  compoundSelected = false,
   memberCount,
   artifactCount,
   offset,
@@ -28,6 +29,7 @@ export default function CanvasV2CollectionFrame({
   bounds: CanvasBoundsV2
   collapsed: boolean
   selected: boolean
+  compoundSelected?: boolean
   memberCount: number
   artifactCount: number
   offset?: { dx: number; dy: number }
@@ -61,13 +63,16 @@ export default function CanvasV2CollectionFrame({
       data-collection-id={collection.id}
       data-collapsed={collapsed ? 'true' : 'false'}
       data-selected={selected ? 'true' : 'false'}
+      data-compound-selected={compoundSelected ? 'true' : 'false'}
       className="pointer-events-none absolute left-0 top-0"
       style={offset ? { transform: `translate(${offset.dx}px, ${offset.dy}px)` } : undefined}
     >
       <div
         data-collection-border={collection.id}
         className={`pointer-events-auto absolute rounded-[20px] border bg-[#F7F9FC]/75 shadow-sm ${
-          selected ? 'border-[1.5px] border-gg-select' : 'border-[#C7D2E0]'
+          selected && !compoundSelected
+            ? 'border-[1.5px] border-gg-select'
+            : 'border-[#C7D2E0]'
         } ${collapsed ? 'bg-white/95' : ''}`}
         style={{ left: frame.x, top: frame.y, width: frame.w, height: frame.h }}
         onPointerDown={(event) => {
@@ -98,13 +103,15 @@ export default function CanvasV2CollectionFrame({
             <span className="shrink-0 text-[10px] text-gg-muted">{artifactCount} 产物</span>
           )}
         </button>
-        <CanvasV2EdgePort
-          label={connectionActive
-            ? `取消从集合${collection.title}的连接`
-            : `从集合${collection.title}开始或完成连接`}
-          active={connectionActive}
-          onActivate={onPortActivate}
-        />
+        {!compoundSelected && (
+          <CanvasV2EdgePort
+            label={connectionActive
+              ? `取消从集合${collection.title}的连接`
+              : `从集合${collection.title}开始或完成连接`}
+            active={connectionActive}
+            onActivate={onPortActivate}
+          />
+        )}
         <button
           type="button"
           aria-expanded={!collapsed}

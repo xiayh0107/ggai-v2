@@ -260,6 +260,7 @@ async function renderHarness(input: {
   document?: CanvasDocumentV2
   withRunContext?: boolean
   flushMode?: FlushMode
+  showRunPanel?: boolean
 } = {}) {
   const initialDocument = input.document ?? canvasDocument()
   const { store, flushedCommands } = makeStore(initialDocument, input.flushMode)
@@ -274,6 +275,7 @@ async function renderHarness(input: {
       view={view}
       projectDir={projectDir}
       selectedTask
+      showRunPanel={input.showRunPanel ?? true}
       selectedNodeIds={new Set()}
       explicitlyCollapsed={false}
       activeKey={`task:${task.id}`}
@@ -473,6 +475,14 @@ describe('Canvas V2 Task proposal review integration', () => {
     expect(required(`[data-task-id="${task.id}"]`)).not.toBeNull()
     expect(container?.querySelector('[data-testid^="canvas-v2-task-proposal-review-"]'))
       .toBeNull()
+    expect(container?.querySelector('[data-testid^="canvas-v2-task-run-panel-"]'))
+      .toBeNull()
+  })
+
+  it('suppresses the Task run panel when a compound selection owns the context surface', async () => {
+    await renderHarness({ showRunPanel: false })
+
+    expect(required(`[data-task-id="${task.id}"]`)).not.toBeNull()
     expect(container?.querySelector('[data-testid^="canvas-v2-task-run-panel-"]'))
       .toBeNull()
   })

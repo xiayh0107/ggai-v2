@@ -435,6 +435,11 @@ describe('Canvas V2 interactive stage', () => {
       { kind: 'node', id: 'node-single' },
     ])
     expect(document.activeElement).toBe(singleNode)
+    const hull = required<HTMLElement>(host, '[data-testid="canvas-v2-selection-hull"]')
+    expect(hull.getAttribute('data-selection-count')).toBe('2')
+    expect(hull.querySelectorAll('[data-selection-port]')).toHaveLength(4)
+    expect(required(host, '[data-testid="canvas-v2-selection-toolbar"]')
+      .getAttribute('data-selection-mode')).toBe('compound')
 
     act(() => singleNode.dispatchEvent(new KeyboardEvent('keydown', {
       key: 'ArrowRight',
@@ -453,6 +458,78 @@ describe('Canvas V2 interactive stage', () => {
       })
     })
     expect(document.activeElement).toBe(focused)
+  })
+
+  it('moves a temporary multi-selection as one view-only large node', async () => {
+    const { store, host } = await createSubject({ camera: { x: 0, y: 0, zoom: 1 } })
+    act(() => store.setSelection([
+      { kind: 'node', id: 'node-image' },
+      { kind: 'node', id: 'node-code' },
+    ]))
+    const beforeCollections = structuredClone(store.getSnapshot().document.collections)
+    const hull = required<HTMLElement>(host, '[data-testid="canvas-v2-selection-hull"]')
+    const image = required<HTMLElement>(host, '[data-node-id="node-image"]')
+    const code = required<HTMLElement>(host, '[data-node-id="node-code"]')
+    expect(image.dataset.compoundSelected).toBe('true')
+    expect(code.dataset.compoundSelected).toBe('true')
+    expect(hull.querySelectorAll('[data-selection-port]')).toHaveLength(4)
+
+    const dispatch = vi.spyOn(store, 'dispatchCommand').mockResolvedValue({ mutationId: 'group-move' })
+    act(() => dispatchPointer(hull, 'pointerdown', { clientX: 100, clientY: 100 }))
+    act(() => dispatchPointer(window, 'pointermove', { clientX: 145, clientY: 125 }))
+    expect(dispatch).not.toHaveBeenCalled()
+    await act(async () => dispatchPointer(window, 'pointerup', { clientX: 145, clientY: 125 }))
+
+    expect(dispatch).toHaveBeenCalledOnce()
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'MoveEntities',
+      entities: [
+        { kind: 'node', id: 'node-image' },
+        { kind: 'node', id: 'node-code' },
+      ],
+      dx: 45,
+      dy: 25,
+    })
+    expect(store.getSnapshot().view.selection).toEqual([
+      { kind: 'node', id: 'node-image' },
+      { kind: 'node', id: 'node-code' },
+    ])
+    expect(store.getSnapshot().document.collections).toEqual(beforeCollections)
+  })
+
+  it('expands a temporary selection port into ordinary typed edges', async () => {
+    const { store, host } = await createSubject()
+    act(() => store.setSelection([
+      { kind: 'node', id: 'node-image' },
+      { kind: 'node', id: 'node-code' },
+    ]))
+    const dispatch = vi.spyOn(store, 'dispatchCommand')
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      '[data-selection-port="right"]',
+    ).click())
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      '[aria-label="从节点独立资料开始或完成连接"]',
+    ).click())
+
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CreateEdges',
+      edges: expect.arrayContaining([
+        expect.objectContaining({
+          from: { kind: 'node', id: 'node-image' },
+          to: { kind: 'node', id: 'node-top' },
+          relation: 'references',
+          contextRole: 'full',
+        }),
+        expect.objectContaining({
+          from: { kind: 'node', id: 'node-code' },
+          to: { kind: 'node', id: 'node-top' },
+          relation: 'references',
+          contextRole: 'full',
+        }),
+      ]),
+    })))
   })
 
   it('keeps camera, selection, and Task focus across materialization shape changes', async () => {

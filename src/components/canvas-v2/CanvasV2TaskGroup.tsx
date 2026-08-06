@@ -27,6 +27,9 @@ export interface CanvasV2TaskGroupProps {
   view: CanvasTaskViewV2
   projectDir: string
   selectedTask: boolean
+  compoundSelectedTask?: boolean
+  compoundSelection?: boolean
+  showRunPanel?: boolean
   selectedNodeIds: ReadonlySet<string>
   explicitlyCollapsed: boolean
   activeKey: string | null
@@ -51,6 +54,9 @@ export default function CanvasV2TaskGroup({
   view,
   projectDir,
   selectedTask,
+  compoundSelectedTask = false,
+  compoundSelection = false,
+  showRunPanel = selectedTask,
   selectedNodeIds,
   explicitlyCollapsed,
   activeKey,
@@ -90,7 +96,9 @@ export default function CanvasV2TaskGroup({
       onKeyDown={(event) => onEntityKeyDown(taskKey, event)}
       onDragStart={(event) => onTaskDragStart(event, task)}
       connectionActive={activeConnectionKey === taskKey}
-      onPortActivate={onTaskPortActivate ? () => onTaskPortActivate(task) : undefined}
+      onPortActivate={onTaskPortActivate && !compoundSelectedTask
+        ? () => onTaskPortActivate(task)
+        : undefined}
       onMenuAction={onTaskMenuAction ? (action) => onTaskMenuAction(task, action) : undefined}
       onToggle={() => {
         if (collapsed) onSelectTask(task, false)
@@ -115,7 +123,9 @@ export default function CanvasV2TaskGroup({
         <div
           data-task-border={task.id}
           className={`pointer-events-auto absolute overflow-hidden rounded-[16px] border bg-gg-node shadow-sm motion-reduce:transition-none ${
-            selectedTask ? 'border-[1.5px] border-gg-select shadow-float' : 'border-gg-line'
+            selectedTask && !compoundSelectedTask
+              ? 'border-[1.5px] border-gg-select shadow-float'
+              : 'border-gg-line'
           }`}
           style={{
             left: task.anchor.x,
@@ -142,7 +152,9 @@ export default function CanvasV2TaskGroup({
         <div
           data-task-border={task.id}
           className={`pointer-events-auto absolute rounded-[16px] border bg-gg-node p-4 shadow-sm motion-reduce:transition-none ${
-            selectedTask ? 'border-[1.5px] border-gg-select shadow-float' : 'border-gg-line'
+            selectedTask && !compoundSelectedTask
+              ? 'border-[1.5px] border-gg-select shadow-float'
+              : 'border-gg-line'
           }`}
           style={{
             left: task.anchor.x,
@@ -171,7 +183,9 @@ export default function CanvasV2TaskGroup({
         <div
           data-task-border={task.id}
           className={`pointer-events-auto absolute flex items-center gap-2 rounded-[16px] border bg-gg-node px-3 shadow-sm motion-reduce:transition-none ${
-            selectedTask ? 'border-[1.5px] border-gg-select shadow-float' : 'border-gg-line'
+            selectedTask && !compoundSelectedTask
+              ? 'border-[1.5px] border-gg-select shadow-float'
+              : 'border-gg-line'
           }`}
           style={{
             left: chromeFrame.x,
@@ -207,6 +221,7 @@ export default function CanvasV2TaskGroup({
               frame={nodeFrames?.get(node.id)}
               projectDir={projectDir}
               selected={selectedNodeIds.has(node.id)}
+              compoundSelected={selectedNodeIds.has(node.id) && compoundSelection}
               compact={compact}
               tabIndex={activeKey === `node:${node.id}` ? 0 : -1}
               onFocus={() => onEntityFocus(`node:${node.id}`)}
@@ -214,6 +229,7 @@ export default function CanvasV2TaskGroup({
               onDragStart={onNodeDragStart}
               onResizeStart={onNodeResizeStart}
               onPortActivate={onNodePortActivate}
+              showInlinePort={!selectedNodeIds.has(node.id)}
               connectionActive={activeConnectionKey === `node:${node.id}`}
               onMenuAction={onNodeMenuAction}
               registerFocusable={(element) => registerFocusable(`node:${node.id}`, element)}
@@ -225,7 +241,7 @@ export default function CanvasV2TaskGroup({
         </div>
       )}
 
-      {!collapsed && selectedTask && (
+      {!collapsed && showRunPanel && (
         <div
           className="pointer-events-auto absolute z-30"
           style={{ left: runPanelPosition.x, top: runPanelPosition.y }}

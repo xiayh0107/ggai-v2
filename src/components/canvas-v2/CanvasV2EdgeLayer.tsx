@@ -23,6 +23,13 @@ const EDGE_LABEL_MIN_LENGTH_V2 = 140
 
 export type CanvasV2EdgePreview =
   | { kind: 'task' | 'node' | 'collection'; id: string; dx: number; dy: number }
+  | {
+      kind: 'selection'
+      entities: CanvasEntityRef[]
+      collectionIds: string[]
+      dx: number
+      dy: number
+    }
   | { kind: 'resize'; id: string; frame: CanvasNodeV2['frame'] }
   | null
 
@@ -106,6 +113,24 @@ export default function CanvasV2EdgeLayer({
 
   const offsetFor = (ref: CanvasV2EdgeEndpoint) => {
     if (!preview || preview.kind === 'resize') return { dx: 0, dy: 0 }
+    if (preview.kind === 'selection') {
+      if (ref.kind === 'collection') {
+        return preview.collectionIds.includes(ref.id) ? preview : { dx: 0, dy: 0 }
+      }
+      const directlySelected = preview.entities.some((entity) =>
+        entity.kind === ref.kind && entity.id === ref.id)
+      const node = ref.kind === 'node' ? nodeById.get(ref.id) : undefined
+      const homeTaskId = node?.homeTaskId
+      const taskSelected = Boolean(homeTaskId && preview.entities.some((entity) =>
+        entity.kind === 'task' && entity.id === homeTaskId))
+      const collectionId = ref.kind === 'task'
+        ? taskById.get(ref.id)?.collectionId
+        : node?.collectionId ?? (homeTaskId ? taskById.get(homeTaskId)?.collectionId : undefined)
+      return directlySelected || taskSelected
+        || Boolean(collectionId && preview.collectionIds.includes(collectionId))
+        ? preview
+        : { dx: 0, dy: 0 }
+    }
     if (preview.kind === ref.kind && preview.id === ref.id) return preview
     if (preview.kind !== 'collection' || ref.kind === 'collection') return { dx: 0, dy: 0 }
     const node = ref.kind === 'node' ? nodeById.get(ref.id) : undefined
@@ -131,10 +156,7 @@ export default function CanvasV2EdgeLayer({
     const node = nodeById.get(ref.id)
     if (!node) return null
     const frame = nodeFrames.get(node.id) ?? node.frame
-    const taskOffset = preview?.kind === 'task' && preview.id === node.homeTaskId
-      ? preview
-      : { dx: 0, dy: 0 }
-    return translatedBoundsV2(frame, taskOffset)
+    return translatedBoundsV2(frame, nodeFrames.has(node.id) ? { dx: 0, dy: 0 } : offset)
   }
 
   return (

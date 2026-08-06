@@ -17,6 +17,7 @@ export interface CanvasV2NodeCardProps {
   frame?: CanvasBoundsV2
   projectDir: string
   selected: boolean
+  compoundSelected?: boolean
   compact?: boolean
   tabIndex: number
   onFocus: () => void
@@ -24,6 +25,7 @@ export interface CanvasV2NodeCardProps {
   onDragStart: (event: PointerEvent<HTMLElement>, node: CanvasNodeV2) => void
   onResizeStart: (event: PointerEvent<HTMLButtonElement>, node: CanvasNodeV2) => void
   onPortActivate?: (node: CanvasNodeV2) => void
+  showInlinePort?: boolean
   connectionActive?: boolean
   onMenuAction?: (node: CanvasNodeV2, action: string) => void
   registerFocusable: (element: HTMLButtonElement | null) => void
@@ -34,6 +36,7 @@ export default function CanvasV2NodeCard({
   frame = node.frame,
   projectDir,
   selected,
+  compoundSelected = false,
   compact = false,
   tabIndex,
   onFocus,
@@ -41,6 +44,7 @@ export default function CanvasV2NodeCard({
   onDragStart,
   onResizeStart,
   onPortActivate,
+  showInlinePort = true,
   connectionActive = false,
   onMenuAction,
   registerFocusable,
@@ -56,8 +60,9 @@ export default function CanvasV2NodeCard({
       data-v2-entity="node"
       data-node-id={node.id}
       data-selected={selected ? 'true' : 'false'}
+      data-compound-selected={compoundSelected ? 'true' : 'false'}
       className={`pointer-events-auto absolute overflow-hidden rounded-[16px] border bg-gg-node shadow-sm motion-reduce:transition-none ${
-        selected
+        selected && !compoundSelected
           ? 'border-[1.5px] border-gg-select shadow-float'
           : 'border-gg-line hover:border-[#C7D2E0]'
       }`}
@@ -93,7 +98,7 @@ export default function CanvasV2NodeCard({
           </span>
           <Grip size={13} className="shrink-0 text-[#98A2B3]" aria-hidden="true" />
         </button>
-        {onPortActivate && (
+        {onPortActivate && showInlinePort && (
           <CanvasV2EdgePort
             label={connectionActive
               ? `取消从节点${node.title || plugin.label}的连接`
@@ -128,7 +133,7 @@ export default function CanvasV2NodeCard({
         />
       </div>
 
-      {selected && !compact && (
+      {selected && !compoundSelected && !compact && (
         <button
           type="button"
           aria-label={`调整${node.title || plugin.label}节点大小`}
