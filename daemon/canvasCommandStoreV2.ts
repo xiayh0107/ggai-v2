@@ -456,6 +456,14 @@ function parseStoredEnvelope(source: string, expectedBranch: string): StoredCanv
   }
 }
 
+/** Strict read-only decoder for workspace summaries; it performs no persistence or recovery. */
+export function parseCanvasEnvelopeV2Snapshot(
+  source: string,
+  expectedBranch: string,
+): CanvasEnvelopeV2 {
+  return cloneEnvelope(parseStoredEnvelope(source, expectedBranch))
+}
+
 function validateRevision(value: unknown): asserts value is number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new TypeError('Canvas V2 revision must be a non-negative safe integer')

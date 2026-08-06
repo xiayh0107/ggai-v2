@@ -4,12 +4,24 @@ import path from 'node:path'
 
 export type CanvasModelMode = 'v1' | 'v2'
 
-export interface CanvasModelMarkerV1 {
+export interface CanvasModelResetMarkerV1 {
   version: 1
   canvasModel: 2
   initializedAt: string
   legacyArchive: string
 }
+
+export interface CanvasModelBlankProjectMarkerV1 {
+  version: 1
+  canvasModel: 2
+  initializedAt: string
+  initializedFrom: 'blank-project'
+  projectId: string
+}
+
+export type CanvasModelMarkerV1 =
+  | CanvasModelResetMarkerV1
+  | CanvasModelBlankProjectMarkerV1
 
 export class CanvasModelBootError extends Error {
   readonly code: 'canvas_reset_required' | 'canvas_model_mismatch' | 'canvas_model_marker_invalid'
@@ -134,18 +146,56 @@ async function readMarker(filePath: string): Promise<CanvasModelMarkerV1> {
   if (
     marker.version !== 1
     || marker.canvasModel !== 2
-    || typeof marker.initializedAt !== 'string'
-    || !Number.isFinite(Date.parse(marker.initializedAt))
-    || typeof marker.legacyArchive !== 'string'
-    || !/^\.gg\/legacy-v1\/[0-9]{8}T[0-9]{6}\.[0-9]{3}Z$/u.test(marker.legacyArchive)
-  ) {
-    throw invalidMarker()
+    || !isCanonicalTimestamp(marker.initializedAt)
+  ) throw invalidMarker()
+
+  if (hasExactKeys(marker, ['version', 'canvasModel', 'initializedAt', 'legacyArchive'])) {
+    if (
+      typeof marker.legacyArchive !== 'string'
+      || !/^\.gg\/legacy-v1\/[0-9]{8}T[0-9]{6}\.[0-9]{3}Z$/u.test(marker.legacyArchive)
+    ) throw invalidMarker()
+    return {
+      version: 1,
+      canvasModel: 2,
+      initializedAt: marker.initializedAt as string,
+      legacyArchive: marker.legacyArchive,
+    }
   }
+
+  if (
+    hasExactKeys(marker, [
+      'version',
+      'canvasModel',
+      'initializedAt',
+      'initializedFrom',
+      'projectId',
+    ])
+    && marker.initializedFrom === 'blank-project'
+    && isWorkspaceProjectId(marker.projectId)
+  ) {
+    return {
+      version: 1,
+      canvasModel: 2,
+      initializedAt: marker.initializedAt as string,
+      initializedFrom: 'blank-project',
+      projectId: marker.projectId as string,
+    }
+  }
+  throw invalidMarker()
+}
+
+export function blankProjectCanvasModelMarker(
+  projectId: string,
+  initializedAt = new Date().toISOString(),
+): CanvasModelBlankProjectMarkerV1 {
+  if (!isWorkspaceProjectId(projectId)) throw new TypeError('projectId is invalid')
+  if (!isCanonicalTimestamp(initializedAt)) throw new TypeError('initializedAt must be canonical ISO-8601')
   return {
     version: 1,
     canvasModel: 2,
-    initializedAt: marker.initializedAt,
-    legacyArchive: marker.legacyArchive,
+    initializedAt,
+    initializedFrom: 'blank-project',
+    projectId,
   }
 }
 
@@ -155,6 +205,24 @@ function invalidMarker(): CanvasModelBootError {
     'canvas_model_marker_invalid',
     false,
   )
+}
+
+function isCanonicalTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort()
+  const expected = [...keys].sort()
+  return actual.length === expected.length
+    && actual.every((key, index) => key === expected[index])
+}
+
+function isWorkspaceProjectId(value: unknown): value is string {
+  return value === 'project_root'
+    || (typeof value === 'string' && /^project_[0-9a-f]{32}$/u.test(value))
 }
 
 async function fileKind(filePath: string): Promise<'missing' | 'directory' | 'file' | 'other'> {

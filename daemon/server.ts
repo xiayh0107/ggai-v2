@@ -2,6 +2,7 @@ import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
+import path from 'node:path'
 import { CanvasCommandError, type CanvasCommandV2 } from '../src/canvas-v2/commands.js'
 import type {
   CanvasDocumentV2,
@@ -45,6 +46,11 @@ import {
   type RunStreamMessage,
 } from './protocol.js'
 import { ProjectLeaseManager } from './projectLease.js'
+import {
+  ProjectCatalog,
+  ProjectCatalogError,
+  projectDescriptorFromCanvasEnvelope,
+} from './projectCatalog.js'
 import { AgentRegistry } from './registry.js'
 import type { RunArtifactLookupV2 } from './runArtifactStorageV2.js'
 import { RunManager } from './runs.js'
@@ -88,6 +94,7 @@ export interface DaemonServerOptions {
   workspaceVersionManagerV2?: WorkspaceVersionManagerV2
   canvasCommandStoreV2Manager?: CanvasCommandStoreV2Manager
   projectLeaseManager?: ProjectLeaseManager
+  projectCatalog?: ProjectCatalog
 }
 
 export interface DaemonServer {
@@ -96,11 +103,16 @@ export interface DaemonServer {
   runs: RunManager
   versionsV2: WorkspaceVersionManagerV2
   canvasV2: CanvasCommandStoreV2Manager
+  projects: ProjectCatalog
   close(): Promise<void>
 }
 
 export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   const registry = options.registry ?? new AgentRegistry()
+  const projects = options.projectCatalog ?? new ProjectCatalog(options.projectRoot)
+  if (projects.projectRoot !== path.resolve(options.projectRoot)) {
+    throw new TypeError('projectCatalog and daemon server must share a project root')
+  }
   const projectLeases = options.projectLeaseManager ?? new ProjectLeaseManager({
     projectRoot: options.projectRoot,
   })
@@ -151,6 +163,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
       runs,
       canvasV2,
       versionsV2,
+      projects,
       projectionCanvases,
       allowedOrigins,
       lifecycle,
@@ -168,6 +181,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     runs,
     versionsV2,
     canvasV2,
+    projects,
     close() {
       closePromise ??= closeDaemonServer(
         server,
@@ -175,6 +189,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
         runs,
         versionsV2,
         canvasV2,
+        projects,
         projectLeases,
         lifecycle,
       )
@@ -189,6 +204,7 @@ interface RouteContext {
   runs: RunManager
   canvasV2: CanvasCommandStoreV2Manager
   versionsV2: WorkspaceVersionManagerV2
+  projects: ProjectCatalog
   projectionCanvases: CanvasProjectionCommitterV2
   allowedOrigins: Set<string>
   lifecycle: { closing: boolean }
@@ -237,6 +253,62 @@ async function route(
         resetRequired: false,
       },
       projectRoot: context.projectRoot,
+    })
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/projects') {
+    // First read bootstraps projects.json, so it participates in the same
+    // cross-process writer fence as later catalog mutations.
+    await context.canvasV2.acquireProjectLease('.')
+    writeJson(response, 200, {
+      schemaVersion: 1,
+      projects: await context.projects.list(),
+    })
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/projects') {
+    const body = requestObject(await readJson(request))
+    if (!hasExactBodyKeys(body, ['title'])) {
+      throw new ProtocolError(
+        'project creation body must contain only title',
+        'invalid_project_request',
+        400,
+      )
+    }
+    // The root project lease is also the cross-process writer fence for the
+    // daemon-owned workspace catalog.
+    await context.canvasV2.acquireProjectLease('.')
+    const project = await context.projects.create(body.title)
+    writeJson(response, 201, { schemaVersion: 1, project })
+    return
+  }
+
+  const projectOpenMatch = pathname.match(/^\/projects\/([^/]+)\/open$/u)
+  if (request.method === 'POST' && projectOpenMatch) {
+    const projectId = projectIdFromPath(projectOpenMatch[1])
+    // Opening mutates lastOpenedAt, so fence the shared catalog before any
+    // project-specific lease is accepted.
+    await context.canvasV2.acquireProjectLease('.')
+    const record = await context.projects.requireReady(projectId)
+    await context.canvasV2.acquireProjectLease(record.projectDir)
+    let canvas: Awaited<ReturnType<WorkspaceVersionManagerV2['getCanvas']>>['canvas']
+    try {
+      canvas = (await context.versionsV2.getCanvas(record.projectDir, 'main')).canvas
+    } catch (error) {
+      if (error instanceof ProtocolError) throw error
+      throw new ProjectCatalogError(
+        'project_unavailable',
+        `Workspace project ${projectId} could not be opened`,
+        409,
+        error,
+      )
+    }
+    const opened = await context.projects.markOpened(projectId)
+    writeJson(response, 200, {
+      schemaVersion: 1,
+      project: projectDescriptorFromCanvasEnvelope(opened, canvas),
     })
     return
   }
@@ -838,6 +910,14 @@ function projectionPlanIdFromPath(value: string | undefined): string {
   return decoded
 }
 
+function projectIdFromPath(value: string | undefined): string {
+  try {
+    return decodeURIComponent(value ?? '')
+  } catch {
+    throw new ProtocolError('project id contains invalid URL encoding', 'invalid_project_id', 400)
+  }
+}
+
 function singleQueryParameter(url: URL, name: string): string | undefined {
   const values = url.searchParams.getAll(name)
   if (values.length > 1) throw new ProtocolError(`${name} must be provided at most once`)
@@ -849,6 +929,13 @@ function requestObject(value: unknown): Record<string, unknown> {
     throw new ProtocolError('request body must be a JSON object')
   }
   return value as Record<string, unknown>
+}
+
+function hasExactBodyKeys(body: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(body).sort()
+  const expected = [...keys].sort()
+  return actual.length === expected.length
+    && actual.every((key, index) => key === expected[index])
 }
 
 function optionalBodyString(
@@ -958,6 +1045,7 @@ async function closeDaemonServer(
   runs: RunManager,
   versionsV2: WorkspaceVersionManagerV2,
   canvasV2: CanvasCommandStoreV2Manager,
+  projects: ProjectCatalog,
   projectLeases: ProjectLeaseManager,
   lifecycle: { closing: boolean },
 ): Promise<void> {
@@ -976,6 +1064,7 @@ async function closeDaemonServer(
     await runs.close()
     await serverClosed
     await versionsV2.close()
+    await projects.close()
   } finally {
     canvasV2.close()
     await projectLeases.close()
@@ -1391,6 +1480,12 @@ function writeError(response: ServerResponse, error: unknown): void {
   }
   if (error instanceof ProtocolError) {
     writeJson(response, error.status, { error: { code: error.code, message: error.message } })
+    return
+  }
+  if (error instanceof ProjectCatalogError) {
+    writeJson(response, error.status, {
+      error: { code: error.code, message: error.message },
+    })
     return
   }
   if (error instanceof PermissionPolicyError) {

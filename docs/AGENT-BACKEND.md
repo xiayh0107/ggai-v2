@@ -61,6 +61,9 @@ daemon/
 | --- | --- | --- |
 | GET | `/health` | 返回 Canvas model、schema、reset 状态和 V2 能力 |
 | GET | `/agents` | 探测允许的本地 Agent CLI |
+| GET | `/projects` | 读取显式 Project Catalog、可用状态与只读 Canvas 摘要 |
+| POST | `/projects` | 以 `{ title }` 创建 daemon-owned 空白 V2 项目 |
+| POST | `/projects/:id/open` | 校验项目身份和 lease，成功后记录最近打开时间 |
 | GET | `/canvas/v2?projectDir=&branch=` | 读取 Canvas V2 envelope |
 | POST | `/canvas/commands?projectDir=` | `{ branch, baseRevision, mutationId, command }` |
 | POST | `/canvas/conflicts?projectDir=` | 从 daemon-owned revision 重放 outbox 到新分支 |
@@ -136,6 +139,9 @@ manifest entry 保存 `artifactId`、normalized relative path、MIME、size 和 
 project/
 ├── .gg/
 │   ├── canvas-model.json
+│   ├── workspace/
+│   │   ├── projects.json                  # 显式 catalog；不扫描普通目录
+│   │   └── projects/<opaque-project-id>/  # daemon-owned 空白项目目录
 │   ├── runtime/
 │   │   ├── canvas-v2/<branch-hash>/snapshot.json
 │   │   ├── canvas-v2/<branch-hash>/revisions/<revision>.json
@@ -158,10 +164,11 @@ project/
 
 1. 所有 `projectDir` 必须 canonical resolve 在 `--project-root` 内；拒绝 traversal 和 symlink component。
 2. daemon 与 reset 共享维护栅栏；项目 lease 防止两个 daemon 各自通过进程内 CAS 后互相覆盖。
-3. HTTP 只绑定回环地址，Origin 精确 allow-list，JSON/查询参数/图规模/订阅数均有边界。
-4. V2 source resolver 只校验 branch/lease 并返回空 source cwd；Codex 因此在 `.gg/runs/<runId>` 的最小 cwd 中执行，项目根只作为 prompt 中的只读引用，另以 `--add-dir` 授权该 Run 的 `files/`。
-5. acpx 默认禁用；启用后 named session 强制单飞，取消先 cooperative cancel，再清理本地进程。
-6. daemon 只调用 CLI 登录探针，不读取、复制或持久化 token/key。
-7. outcome 或 community plugin snapshot 不是权限凭证；无效输入失败关闭或安全降级，不能扩大文件或 Canvas 写权限。
+3. Workspace 只暴露 catalog 中的 opaque project identity；固定 `project_root` 映射 `.`，受管项目 marker 必须绑定自身 ID，Agent 不得写 `.gg/workspace/`。
+4. HTTP 只绑定回环地址，Origin 精确 allow-list，JSON/查询参数/图规模/订阅数均有边界。
+5. V2 source resolver 只校验 branch/lease 并返回空 source cwd；Codex 因此在 `.gg/runs/<runId>` 的最小 cwd 中执行，项目根只作为 prompt 中的只读引用，另以 `--add-dir` 授权该 Run 的 `files/`。
+6. acpx 默认禁用；启用后 named session 强制单飞，取消先 cooperative cancel，再清理本地进程。
+7. daemon 只调用 CLI 登录探针，不读取、复制或持久化 token/key。
+8. outcome 或 community plugin snapshot 不是权限凭证；无效输入失败关闭或安全降级，不能扩大文件或 Canvas 写权限。
 
 V2 不迁移 V1 数据。首次切换按 [`CANVAS-V2-RESET.md`](./CANVAS-V2-RESET.md) 归档旧 runtime、Canvas Git/worktree 与 artifacts，再初始化全新 V2 marker 和事实源。

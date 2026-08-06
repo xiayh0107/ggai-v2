@@ -80,6 +80,8 @@ test('nonexistent targets are checked through their nearest existing parent', as
     '.gg/canvas-worktrees/worktree-1/project.json',
     '.gg/source-worktrees/worktree-1/src/index.ts',
     '.gg/runtime/canvas/worktree-1/snapshot.json',
+    '.gg/workspace/projects.json',
+    '.gg/workspace/projects/project_0123456789abcdef0123456789abcdef/.gg/canvas-model.json',
   ]) {
     const protectedState = await assessWritePath(scope, daemonStatePath)
     assert.equal(protectedState.disposition, 'deny')

@@ -5,6 +5,7 @@ import path from 'node:path'
 import { afterEach, test } from 'node:test'
 import {
   assertCanvasModelReady,
+  blankProjectCanvasModelMarker,
   CanvasModelBootError,
   parseCanvasModelMode,
   parseCanvasModelV2Flag,
@@ -64,12 +65,43 @@ test('V2 requires the reset marker and V1 refuses a V2 project', async () => {
   )
 })
 
+test('blank workspace projects use an explicit marker without pretending to have a legacy archive', async () => {
+  const projectDir = await temporaryProject()
+  await mkdir(path.join(projectDir, '.gg'), { recursive: true })
+  const marker = blankProjectCanvasModelMarker(
+    'project_0123456789abcdef0123456789abcdef',
+    '2026-08-06T12:00:00.000Z',
+  )
+  await writeFile(
+    path.join(projectDir, '.gg/canvas-model.json'),
+    `${JSON.stringify(marker)}\n`,
+  )
+
+  assert.deepEqual(await assertCanvasModelReady(projectDir, 'v2'), marker)
+  assert.equal('legacyArchive' in marker, false)
+})
+
 test('invalid and symlinked model markers fail closed', async () => {
   const invalidProject = await temporaryProject()
   await mkdir(path.join(invalidProject, '.gg'), { recursive: true })
   await writeFile(path.join(invalidProject, '.gg/canvas-model.json'), '{"canvasModel":2}\n')
   await assert.rejects(
     assertCanvasModelReady(invalidProject, 'v2'),
+    (error: unknown) => error instanceof CanvasModelBootError
+      && error.code === 'canvas_model_marker_invalid',
+  )
+
+  const ambiguousProject = await temporaryProject()
+  await mkdir(path.join(ambiguousProject, '.gg'), { recursive: true })
+  await writeFile(path.join(ambiguousProject, '.gg/canvas-model.json'), `${JSON.stringify({
+    ...blankProjectCanvasModelMarker(
+      'project_0123456789abcdef0123456789abcdef',
+      '2026-08-06T12:00:00.000Z',
+    ),
+    legacyArchive: '.gg/legacy-v1/20260806T120000.000Z',
+  })}\n`)
+  await assert.rejects(
+    assertCanvasModelReady(ambiguousProject, 'v2'),
     (error: unknown) => error instanceof CanvasModelBootError
       && error.code === 'canvas_model_marker_invalid',
   )

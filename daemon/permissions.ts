@@ -319,6 +319,7 @@ function isDaemonOwnedStatePath(scope: ProjectScope, candidatePath: string): boo
     resolve(scope.ggDir, 'canvas-worktrees'),
     resolve(scope.ggDir, 'source-worktrees'),
     resolve(scope.ggDir, 'runtime'),
+    resolve(scope.ggDir, 'workspace'),
   ]
   return protectedRoots.some((root) => isPathWithin(root, candidatePath))
 }
