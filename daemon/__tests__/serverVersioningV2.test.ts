@@ -145,6 +145,118 @@ test('Canvas V2 HTTP routes coordinate commands, history, restore, and semantic 
   }
 })
 
+test('Canvas V2 HTTP conflict recovery replays a durable journal into an isolated branch', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-server-conflict-v2-'))
+  const daemon = createDaemonServer({ projectRoot: root, canvasModel: 'v2' })
+  await new Promise<void>((resolve, reject) => {
+    daemon.server.once('error', reject)
+    daemon.server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = daemon.server.address() as AddressInfo
+  const baseUrl = `http://127.0.0.1:${address.port}`
+
+  try {
+    await command(baseUrl, {
+      branch: 'main',
+      baseRevision: 0,
+      mutationId: 'conflict-create-task',
+      command: createTask('task-conflict', 'Original'),
+    })
+    await command(baseUrl, {
+      branch: 'main',
+      baseRevision: 1,
+      mutationId: 'conflict-remote-goal',
+      command: {
+        type: 'UpdateTaskGoal',
+        taskId: 'task-conflict',
+        goal: 'remote goal',
+      },
+    })
+
+    const recoveryBody = {
+      sourceBranch: 'main',
+      newBranch: 'conflict/local-goal',
+      baseRevision: 1,
+      mutations: [{
+        mutationId: 'conflict-local-goal',
+        command: {
+          type: 'UpdateTaskGoal',
+          taskId: 'task-conflict',
+          goal: 'local goal',
+        },
+      }],
+    }
+    const recovered = await fetch(`${baseUrl}/canvas/conflicts?projectDir=.`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(recoveryBody),
+    })
+    const recoveredText = await recovered.text()
+    assert.equal(recovered.status, 201, recoveredText)
+    const recoveredBody = JSON.parse(recoveredText) as {
+      sourceBranch: string
+      newBranch: string
+      baseRevision: number
+      canvas: { revision: number; document: { tasks: Array<{ goal: string }> } }
+    }
+    assert.equal(recoveredBody.sourceBranch, 'main')
+    assert.equal(recoveredBody.newBranch, 'conflict/local-goal')
+    assert.equal(recoveredBody.baseRevision, 1)
+    assert.equal(recoveredBody.canvas.document.tasks[0]?.goal, 'local goal')
+
+    const source = await getJson(baseUrl, '/canvas/v2?projectDir=.&branch=main') as {
+      document: { tasks: Array<{ goal: string }> }
+    }
+    assert.equal(source.document.tasks[0]?.goal, 'remote goal')
+
+    const retry = await fetch(`${baseUrl}/canvas/conflicts?projectDir=.`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(recoveryBody),
+    })
+    assert.equal(retry.status, 201, await retry.text())
+
+    const forgedSnapshot = await fetch(`${baseUrl}/canvas/conflicts?projectDir=.`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...recoveryBody,
+        newBranch: 'conflict/forged-snapshot',
+        canvasSnapshot: { schemaVersion: 2 },
+      }),
+    })
+    assert.equal(forgedSnapshot.status, 400)
+
+    const invalid = await fetch(`${baseUrl}/canvas/conflicts?projectDir=.`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...recoveryBody,
+        newBranch: 'conflict/invalid-command',
+        mutations: [{
+          mutationId: 'conflict-invalid-command',
+          command: {
+            type: 'UpdateTaskGoal',
+            taskId: 'task-missing',
+            goal: 'must fail before branch creation',
+          },
+        }],
+      }),
+    })
+    assert.equal(invalid.status, 409)
+
+    const branches = await getJson(baseUrl, '/canvas/branches?projectDir=.') as
+      VersionOperation<Array<{ name: string }>>
+    assert.deepEqual(
+      branches.value?.map((branch) => branch.name).sort(),
+      ['conflict/local-goal', 'main'],
+    )
+  } finally {
+    await daemon.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 interface VersionOperation<T> {
   ok: boolean
   partial: boolean

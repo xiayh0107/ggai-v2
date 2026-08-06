@@ -106,7 +106,7 @@ export async function commitProjectionPlanCommandV2(
     throw new ProjectionPlanUnavailableV2Error(input.command.planId, 'settled')
   }
 
-  const trustedCommand = trustedCanvasCommand(record.plan, input.command)
+  const trustedCommand = trustedCanvasCommandFromPlanV2(record.plan, input.command)
   const committed = await input.canvases.commit(
     input.projectDir,
     input.branch,
@@ -141,7 +141,7 @@ export async function autoMaterializeProjectionPlanV2(input: {
   )
 }
 
-function trustedCanvasCommand(
+export function trustedCanvasCommandFromPlanV2(
   plan: ProjectionPlanV2,
   command: TrustedPlanWireCommandV2,
 ): CanvasCommandV2 {

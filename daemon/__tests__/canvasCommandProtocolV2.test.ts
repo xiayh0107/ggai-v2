@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  parseCanvasConflictRecoveryRequestV2,
   parseCanvasCommandRequestV2,
   parseCanvasCommandWireV2,
 } from '../canvasCommandProtocolV2.js'
@@ -213,6 +214,62 @@ test('parses bounded user node, edge, membership, and derived-task commands', ()
     offset: { x: 72, y: 48 },
     title: 'Collection copy',
   })
+})
+
+test('strictly parses command-only conflict recovery journals', () => {
+  const parsed = parseCanvasConflictRecoveryRequestV2({
+    sourceBranch: 'main',
+    newBranch: 'conflict/local-copy',
+    baseRevision: 7,
+    mutations: [
+      {
+        mutationId: 'local-move',
+        command: {
+          type: 'MoveEntities',
+          entities: [{ kind: 'task', id: 'task-1' }],
+          dx: 20,
+          dy: 10,
+        },
+      },
+      {
+        mutationId: 'local-plan',
+        command: { type: 'AcceptTaskProposals', planId, proposalKeys: ['explain'] },
+      },
+    ],
+  })
+  assert.equal(parsed.baseRevision, 7)
+  assert.deepEqual(parsed.mutations.map((mutation) => mutation.mutationId), [
+    'local-move',
+    'local-plan',
+  ])
+  assert.deepEqual(parsed.mutations[1]?.command, {
+    type: 'AcceptTaskProposals',
+    planId,
+    proposalKeys: ['explain'],
+  })
+
+  assert.throws(() => parseCanvasConflictRecoveryRequestV2({
+    sourceBranch: 'main',
+    newBranch: 'main',
+    baseRevision: 7,
+    mutations: [{ mutationId: 'same', command: { type: 'DeleteTask', taskId: 'task-1' } }],
+  }), /differ/u)
+  assert.throws(() => parseCanvasConflictRecoveryRequestV2({
+    sourceBranch: 'main',
+    newBranch: 'conflict/duplicate',
+    baseRevision: 7,
+    mutations: [
+      { mutationId: 'same', command: { type: 'DeleteTask', taskId: 'task-1' } },
+      { mutationId: 'same', command: { type: 'DeleteTask', taskId: 'task-1' } },
+    ],
+  }), /duplicate mutation ids/u)
+  assert.throws(() => parseCanvasConflictRecoveryRequestV2({
+    sourceBranch: 'main',
+    newBranch: 'conflict/forged-snapshot',
+    baseRevision: 7,
+    mutations: [],
+    canvasSnapshot: { schemaVersion: 2 },
+  }), /invalid envelope/u)
 })
 
 test('plan operations remain opaque discriminated wire commands', () => {

@@ -123,6 +123,75 @@ test('flushes authoritative commands to normalized history on clean shutdown', a
   assert.equal(history.entries[0]?.commit, durable.lastCheckpoint)
 })
 
+test('replays a conflicted command journal from its durable base into a new branch', async () => {
+  const { projectDir, workspace } = await harness()
+  const initial = await workspace.getCanvas(projectDir, 'main')
+  const created = await workspace.commitCanvas(
+    projectDir,
+    'main',
+    initial.canvas.revision,
+    'conflict-create-task',
+    createTask('task-conflict'),
+  )
+  await workspace.commitCanvas(
+    projectDir,
+    'main',
+    created.canvas.revision,
+    'conflict-remote-update',
+    updateGoal('task-conflict', 'Remote goal'),
+  )
+  const input = {
+    sourceBranch: 'main',
+    newBranch: 'conflict/local-goal',
+    baseRevision: created.canvas.revision,
+    mutations: [{
+      mutationId: 'conflict-local-update',
+      command: updateGoal('task-conflict', 'Local goal'),
+    }],
+  }
+
+  const recovered = await workspace.saveConflictBranch(projectDir, input)
+  assert.equal(recovered.ok, true)
+  if (!recovered.ok) return
+  assert.equal(recovered.value.canvas.revision, 1)
+  assert.equal(recovered.value.canvas.document.tasks[0]?.goal, 'Local goal')
+  assert.deepEqual(recovered.value.mutationIds, ['conflict-local-update'])
+  assert.equal(
+    (await workspace.getCanvas(projectDir, 'main')).canvas.document.tasks[0]?.goal,
+    'Remote goal',
+  )
+
+  const replay = await workspace.saveConflictBranch(projectDir, input)
+  assert.equal(replay.ok, true)
+  assert.equal(replay.ok ? replay.value.canvas.revision : -1, 1)
+
+  const collision = await workspace.saveConflictBranch(projectDir, {
+    ...input,
+    mutations: [{
+      mutationId: 'conflict-other-update',
+      command: updateGoal('task-conflict', 'Another local goal'),
+    }],
+  })
+  assert.equal(collision.ok, false)
+  assert.equal(collision.ok ? '' : collision.error.code, 'invariant_conflict')
+
+  const invalid = await workspace.saveConflictBranch(projectDir, {
+    ...input,
+    newBranch: 'conflict/invalid-command',
+    mutations: [{
+      mutationId: 'conflict-invalid-update',
+      command: updateGoal('missing-task', 'Cannot apply'),
+    }],
+  })
+  assert.equal(invalid.ok, false)
+  const branches = await workspace.listBranches(projectDir)
+  assert.equal(branches.ok, true)
+  assert.equal(
+    branches.ok && branches.value.some((branch) => branch.name === 'conflict/invalid-command'),
+    false,
+  )
+})
+
 test('keeps main-branch commands and execution available when Canvas Git is degraded', async () => {
   const { projectDir, canvases, workspace } = await harness({
     canvasGitFactory: (canonicalProjectDir) => new CanvasGitStoreV2(
@@ -380,6 +449,8 @@ test('recovers a committed merge after runtime apply fails at the partial bounda
     acquireProjectLease: (requested) => delegate.acquireProjectLease(requested),
     hasSnapshot: (requested, branch) => delegate.hasSnapshot(requested, branch),
     get: (requested, branch) => delegate.get(requested, branch),
+    readRevision: (requested, branch, revision) =>
+      delegate.readRevision(requested, branch, revision),
     commit: (requested, branch, revision, mutationId, command) =>
       delegate.commit(requested, branch, revision, mutationId, command),
     commitLatest: (requested, branch, mutationId, command) =>

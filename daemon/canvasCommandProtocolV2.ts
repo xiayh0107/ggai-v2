@@ -68,6 +68,18 @@ export interface CanvasCommandRequestWireV2 {
   command: CanvasCommandWireV2
 }
 
+export interface CanvasConflictMutationWireV2 {
+  mutationId: string
+  command: CanvasCommandWireV2
+}
+
+export interface CanvasConflictRecoveryRequestV2 {
+  sourceBranch: string
+  newBranch: string
+  baseRevision: number
+  mutations: CanvasConflictMutationWireV2[]
+}
+
 /** Strict parser for the JSON body of POST /canvas/commands. */
 export function parseCanvasCommandRequestV2(value: unknown): CanvasCommandRequestWireV2 {
   if (!isExactRecord(value, ['branch', 'baseRevision', 'mutationId', 'command'])) {
@@ -83,6 +95,51 @@ export function parseCanvasCommandRequestV2(value: unknown): CanvasCommandReques
     baseRevision: value.baseRevision as number,
     mutationId,
     command: parseCanvasCommandWireV2(value.command),
+  }
+}
+
+export function parseCanvasConflictRecoveryRequestV2(
+  value: unknown,
+): CanvasConflictRecoveryRequestV2 {
+  if (!isExactRecord(value, [
+    'sourceBranch',
+    'newBranch',
+    'baseRevision',
+    'mutations',
+  ])) {
+    throw new ProtocolError('canvas conflict recovery request has an invalid envelope')
+  }
+  const sourceBranch = parseCanvasBranch(value.sourceBranch)
+  const newBranch = parseCanvasBranch(value.newBranch)
+  if (sourceBranch === newBranch) {
+    throw new ProtocolError('conflict recovery branch must differ from its source branch')
+  }
+  if (!Number.isSafeInteger(value.baseRevision) || Number(value.baseRevision) < 0) {
+    throw new ProtocolError('baseRevision must be a non-negative safe integer')
+  }
+  if (!Array.isArray(value.mutations)
+    || value.mutations.length === 0
+    || value.mutations.length > MAX_CANVAS_COMMAND_ENTITIES_V2) {
+    throw new ProtocolError('mutations must contain 1 to 500 commands')
+  }
+  const seen = new Set<string>()
+  const mutations = value.mutations.map((candidate, index): CanvasConflictMutationWireV2 => {
+    if (!isExactRecord(candidate, ['mutationId', 'command'])) {
+      throw new ProtocolError(`mutations[${index}] has an invalid shape`)
+    }
+    const mutationId = parseIdentifier(candidate.mutationId, `mutations[${index}].mutationId`)
+    if (seen.has(mutationId)) throw new ProtocolError('mutations contains duplicate mutation ids')
+    seen.add(mutationId)
+    return {
+      mutationId,
+      command: parseCanvasCommandWireV2(candidate.command),
+    }
+  })
+  return {
+    sourceBranch,
+    newBranch,
+    baseRevision: Number(value.baseRevision),
+    mutations,
   }
 }
 

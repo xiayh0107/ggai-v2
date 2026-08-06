@@ -3,7 +3,7 @@ import { lstat, realpath, stat } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
 import path from 'node:path'
-import { CanvasCommandError } from '../src/canvas-v2/commands.js'
+import { CanvasCommandError, type CanvasCommandV2 } from '../src/canvas-v2/commands.js'
 import type { CanvasDocumentV2 } from '../src/canvas-v2/model.js'
 import {
   compileTaskContextV2,
@@ -24,6 +24,7 @@ import {
 } from './canvasCommandStoreV2.js'
 import { CanvasCommandStoreV2Manager } from './canvasCommandStoreV2Manager.js'
 import {
+  parseCanvasConflictRecoveryRequestV2,
   parseCanvasCommandRequestV2,
   type CanvasCommandWireV2,
   type OrdinaryCanvasCommandV2,
@@ -33,6 +34,7 @@ import {
   commitProjectionPlanCommandV2,
   type CanvasProjectionCommitterV2,
   ProjectionPlanUnavailableV2Error,
+  trustedCanvasCommandFromPlanV2,
 } from './canvasProjectionCoordinatorV2.js'
 import { CanvasGitV2Error } from './canvasGitV2.js'
 import { isPathWithin, PermissionPolicyError, resolveProjectDir } from './permissions.js'
@@ -352,6 +354,60 @@ async function route(
           commit,
         )
     writeJson(response, 200, result)
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/canvas/conflicts') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const parsed = parseCanvasConflictRecoveryRequestV2(await readJson(request))
+    const settledPlanIds = new Set<string>()
+    const mutations: Array<{ mutationId: string; command: CanvasCommandV2 }> = []
+    for (const mutation of parsed.mutations) {
+      if (!isTrustedPlanWireCommand(mutation.command)) {
+        mutations.push({
+          mutationId: mutation.mutationId,
+          command: mutation.command as OrdinaryCanvasCommandV2,
+        })
+        continue
+      }
+      const record = await context.runs.getProjectionPlanRecord(
+        mutation.command.planId,
+        projectDir,
+        parsed.sourceBranch,
+      )
+      if (!record) {
+        throw new ProjectionPlanUnavailableV2Error(mutation.command.planId, 'missing')
+      }
+      mutations.push({
+        mutationId: mutation.mutationId,
+        command: trustedCanvasCommandFromPlanV2(record.plan, mutation.command),
+      })
+      if (mutation.command.type !== 'MaterializeProjectionPlan') {
+        settledPlanIds.add(mutation.command.planId)
+      }
+    }
+    const result = await context.runs.withIdleBranches(
+      projectDir,
+      [parsed.sourceBranch, parsed.newBranch],
+      () => context.versionsV2.saveConflictBranch(projectDir, {
+        sourceBranch: parsed.sourceBranch,
+        newBranch: parsed.newBranch,
+        baseRevision: parsed.baseRevision,
+        mutations,
+      }),
+    )
+    if (!result.ok) {
+      throw new WorkspaceVersioningV2Error(result.error.code, result.error.message)
+    }
+    for (const planId of settledPlanIds) {
+      await context.runs.dismissProjectionPlan(planId, projectDir, parsed.sourceBranch)
+    }
+    writeJson(response, 201, {
+      sourceBranch: result.value.sourceBranch,
+      newBranch: result.value.branch.name,
+      baseRevision: result.value.baseRevision,
+      canvas: result.value.canvas,
+    })
     return
   }
 
@@ -1103,6 +1159,7 @@ function canvasRouteModel(pathname: string): CanvasModelMode | null {
   if (
     pathname === '/canvas/v2'
     || pathname === '/canvas/commands'
+    || pathname === '/canvas/conflicts'
     || pathname.startsWith('/projection-plans/')
     || /^\/runs\/[^/]+\/artifacts\/[^/]+$/u.test(pathname)
   ) return 'v2'

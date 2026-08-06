@@ -1,7 +1,11 @@
 import path from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 
-import type { CanvasCommandV2 } from '../src/canvas-v2/commands.js'
+import {
+  applyCanvasCommandV2,
+  CanvasCommandError,
+  type CanvasCommandV2,
+} from '../src/canvas-v2/commands.js'
 import type { CanvasDocumentV2 } from '../src/canvas-v2/model.js'
 import {
   CanvasMutationReuseV2Error,
@@ -30,6 +34,11 @@ export interface WorkspaceCanvasStoreManagerV2 {
   acquireProjectLease(projectDir: string): Promise<string>
   hasSnapshot(projectDir: string, branch: string): Promise<boolean>
   get(projectDir: string, branch: string): Promise<CanvasEnvelopeV2>
+  readRevision(
+    projectDir: string,
+    branch: string,
+    revision: number,
+  ): Promise<CanvasDocumentV2 | null>
   commit(
     projectDir: string,
     branch: string,
@@ -105,6 +114,24 @@ export interface WorkspaceCheckpointV2 {
 export interface WorkspaceCreateBranchInputV2 {
   name: string
   fromBranch?: string
+}
+
+export interface WorkspaceConflictMutationV2 {
+  mutationId: string
+  command: CanvasCommandV2
+}
+
+export interface WorkspaceSaveConflictBranchInputV2 {
+  sourceBranch: string
+  newBranch: string
+  baseRevision: number
+  mutations: WorkspaceConflictMutationV2[]
+}
+
+export interface WorkspaceConflictBranchV2 extends WorkspaceBranchV2 {
+  sourceBranch: string
+  baseRevision: number
+  mutationIds: string[]
 }
 
 export interface WorkspaceBranchV2 {
@@ -372,6 +399,134 @@ export class WorkspaceVersionManagerV2 {
         return this.#success({ branch, canvas }, await this.#refreshStatuses(project))
       } catch (error) {
         return this.#failure(error, await this.#refreshStatuses(project))
+      }
+    })
+  }
+
+  /**
+   * Replays a browser command journal from its daemon-owned historical base
+   * into a new branch. The browser never supplies a Canvas snapshot.
+   */
+  async saveConflictBranch(
+    projectDir: string,
+    input: WorkspaceSaveConflictBranchInputV2,
+  ): Promise<WorkspaceOperationResultV2<WorkspaceConflictBranchV2>> {
+    const sourceBranch = parseCanvasBranch(input.sourceBranch)
+    const newBranch = parseCanvasBranch(input.newBranch)
+    if (!Number.isSafeInteger(input.baseRevision) || input.baseRevision < 0) {
+      throw new TypeError('conflict baseRevision must be a non-negative safe integer')
+    }
+    if (!Array.isArray(input.mutations)
+      || input.mutations.length === 0
+      || input.mutations.length > 500) {
+      throw new TypeError('conflict recovery requires 1 to 500 mutations')
+    }
+    const mutationIds = input.mutations.map((mutation) => mutation.mutationId)
+    if (new Set(mutationIds).size !== mutationIds.length) {
+      throw new TypeError('conflict recovery mutation ids must be unique')
+    }
+    const project = await this.#project(projectDir)
+    return this.#withBranchLocks(project, [sourceBranch, newBranch], async () => {
+      let branch: CanvasGitV2Branch | null = null
+      let canvas: CanvasEnvelopeV2 | null = null
+      let partial = false
+      try {
+        if (newBranch === sourceBranch) {
+          throw new WorkspaceVersioningV2Error(
+            'invariant_conflict',
+            'conflict recovery branch must differ from its source branch',
+          )
+        }
+        const baseDocument = await this.canvases.readRevision(
+          project.projectDir,
+          sourceBranch,
+          input.baseRevision,
+        )
+        if (!baseDocument) {
+          throw new WorkspaceVersioningV2Error(
+            'conflict_base_unavailable',
+            `Canvas V2 revision ${input.baseRevision} is unavailable on ${sourceBranch}`,
+          )
+        }
+        let recoveredDocument = baseDocument
+        for (const mutation of input.mutations) {
+          recoveredDocument = applyCanvasCommandV2(recoveredDocument, mutation.command)
+        }
+
+        this.#cancelScheduled(project, newBranch)
+        await this.#reconcileCommittedCanvasMerge(project, newBranch)
+        branch = await this.#canvasBranch(project, newBranch)
+        canvas = await this.canvases.get(project.projectDir, newBranch)
+        partial = branch !== null || canvas.revision > 0
+        this.#assertBranchLayerConsistency(newBranch, branch, canvas)
+
+        if (!branch) {
+          this.#cancelScheduled(project, sourceBranch)
+          await this.#loadBranchCanvas(project, sourceBranch)
+          const source = await this.#checkpoint(project, sourceBranch, 'before-conflict-recovery')
+          branch = await project.canvasGit.createBranch({
+            name: newBranch,
+            startPoint: source.checkpoint.commit,
+          })
+          partial = true
+        }
+        this.#assertManagedBranch(newBranch, branch)
+
+        const gitDocument = await project.canvasGit.readDocument(branch.commit)
+        if (!isDeepStrictEqual(gitDocument, recoveredDocument)) {
+          if (canvas.revision > 0 && !isDeepStrictEqual(canvas.document, recoveredDocument)) {
+            throw new WorkspaceVersioningV2Error(
+              'invariant_conflict',
+              `existing conflict branch contains another recovery: ${newBranch}`,
+            )
+          }
+          await project.canvasGit.checkpoint({
+            branch: newBranch,
+            document: recoveredDocument,
+            reason: `conflict-recovery-${input.baseRevision}`,
+          })
+          branch = await this.#requireCanvasBranch(project, newBranch)
+        }
+
+        if (canvas.revision === 0) {
+          canvas = await this.canvases.materialize(
+            project.projectDir,
+            newBranch,
+            recoveredDocument,
+            branch.commit,
+          )
+          partial = true
+        } else {
+          if (!isDeepStrictEqual(canvas.document, recoveredDocument)) {
+            throw new WorkspaceVersioningV2Error(
+              'invariant_conflict',
+              `existing conflict branch contains another recovery: ${newBranch}`,
+            )
+          }
+          canvas = await this.#alignRuntimeAnchor(project, branch, canvas)
+        }
+
+        return this.#success({
+          sourceBranch,
+          baseRevision: input.baseRevision,
+          mutationIds,
+          branch,
+          canvas,
+        }, await this.#refreshStatuses(project))
+      } catch (error) {
+        const value = branch && canvas ? {
+          sourceBranch,
+          baseRevision: input.baseRevision,
+          mutationIds,
+          branch,
+          canvas,
+        } : undefined
+        return this.#failure(
+          error,
+          await this.#refreshStatuses(project),
+          partial,
+          value,
+        )
       }
     })
   }
@@ -1090,6 +1245,8 @@ function workspaceError(error: unknown): WorkspaceOperationErrorV2 {
     || error instanceof WorkspaceVersioningV2Error
     || error instanceof ProtocolError
     ? error.code
+    : error instanceof CanvasCommandError
+      ? `canvas_command_${error.code}`
     : error instanceof CanvasRevisionConflictV2Error
       ? 'canvas_revision_conflict'
       : error instanceof CanvasMutationReuseV2Error
