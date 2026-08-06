@@ -1,4 +1,10 @@
-import type { CanvasDocumentV2, CanvasPointV2 } from './model'
+import type {
+  CanvasDocumentV2,
+  CanvasEdgeContextRoleV2,
+  CanvasEdgeRelationV2,
+  CanvasEntityRef,
+  CanvasPointV2,
+} from './model'
 import type {
   CanvasV2CameraState,
   CanvasV2SelectionTarget,
@@ -20,6 +26,27 @@ export interface CanvasV2ScreenPoint {
 export interface CanvasV2SelectableBounds {
   target: CanvasV2SelectionTarget
   bounds: CanvasBoundsV2
+}
+
+export interface CanvasV2UserConnectionSemantics {
+  relation: CanvasEdgeRelationV2
+  contextRole: CanvasEdgeContextRoleV2
+}
+
+/**
+ * Turns the direct manipulation of connecting two ports into durable edge
+ * semantics. Strong output lineage remains reserved for Task/Run actions.
+ */
+export function deriveUserConnectionSemanticsV2(
+  from: CanvasEntityRef,
+  to: CanvasEntityRef,
+): CanvasV2UserConnectionSemantics {
+  if (to.kind === 'task') {
+    return from.kind === 'task'
+      ? { relation: 'depends-on', contextRole: 'summary' }
+      : { relation: 'source', contextRole: 'full' }
+  }
+  return { relation: 'references', contextRole: 'none' }
 }
 
 export function screenToWorldV2(

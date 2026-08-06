@@ -17,6 +17,7 @@ export default function CanvasV2CollectionFrame({
   offset,
   tabIndex,
   connectionActive,
+  canAddSelection = false,
   onFocus,
   onKeyDown,
   onDragStart,
@@ -35,6 +36,7 @@ export default function CanvasV2CollectionFrame({
   offset?: { dx: number; dy: number }
   tabIndex: number
   connectionActive: boolean
+  canAddSelection?: boolean
   onFocus: () => void
   onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void
   onDragStart: (event: PointerEvent<HTMLElement>, collection: CanvasCollectionV2) => void
@@ -126,6 +128,9 @@ export default function CanvasV2CollectionFrame({
         <CanvasV2EntityMenu
           label={`${collection.title}集合菜单`}
           items={[
+            ...(canAddSelection
+              ? [{ id: 'add-selection', label: '加入所选内容' }]
+              : []),
             { id: 'duplicate', label: '复制集合' },
             { id: 'dissolve', label: '解散集合（保留成员）' },
             { id: 'delete-contents', label: '删除集合及内容', destructive: true },

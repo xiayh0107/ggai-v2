@@ -701,13 +701,13 @@ describe('Canvas V2 interactive stage', () => {
           from: { kind: 'node', id: 'node-image' },
           to: { kind: 'node', id: 'node-top' },
           relation: 'references',
-          contextRole: 'full',
+          contextRole: 'none',
         }),
         expect.objectContaining({
           from: { kind: 'node', id: 'node-code' },
           to: { kind: 'node', id: 'node-top' },
           relation: 'references',
-          contextRole: 'full',
+          contextRole: 'none',
         }),
       ]),
     })))
@@ -737,6 +737,36 @@ describe('Canvas V2 interactive stage', () => {
 
     rightPort = required<HTMLButtonElement>(host, '[data-selection-port="right"]')
     expect(rightPort.getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('cancels an in-progress connection without exposing semantic settings', async () => {
+    const { store, host } = await createSubject()
+    const dispatch = vi.spyOn(store, 'dispatchCommand')
+    const sourcePort = required<HTMLButtonElement>(
+      host,
+      '[aria-label="从节点独立资料开始或完成连接"]',
+    )
+
+    await act(async () => sourcePort.click())
+    expect(sourcePort.getAttribute('aria-pressed')).toBe('true')
+    expect(required<HTMLButtonElement>(host, '[aria-label="取消创建连接"]')
+      .textContent).toContain('取消连接')
+
+    await act(async () => required<HTMLElement>(
+      host,
+      '[data-testid="canvas-v2-stage"]',
+    ).dispatchEvent(new globalThis.KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+    })))
+
+    expect(sourcePort.getAttribute('aria-pressed')).toBe('false')
+    expect(host.querySelector('[aria-label="取消创建连接"]')).toBeNull()
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      '[aria-label="从任务空任务开始或完成连接"]',
+    ).click())
+    expect(dispatch.mock.calls.some(([command]) => command.type === 'CreateEdges')).toBe(false)
   })
 
   it('returns focus to the stage when the temporary large node is dismissed', async () => {
@@ -927,8 +957,10 @@ describe('Canvas V2 interactive stage', () => {
       { kind: 'node', id: 'node-top' },
     ]))
 
-    const save = required<HTMLButtonElement>(host, '[data-testid="save-selection-collection"]')
-    expect(save.disabled).toBe(false)
+    const save = required<HTMLButtonElement>(
+      host,
+      '[aria-label="把临时选择保存为集合"]',
+    )
     await act(async () => save.click())
     await vi.waitFor(() => expect(store.getSnapshot().document.collections).toHaveLength(1))
     const created = store.getSnapshot().document.collections[0]!
@@ -954,8 +986,13 @@ describe('Canvas V2 interactive stage', () => {
     const { store, host } = await createSubject(undefined, collectionFixture())
     const dispatch = vi.spyOn(store, 'dispatchCommand')
     act(() => store.setSelection([{ kind: 'task', id: 'task-b' }]))
-    const assign = [...host.querySelectorAll<HTMLButtonElement>('button')]
-      .find((button) => button.textContent?.includes('加入集合'))
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      '[aria-label="研究集合集合菜单"]',
+    ).click())
+    const assign = [...required<HTMLElement>(host, '[role="menu"]')
+      .querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent?.includes('加入所选内容'))
     if (!assign) throw new Error('Missing collection assignment button')
     await act(async () => assign.click())
     await vi.waitFor(() => expect(
@@ -1131,14 +1168,14 @@ describe('Canvas V2 interactive stage', () => {
     })
   })
 
-  it('creates typed collection-macro edges with separate relation and context controls', async () => {
+  it('derives mixed collection-macro semantics without protocol controls', async () => {
     const { store, host } = await createSubject(undefined, collectionFixture())
     const dispatch = vi.spyOn(store, 'dispatchCommand')
-    const context = required<HTMLSelectElement>(host, '[aria-label="连接 contextRole"]')
-    act(() => {
-      context.value = 'summary'
-      context.dispatchEvent(new Event('change', { bubbles: true }))
-    })
+    expect(host.querySelector('[aria-label="连接语义设置"]')).toBeNull()
+    expect(host.querySelector('[aria-label="连接 relation"]')).toBeNull()
+    expect(host.querySelector('[aria-label="连接 contextRole"]')).toBeNull()
+    expect(host.querySelector('[aria-label="选择目标集合"]')).toBeNull()
+    expect(host.querySelector('[data-testid="save-selection-collection"]')).toBeNull()
 
     const sourcePort = required<HTMLButtonElement>(
       host,
@@ -1158,17 +1195,28 @@ describe('Canvas V2 interactive stage', () => {
     const createCall = dispatch.mock.calls.find(([command]) => command.type === 'CreateEdges')
     expect(createCall?.[0]).toMatchObject({
       type: 'CreateEdges',
-      edges: [
-        { relation: 'references', contextRole: 'summary' },
-        { relation: 'references', contextRole: 'summary' },
-      ],
+      edges: expect.arrayContaining([
+        expect.objectContaining({
+          from: { kind: 'task', id: 'task-a' },
+          to: { kind: 'task', id: 'task-b' },
+          relation: 'depends-on',
+          contextRole: 'summary',
+        }),
+        expect.objectContaining({
+          from: { kind: 'node', id: 'node-a' },
+          to: { kind: 'task', id: 'task-b' },
+          relation: 'source',
+          contextRole: 'full',
+        }),
+      ]),
     })
     expect((createCall?.[0] as { edges: Array<{ from: { id: string } }> }).edges
       .map((edge) => edge.from.id).sort()).toEqual(['node-a', 'task-a'])
-    const summaryEdge = [...host.querySelectorAll<SVGGElement>('[data-edge-bundle-count]')]
-      .find((entry) => entry.getAttribute('aria-label')?.includes('上下文摘要'))
-    expect(summaryEdge?.getAttribute('tabindex')).toBe('0')
-    expect(summaryEdge?.textContent).toContain('引用 · 摘要')
+    const dependencyEdge = [...host.querySelectorAll<SVGGElement>('[data-edge-bundle-count]')]
+      .find((entry) => entry.getAttribute('aria-label')?.includes('依赖连接'))
+    expect(dependencyEdge?.getAttribute('tabindex')).toBe('0')
+    expect(dependencyEdge?.textContent).toContain('依赖')
+    expect(dependencyEdge?.textContent).not.toContain('摘要')
   })
 
   it('rejects an oversized collection macro instead of silently truncating its edges', async () => {
@@ -1188,7 +1236,7 @@ describe('Canvas V2 interactive stage', () => {
     await vi.waitFor(() => expect(required<HTMLElement>(
       host,
       '[data-testid="canvas-v2-live-region"]',
-    ).textContent).toContain('超过 500 条边'))
+    ).textContent).toContain('超过 500 条连接'))
   })
 
   it('projects destructive deletion immediately, supports undo, and guards active tasks', async () => {

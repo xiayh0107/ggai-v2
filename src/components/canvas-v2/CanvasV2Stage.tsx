@@ -1,5 +1,4 @@
 import {
-  FolderPlus,
   Minus,
   Plus,
   ScanSearch,
@@ -24,6 +23,7 @@ import {
 } from '@/canvas-v2/commands'
 import {
   canonicalizeCanvasV2Selection,
+  deriveUserConnectionSemanticsV2,
   mergeSelectionV2,
   nextRovingKeyV2,
   normalizedBoundsV2,
@@ -40,8 +40,6 @@ import {
   canvasEdgeTopologyIssueV2,
   type CanvasCollectionV2,
   type CanvasDocumentV2,
-  type CanvasEdgeContextRoleV2,
-  type CanvasEdgeRelationV2,
   type CanvasEntityRef,
   type CanvasNodeV2,
   type CanvasPointV2,
@@ -69,7 +67,6 @@ import CanvasV2EdgeLayer, {
   type CanvasV2EdgeEndpoint,
 } from './CanvasV2EdgeLayer'
 import {
-  EDGE_RELATIONS_V2,
   collapsedCollectionBoundsV2,
   edgeSemanticKeyV2,
   relationLabelV2,
@@ -195,13 +192,10 @@ export default function CanvasV2Stage() {
   const [marquee, setMarquee] = useState<CanvasBoundsV2 | null>(null)
   const [rovingKey, setRovingKey] = useState<string | null>(null)
   const [edgeDraft, setEdgeDraft] = useState<EdgeEndpointV2 | null>(null)
-  const [edgeRelation, setEdgeRelation] = useState<CanvasEdgeRelationV2>('references')
-  const [edgeContextRole, setEdgeContextRole] = useState<CanvasEdgeContextRoleV2>('full')
   const [confirmation, setConfirmation] = useState<ConfirmationV2 | null>(null)
   const [undoOffer, setUndoOffer] = useState<UndoOfferV2 | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [createMenu, setCreateMenu] = useState<CreateNodeMenuStateV2 | null>(null)
-  const [assignmentCollectionId, setAssignmentCollectionId] = useState('')
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
@@ -784,6 +778,13 @@ export default function CanvasV2Stage() {
     }
   }
 
+  const onStageKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Escape' || !currentEdgeDraft) return
+    event.preventDefault()
+    setEdgeDraft(null)
+    setNotice('已取消连接')
+  }
+
   const nodeFrames = new Map<string, CanvasBoundsV2>()
   if (preview?.kind === 'node') {
     const node = stageDocument.nodes.find((entry) => entry.id === preview.id)
@@ -954,22 +955,6 @@ export default function CanvasV2Stage() {
       ? [{ kind: 'node', id: node.id }]
       : []
   })
-  const assignmentTargetId = collectionViews.some((view) =>
-    view.collection.id === assignmentCollectionId)
-    ? assignmentCollectionId
-    : collectionViews[0]?.collection.id ?? ''
-  const assignSelectionToCollection = () => {
-    if (!assignmentTargetId || collectableSelection.length === 0) return
-    dispatchWithUndo({
-      type: 'AssignToCollection',
-      collectionId: assignmentTargetId,
-      members: collectableSelection,
-    }, '已加入集合', [{
-      type: 'RemoveFromCollection',
-      collectionId: assignmentTargetId,
-      members: collectableSelection,
-    }])
-  }
   const saveSelectionAsCollection = () => {
     if (collectableSelection.length < 2) return
     const id = clientCanvasIdV2('collection')
@@ -1079,7 +1064,18 @@ export default function CanvasV2Stage() {
   }
   const onCollectionMenuAction = (collection: CanvasCollectionV2, action: string) => {
     const members = collectionMembers(collection.id)
-    if (action === 'duplicate') {
+    if (action === 'add-selection' && collectableSelection.length > 0) {
+      const selectedMembers = structuredClone(collectableSelection)
+      dispatchWithUndo({
+        type: 'AssignToCollection',
+        collectionId: collection.id,
+        members: selectedMembers,
+      }, '已加入集合', [{
+        type: 'RemoveFromCollection',
+        collectionId: collection.id,
+        members: selectedMembers,
+      }])
+    } else if (action === 'duplicate') {
       const newCollectionId = clientCanvasIdV2('collection')
       dispatchWithUndo({
         type: 'DuplicateCollection',
@@ -1128,7 +1124,7 @@ export default function CanvasV2Stage() {
     const toEndpoints = expandEndpoint(endpoint)
     if (fromEndpoints.length * toEndpoints.length > MAX_CANVAS_EDGE_BATCH_V2) {
       setNotice(
-        `集合连接会生成超过 ${MAX_CANVAS_EDGE_BATCH_V2} 条边；请缩小集合或分批连接`,
+        `这次操作会生成超过 ${MAX_CANVAS_EDGE_BATCH_V2} 条连接；请缩小选择范围或分批连接`,
       )
       return
     }
@@ -1136,11 +1132,11 @@ export default function CanvasV2Stage() {
       toEndpoints.map((to) => ({ from, to })))
     const existing = new Set(stageDocument.edges.map((edge) => edgeSemanticKeyV2(edge)))
     const edges = pairs.flatMap(({ from, to }) => {
+      const semantics = deriveUserConnectionSemanticsV2(from, to)
       const candidate = {
         from,
         to,
-        relation: edgeRelation,
-        contextRole: edgeContextRole,
+        ...semantics,
       }
       if (canvasEdgeTopologyIssueV2(candidate)) return []
       const key = edgeSemanticKeyV2(candidate)
@@ -1153,13 +1149,15 @@ export default function CanvasV2Stage() {
       }]
     })
     if (edges.length === 0) {
-      setNotice('当前 relation 与端点类型不兼容，或连接已经存在')
+      setNotice('这两个对象暂时无法连接，或连接已经存在')
       return
     }
     void store.dispatchCommand({ type: 'CreateEdges', edges }).then(() => {
       setEdgeDraft(null)
       showUndoOffer({
-        label: `已创建 ${edges.length} 条 ${relationLabelV2(edgeRelation)} 连接`,
+        label: edges.length === 1
+          ? `已创建${relationLabelV2(edges[0]!.relation)}连接`
+          : `已创建 ${edges.length} 条连接`,
         undoCommands: [{ type: 'DeleteEdges', edgeIds: edges.map((edge) => edge.id) }],
       })
     }).catch((error: unknown) => setNotice(errorMessageV2(error)))
@@ -1309,6 +1307,7 @@ export default function CanvasV2Stage() {
       }}
       onPointerDown={onStagePointerDown}
       onDoubleClick={onStageDoubleClick}
+      onKeyDown={onStageKeyDown}
     >
       <div
         data-testid="canvas-v2-world"
@@ -1332,6 +1331,7 @@ export default function CanvasV2Stage() {
             tabIndex={activeKey === `collection:${view.collection.id}` ? 0 : -1}
             connectionActive={currentEdgeDraft?.kind === 'collection'
               && currentEdgeDraft.id === view.collection.id}
+            canAddSelection={collectableSelection.length > 0}
             onFocus={() => setRovingKey(`collection:${view.collection.id}`)}
             onKeyDown={(event) => onEntityKeyDown(`collection:${view.collection.id}`, event)}
             onDragStart={beginCollectionDrag}
@@ -1542,84 +1542,20 @@ export default function CanvasV2Stage() {
           <Plus size={14} aria-hidden="true" />
           新建节点
         </button>
-        <button
-          type="button"
-          data-testid="save-selection-collection"
-          disabled={collectableSelection.length < 2}
-          onClick={saveSelectionAsCollection}
-          className="flex h-9 items-center gap-2 rounded-[10px] border border-gg-line bg-white px-3 text-[11px] font-medium text-gg-ink shadow-sm outline-none hover:bg-gg-subtle focus-visible:ring-2 focus-visible:ring-gg-primary/35 disabled:cursor-not-allowed disabled:opacity-45"
-        >
-          <FolderPlus size={14} aria-hidden="true" />
-          保存为集合
-        </button>
-        {collectionViews.length > 0 && (
-          <div className="flex items-center rounded-[10px] border border-gg-line bg-white p-1 shadow-sm">
-            <select
-              aria-label="选择目标集合"
-              value={assignmentTargetId}
-              onChange={(event) => setAssignmentCollectionId(event.target.value)}
-              className="h-7 max-w-32 rounded-[7px] bg-white px-1.5 text-[10px] text-gg-ink outline-none focus-visible:ring-2 focus-visible:ring-gg-primary/35"
-            >
-              {collectionViews.map((view) => (
-                <option key={view.collection.id} value={view.collection.id}>
-                  {view.collection.title}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              disabled={collectableSelection.length === 0}
-              onClick={assignSelectionToCollection}
-              className="h-7 rounded-[7px] px-2 text-[10px] font-medium text-gg-primary outline-none hover:bg-[#EAF1FD] focus-visible:ring-2 focus-visible:ring-gg-primary/35 disabled:cursor-not-allowed disabled:opacity-45"
-            >
-              加入集合
-            </button>
-          </div>
+        {currentEdgeDraft && (
+          <button
+            type="button"
+            aria-label="取消创建连接"
+            onClick={() => {
+              setEdgeDraft(null)
+              setNotice('已取消连接')
+            }}
+            className="flex h-9 items-center gap-2 rounded-[10px] border border-gg-line bg-white px-3 text-[11px] font-medium text-gg-muted shadow-sm outline-none hover:bg-gg-subtle hover:text-gg-ink focus-visible:ring-2 focus-visible:ring-gg-primary/35"
+          >
+            <X size={13} aria-hidden="true" />
+            取消连接
+          </button>
         )}
-        <div
-          role="group"
-          aria-label="连接语义设置"
-          className="flex items-center gap-2 rounded-[10px] border border-gg-line bg-white px-2 py-1 shadow-sm"
-        >
-          <label className="flex items-center gap-1 text-[10px] text-gg-muted">
-            Relation
-            <select
-              aria-label="连接 relation"
-              value={edgeRelation}
-              onChange={(event) => setEdgeRelation(event.target.value as CanvasEdgeRelationV2)}
-              className="h-7 rounded-[7px] border border-gg-line bg-white px-1.5 text-[10px] text-gg-ink outline-none focus-visible:ring-2 focus-visible:ring-gg-primary/35"
-            >
-              {EDGE_RELATIONS_V2.map((relation) => (
-                <option key={relation} value={relation}>{relationLabelV2(relation)}</option>
-              ))}
-            </select>
-          </label>
-          <label className="flex items-center gap-1 text-[10px] text-gg-muted">
-            Context
-            <select
-              aria-label="连接 contextRole"
-              value={edgeContextRole}
-              onChange={(event) => setEdgeContextRole(
-                event.target.value as CanvasEdgeContextRoleV2,
-              )}
-              className="h-7 rounded-[7px] border border-gg-line bg-white px-1.5 text-[10px] text-gg-ink outline-none focus-visible:ring-2 focus-visible:ring-gg-primary/35"
-            >
-              <option value="full">完整</option>
-              <option value="summary">摘要</option>
-              <option value="none">不进上下文</option>
-            </select>
-          </label>
-          {currentEdgeDraft && (
-            <button
-              type="button"
-              aria-label="取消创建连接"
-              onClick={() => setEdgeDraft(null)}
-              className="flex h-7 w-7 items-center justify-center rounded-[7px] text-gg-muted outline-none hover:bg-gg-subtle focus-visible:ring-2 focus-visible:ring-gg-primary/35"
-            >
-              <X size={13} aria-hidden="true" />
-            </button>
-          )}
-        </div>
       </div>
 
       <div className="absolute bottom-4 right-4 flex items-center gap-1 rounded-[12px] border border-gg-line bg-gg-node p-1 shadow-sm">

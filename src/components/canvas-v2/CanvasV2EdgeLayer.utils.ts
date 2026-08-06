@@ -2,7 +2,6 @@ import { COLLECTION_CHROME_LAYOUT_V2 } from '@/canvas-v2/layout'
 import {
   entityKeyV2,
   type CanvasCollectionV2,
-  type CanvasEdgeContextRoleV2,
   type CanvasEdgeRelationV2,
   type CanvasEdgeV2,
 } from '@/canvas-v2/model'
@@ -12,17 +11,6 @@ import {
   type CanvasTaskViewV2,
 } from '@/canvas-v2/selectors'
 import type { CanvasV2EdgeEndpoint } from './CanvasV2EdgeLayer'
-
-export const EDGE_RELATIONS_V2: CanvasEdgeRelationV2[] = [
-  'source',
-  'produced',
-  'derived',
-  'modified',
-  'references',
-  'compares',
-  'replaces',
-  'depends-on',
-]
 
 export function relationLabelV2(relation: CanvasEdgeRelationV2): string {
   const labels: Record<CanvasEdgeRelationV2, string> = {
@@ -36,12 +24,6 @@ export function relationLabelV2(relation: CanvasEdgeRelationV2): string {
     'depends-on': '依赖',
   }
   return labels[relation]
-}
-
-export function contextRoleLabelV2(role: CanvasEdgeContextRoleV2): string {
-  if (role === 'full') return '完整'
-  if (role === 'summary') return '摘要'
-  return '无'
 }
 
 export function collapsedCollectionBoundsV2(

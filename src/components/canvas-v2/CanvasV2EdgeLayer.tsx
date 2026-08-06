@@ -9,7 +9,6 @@ import {
 import type { CanvasBoundsV2, CanvasTaskViewV2 } from '@/canvas-v2/selectors'
 import {
   collapsedCollectionBoundsV2,
-  contextRoleLabelV2,
   edgeCurvePathV2,
   relationLabelV2,
   taskInteractionBoundsV2,
@@ -165,7 +164,7 @@ export default function CanvasV2EdgeLayer({
 
   return (
     <svg
-      aria-label="类型化语义连接"
+      aria-label="画布连接"
       className="pointer-events-none absolute left-0 top-0 overflow-visible"
       width="1"
       height="1"
@@ -178,7 +177,7 @@ export default function CanvasV2EdgeLayer({
         const length = Math.hypot(from.x - to.x, from.y - to.y)
         if (length < 2) return null
         const pathId = `canvas-v2-edge-${index}`
-        const label = `${relationLabelV2(bundle.relation)}，上下文${contextRoleLabelV2(bundle.contextRole)}${
+        const label = `${relationLabelV2(bundle.relation)}连接${
           bundle.edgeIds.length > 1 ? `，聚合 ${bundle.edgeIds.length} 条连接` : ''
         }`
         const labelTransform = reversed
@@ -225,7 +224,7 @@ export default function CanvasV2EdgeLayer({
                 transform={labelTransform}
               >
                 <textPath href={`#${pathId}`} startOffset="50%" textAnchor="middle">
-                  {relationLabelV2(bundle.relation)} · {contextRoleLabelV2(bundle.contextRole)}
+                  {relationLabelV2(bundle.relation)}
                   {bundle.edgeIds.length > 1 ? ` ×${bundle.edgeIds.length}` : ''}
                 </textPath>
               </text>

@@ -111,7 +111,10 @@ Node is an editable result, without introducing an additional bundle entity.
 “Save as collection” persists only selected top-level Tasks and Nodes. Collection
 ports are UI macros: they expand to member endpoints and submit one bounded
 `CreateEdges` command containing ordinary typed edges. `relation` and
-`contextRole` remain separate controls. When a Task or Collection is collapsed,
+`contextRole` remain separate data semantics, but the canvas never exposes them
+as global protocol controls. Ordinary port connections derive both fields from
+their endpoint kinds; trusted Task/Run actions continue to assign stronger
+lineage relations. When a Task or Collection is collapsed,
 external edges aggregate at its boundary; hover or expansion fans them back out.
 
 Destructive menu actions use an accessible confirmation dialog and a five-second

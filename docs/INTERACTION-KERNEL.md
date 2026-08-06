@@ -75,5 +75,8 @@ Agent proposal 只是下一批 draft Task 的受限计划。用户可以编辑�
 - 只有旧消费者能安全忽略时才增加可选字段；否则升级 schema version。
 - 身份、坐标、命令与 provenance 始终由 daemon/reducer 边界生成，不扩展 Agent 权限。
 - 新 Node 类型通过 data-only artifact claim、纯 `projectArtifact` 与 view 扩展，不在核心按 plugin ID 分支。
-- 新 Edge relation 不得隐式改变上下文；必须继续显式携带 `contextRole`。
+- 新 Edge relation 不得隐式改变上下文；每条命令必须继续显式携带
+  `contextRole`，但普通用户不直接编辑协议枚举。端口连线由端点类型纯推导：
+  Node→Task 为 `source/full`，Task→Task 为 `depends-on/summary`，指向 Node
+  的普通连接为 `references/none`。`produced/derived` 只来自可信物化路径。
 - artifact GC 必须做跨 runtime、Canvas Git、run log 和 manifest 的可达性分析，不能因当前 Node 被删除就回收。

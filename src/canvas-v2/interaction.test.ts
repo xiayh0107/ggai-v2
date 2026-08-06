@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   canonicalizeCanvasV2Selection,
+  deriveUserConnectionSemanticsV2,
   mergeSelectionV2,
   nextRovingKeyV2,
   normalizedBoundsV2,
@@ -12,6 +13,28 @@ import {
 import { emptyCanvasDocumentV2, type CanvasDocumentV2 } from './model'
 
 describe('Canvas V2 interaction geometry', () => {
+  it('derives ordinary connection semantics without exposing protocol controls', () => {
+    const node = { kind: 'node' as const, id: 'node-a' }
+    const task = { kind: 'task' as const, id: 'task-a' }
+
+    expect(deriveUserConnectionSemanticsV2(node, task)).toEqual({
+      relation: 'source',
+      contextRole: 'full',
+    })
+    expect(deriveUserConnectionSemanticsV2(task, task)).toEqual({
+      relation: 'depends-on',
+      contextRole: 'summary',
+    })
+    expect(deriveUserConnectionSemanticsV2(node, node)).toEqual({
+      relation: 'references',
+      contextRole: 'none',
+    })
+    expect(deriveUserConnectionSemanticsV2(task, node)).toEqual({
+      relation: 'references',
+      contextRole: 'none',
+    })
+  })
+
   it('converts through an offset viewport and keeps the zoom anchor fixed', () => {
     const viewport = { left: 52, top: 80, width: 800, height: 600 }
     const camera = { x: 100, y: 60, zoom: 1 }
