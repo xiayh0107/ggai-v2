@@ -97,7 +97,7 @@ interface CanvasEdgeV2 {
 }
 ```
 
-Receipts 是不可重复副作用的持久证据。materialization receipt 保存 `planId/runId/taskId` 与 `outputKey → nodeId`；proposal acceptance/dismissal receipt 保存已处理的 proposal key。删除自动 Node 不删除 receipt，因此刷新、SSE 重放或崩溃恢复不会让它复活。
+Canvas receipts 是投影副作用的持久证据。materialization receipt 保存 `planId/runId/taskId` 与 `outputKey → nodeId`；proposal acceptance/dismissal receipt 保存已处理的 proposal key。删除自动 Node 不删除 receipt，因此刷新、SSE 重放或崩溃恢复不会让它复活。它们与 runtime snapshot 内部的 command mutation receipt 不是同一概念：后者记录 `mutationId`、command digest 与 committed revision，只服务 HTTP exactly-once，不进入 Canvas 文档、API envelope 或 Git。
 
 Canvas Git 只保存上述文档。以下状态不进入 Canvas 文档或 Git：
 
@@ -118,13 +118,17 @@ POST /canvas/commands
 
 规范命令包括：
 
-- `CreateTask`、`UpdateTaskGoal`、`MoveEntities`
+- `CreateTask`、`UpdateTaskGoal`、`CreateNode`、`UpdateNodeContent`、`ResizeNode`
+- `CreateEdge(s)`、`UpdateEdge`、`DeleteEdge(s)`、`MoveEntities`
+- `CreateTaskForOutputSlot`、`CreateDerivedTaskFromSelection`、`AssignNodeToTask`、`DetachNodeFromTask`
 - `CreateCollectionFromSelection`、`AssignToCollection`、`RemoveFromCollection`、`DissolveCollection`
 - `DeleteTask`、`DeleteTaskAndViews`、`DeleteCollection`、`DeleteCollectionAndContents`
 - `DuplicateNode`、`DuplicateTaskAsDraft`、`DuplicateCollection`
 - `MaterializeProjectionPlan`、`AcceptTaskProposals`、`DismissPlan`
 
-浏览器先把 command 与 base revision 写入 IndexedDB outbox，再乐观执行同一 reducer。daemon 在分支锁内读取当前 revision、重放 reducer、校验不变量，并以单个 `mutationId` 原子写入。成功返回 envelope 后浏览器确认 outbox。CAS 冲突时浏览器只允许 refetch 后重放一次；若命令前置条件已失效，必须进入显式冲突分支流程，禁止静默覆盖。
+浏览器先把 command、base revision 与不可变 `initialBaseRevision` 写入 IndexedDB outbox，再乐观执行同一 reducer。daemon 在分支锁内读取当前 revision、重放 reducer、校验不变量，并以单个 `mutationId` 原子写入。runtime snapshot 持久保存 `mutationId → command digest + committed revision`；因此成功响应丢失、后续 revision 已前进或 daemon 重启后，相同 mutation 的重试仍只返回当前规范 envelope，不重复副作用。复用 mutationId 提交不同 command 会被拒绝。
+
+每个语义 revision 同时归档在 `.gg/runtime/canvas-v2/<branch-hash>/revisions/<revision>.json`，包含 document digest。CAS 冲突时浏览器只允许 refetch 后重放一次；若再次冲突或前置条件失效，必须进入显式冲突分支流程，禁止静默覆盖。`POST /canvas/conflicts` 只接受 `sourceBranch/newBranch/baseRevision` 和最多 500 条原始 mutation journal；daemon 从自己的历史 revision 读取基底并纯重放到新分支，浏览器不能上传 Canvas snapshot。相同恢复可幂等重试，同名分支已有不同内容则失败。
 
 拖动时只更新本地临时坐标，`pointerup` 提交一次 `MoveEntities`。普通动作的即时撤销通过提交反向 command 实现，因此同样进入版本历史。二次确认的破坏性动作先使用同一 reducer 生成 branch-local pending-deletion 投影；撤销窗口内不写 command，超时才提交，提交前失败则恢复原投影并提示。
 
@@ -158,7 +162,7 @@ Run 的唯一可写产物根：
 artifacts/.branches/<branch-hash>/<runId>/files/<relative-path>
 ```
 
-daemon 在 close settle 完成后生成 `.gg/runtime/runs/<runId>/artifact-manifest.json`：
+daemon 在 close settle 完成后生成 `artifacts/.branches/<branch-hash>/<runId>/.ggai/artifact-manifest.v1.json`；Agent 可写文件仍全部位于相邻的 `files/` 根：
 
 ```ts
 interface ArtifactManifestV1 {
@@ -175,7 +179,7 @@ interface ArtifactManifestV1 {
 }
 ```
 
-`artifactId = hash(runId + normalizedRelativePath)`；内容摘要单独校验 bytes。Node 只持久化 `{ runId, artifactId }`。读取使用 `GET /runs/:runId/artifacts/:artifactId`，daemon 必须从已保存 manifest 反查路径并再次执行 no-follow、realpath、size 与 digest 校验。
+`artifactId = hash(runId + normalizedRelativePath)`；内容摘要单独校验 bytes。Node 只持久化 `{ runId, artifactId }`。读取使用 `GET /runs/:runId/artifacts/:artifactId`，元数据使用同路径的 `/metadata` 后缀；daemon 必须从已保存 manifest 反查路径并再次执行 no-follow、realpath、size 与 digest 校验。
 
 `.ggai` 控制目录、symlink、traversal、socket/device、临时文件和 foreign-run 路径永远不进入 manifest 或 ProjectionPlan。失败、取消和中断只影响 `complete` 与 Task 派生状态，不允许绕过 artifact 校验。
 
@@ -193,7 +197,7 @@ daemon 将 raw outcome、ArtifactManifest 与序列化插件 artifact claim 求�
 - error/cancelled/interrupted plan 标记 `partial`，保留合法 artifact，但丢弃全部 task proposal；
 - plan 记录 Task/Run、manifest digest、output key、artifactRefs、derivedFrom 与 proposal DAG，不含 Canvas ID 或坐标。
 
-插件契约必须可序列化并声明 artifact claim；React 投影 hook 保持纯函数。核心不硬编码某个具体内容插件，但提供确定性的通用 file fallback。
+插件契约必须可序列化并声明 artifact claim；React 投影 hook 保持纯函数。浏览器启动 Run 前把启用的 community data-only claims 注册到 `PUT /plugin-capabilities/v2`。daemon 固定内置声明、拒绝 community 覆盖内置或声明 unknown fallback，规范化完整 registry，按 digest 保存到 `.gg/runtime/plugin-capabilities-v2/<digest>.json`，并把这个 digest 与快照固定到 Run、上下文包和恢复摘要。live Run 请求指定的 digest 缺失或损坏时失败关闭；崩溃恢复最多安全降级为 daemon 内置 claims。Agent 的 output `pluginId` 只能引用该 Run 的固定 registry。核心不硬编码某个具体内容插件，但提供确定性的通用 file fallback。
 
 ## 7. 交互语义
 
@@ -231,13 +235,13 @@ daemon 将 raw outcome、ArtifactManifest 与序列化插件 artifact claim 求�
 
 ## 8. 版本历史与 reset
 
-Canvas Git 的规范化树为：
+Canvas Git 位于 `.gg/canvas-state-v2/`，受管 worktree 位于 `.gg/canvas-worktrees-v2/`。规范化树为：
 
 ```text
-tasks/<id>.json
-nodes/<id>.json
-collections/<id>.json
-edges/<id>.json
+tasks/<stable-key>.json
+nodes/<stable-key>.json
+collections/<stable-key>.json
+edges/<stable-key>.json
 receipts/<stable-key>.json
 meta.json
 ```
@@ -251,7 +255,9 @@ V2 不提供 V1 数据迁移或旧画布查看器。显式 reset 脚本必须：
 3. 初始化全新 V2 runtime；
 4. 不触碰源码 Git、`app/.git`、tracked file 或用户源码 worktree。
 
-开发期用前后端共同 capability `canvasModelV2` 隔离，双方 schema 不匹配时拒绝写入。V2 验证完成后默认开启；旧状态归档和回滚入口保留到稳定期结束，再删除 V1 写路径。
+当前 `/canvas` 应用入口与 daemon 均为 V2-only。前端在 hydration 前必须验证 `/health` 的 `capabilities.canvasModelV2=true`、`schemaVersion=2` 与 reset marker；不一致时显示阻断页，不挂载旧 store。daemon 不提供 V1 snapshot、Node Run、source-binding 或按路径 artifact fallback。
+
+V2 的 run log 是 ProjectionPlan、终态 close 与恢复的永久事实源，`DELETE /runs/:id/log` 在 V2 返回 `run_log_delete_unsupported`。日志不进入 Canvas Git；未来若实现 GC，必须和 Canvas/runtime/history/artifact 可达性一起处理，不能独立删除。
 
 ## 9. 验收门禁
 

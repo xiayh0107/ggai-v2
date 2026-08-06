@@ -6,9 +6,9 @@ interactive task-centric stage. V2 does not reuse or mutate the V1 React store.
 ## Entry boundary
 
 `/canvas` is a V2-only application entry. Before mounting the V2 provider it
-requires `GET /health` to report `capabilities.canvasModelV2: true`. A daemon
-running in explicit V1 archive-diagnostic mode, a reset-required response, or an
-unreachable daemon mounts no canvas store and shows a blocking recovery page.
+requires `GET /health` to report `capabilities.canvasModelV2: true`. An
+incompatible daemon, a reset-required response, or an unreachable daemon mounts
+no canvas store and shows a blocking recovery page.
 The page includes the explicit `npm run canvas:v2:reset -- --apply` instruction;
 it never silently initializes state or falls back to the V1 React tree.
 
@@ -31,7 +31,9 @@ No camera, selection, collapse, draft, run, or ghost field is copied into
 
 1. Validate the command against the current optimistic document.
 2. Under one outbox lock, calculate `baseRevision` as the locally acknowledged
-   revision plus the current FIFO outbox length.
+   revision plus the current FIFO outbox length. Persist that first base as
+   immutable `initialBaseRevision`; later conflict rebases only change the
+   sending `baseRevision`.
 3. Persist the command before publishing its optimistic reducer result.
 4. Resolve dispatch once it is durable and visible locally; do not wait for the
    network.
@@ -41,10 +43,20 @@ No camera, selection, collapse, draft, run, or ghost field is copied into
 6. Keep conflicted commands durable and keep the optimistic projection visible.
    The daemon client retains its bounded behavior of one refetch, one whole FIFO
    rebase/replay, and no unbounded automatic conflict loop.
+7. Rely on the daemon's durable mutation ledger for lost-ack retries. A repeated
+   `mutationId` with the same command returns the canonical current envelope;
+   reusing that ID for another command is a protocol error.
 
 Outbox list/ack/rebase/enqueue operations share a small lock. This makes state
 publication atomic with durability and prevents a flush result from overwriting
 a command enqueued in the same event-loop window.
+
+When bounded replay still conflicts, the version panel exposes an explicit
+“save as conflict branch” dialog. The store sends the original FIFO mutation
+journal and its immutable base revision to `POST /canvas/conflicts`; it never
+sends the optimistic document. Success acknowledges the source outbox, switches
+to the daemon-created branch, and scopes the current view state to that branch.
+Failure preserves the outbox and conflict UI for another attempt.
 
 ## React boundary
 
@@ -67,8 +79,12 @@ transient Ghost projections during execution:
 - a running task may project non-persistent ghost output slots using the same
   layout function as trusted materialization.
 
-Node bodies use the plugin registry for their identity and a conservative
-generic renderer for text, code, structured payloads, and visual artifacts.
+Node bodies use the plugin registry for their identity and pure V2 artifact
+projection. Before a Run starts, the browser registers enabled data-only claims;
+the daemon returns a digest that fixes the complete capability snapshot for that
+Run. A Node first loads strict manifest-backed metadata, then calls the matching
+plugin's `projectArtifact` and `views.Artifact`. Image and generic file views are
+built in; verified code files up to the inline size limit are rendered as source.
 Artifact URLs are always run-owned (`runId` + `artifactId`); the UI does not
 reconstruct paths from agent log text.
 
@@ -121,7 +137,7 @@ transitions provide reduced-motion variants.
 
 Focused tests cover:
 
-- explicit frontend flag and branch parsing;
+- V2-only entry and branch parsing;
 - frontend/daemon capability agreement, unsupported daemon, and failed probe;
 - daemon health capability parsing;
 - daemon + IndexedDB hydration and optimistic outbox replay;
@@ -130,10 +146,13 @@ Focused tests cover:
 - branch-only view persistence with no document command;
 - transient runtime status and deterministic ghost projection;
 - conflict retention;
+- immutable conflict bases and explicit journal-to-new-branch recovery;
+- lost-ack exactly-once command retry;
 - React provider hydration and runtime-driven hook updates.
 - task-card, title-strip, multi-output frame, collapsed summary, and ghost
   rendering;
 - run-owned artifact URLs and plugin-aware node content;
+- strict artifact metadata projection and readable verified code artifacts;
 - typed Shift selection, additive marquee selection, roving focus, and focus
   retention across runtime updates;
 - one-command pointer release for Task move, Node move, and Node resize;
@@ -145,10 +164,10 @@ Focused tests cover:
   dispatch, timeout dispatch, rejection restore, and active-Task deletion guard;
 - rect-aware panning and cursor-anchored zoom.
 
-## Deferred UI work
+## Current boundary
 
-- run/SSE adapter that feeds `setTaskRuntime` and ghost updates;
-- proposal review and materialization controls;
-- specialized editors and viewers beyond the generic plugin-aware node body;
-- V2 branch/version management UI;
-- command conflict resolution UI beyond the exposed store state.
+The V2 shell now includes Task Run/SSE recovery, ghost progress, automatic
+materialization, proposal review, branch/history/merge controls, and explicit
+conflict-branch recovery. Rich plugin-specific editors beyond the current
+artifact viewers remain independent plugin work; they do not change the Task,
+Run, command, receipt, or artifact identity model.

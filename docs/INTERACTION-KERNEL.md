@@ -1,59 +1,79 @@
-# Agent–Canvas 交互内核
+# Agent–Canvas V2 交互内核
 
-本文定义画布和外部 Agent 之间最小的语义边界。它刻意不定义 Agent 调度器、消息总线，
-也不定义多 Agent 会话协议。
+本文定义 Task-Centric Canvas V2 与外部 Agent 之间最小、可信的语义边界。完整实体和 command 规范见 [`CANVAS-V2.md`](./CANVAS-V2.md)。内核不实现 Agent 调度器、Agent 间消息总线，也不允许 Agent 直接修改画布。
 
-## 五个稳定概念
+## 六个稳定概念
 
-1. **画布图谱**：节点和边构成用户的长期工作区；边是关系和上下文依赖的唯一事实源。
-2. **运行意图**：一次执行使用的提示、目标、附件，以及画布快照或 revision。
-3. **运行事件**：思考、工具活动、文件写入、权限请求、错误和完成等临时进度。
-4. **运行结果**：随终态 `close` 提交的小型、版本化语义结果。它可以携带建议等有界
-   UI 数据，但不能携带任意画布补丁或可执行命令。
-5. **产物**：写入 run 隔离目录的不可变文件；最终文件快照仍以 daemon 为权威。
+1. **Task**：用户目标和执行容器；持久保存 goal 与锚点，不保存运行日志或 session。
+2. **Run**：Task 的一次不可变执行尝试；绑定 `taskId`、持久 Canvas revision、实际 prompt、附件、Agent 和固定插件能力 digest。
+3. **Node**：纯内容投影；不拥有 prompt、phase、session、Run 日志或磁盘路径。
+4. **Artifact**：Run-owned 不可变文件；Node 只引用 `{ runId, artifactId }`。
+5. **Edge**：Task/Node 之间的类型化关系；展示 `relation` 与上下文 `contextRole` 分离。
+6. **Collection**：用户显式保存的顶层布局集合；不拥有 prompt、Run 或成员数组。
 
-在用户再次操作之前，数据流保持单向：
+## 单向数据流
 
 ```text
-人的意图 -> run -> events -> close(outcome + artifact snapshot)
-                                  |
-                                  +-> 插件投影节点内容
-                                  +-> UI 展示下一步提示建议
-                                                   |
-                                                   +-> 新的人的意图
+用户 command → 持久 Task + Canvas revision
+                         │
+                         ▼
+                RunIntentV2(taskId, revision)
+                         │
+                         ▼
+            events / file-write ghost progress
+                         │
+                         ▼ durable close
+       ArtifactManifest + validated RunOutcomeV2
+                         │
+                         ▼
+               trusted ProjectionPlan
+                  ┌──────┴──────┐
+                  ▼             ▼
+        automatic output     proposal review
+        materialization      user confirmation
+                  │             │
+                  ▼             ▼
+             Node/Edge/receipt  draft Task/Edge/receipt
 ```
 
-## 薄内核不变量
+浏览器发起 Run 前必须冲刷 outbox。daemon 只从 `canvasBranch + baseRevision` 的持久文档编译上下文，不接受浏览器上传 Canvas snapshot。`file-write` 只产生临时 ghost；真实 Node 只能在 durable close、manifest 校验与 ProjectionPlan 交集之后原子物化。
 
-- Agent transport 只负责启动、恢复、取消和翻译 run；它不知道节点类型、节点集群或建议 UI。
-- 进度属于 `CanvasAgentEvent`；已提交的结构化数据属于 `close` 上可选且版本化的
-  `RunOutcome`。
-- outcome 缺失或无效，不能让原本成功的产物变成失败。
-- 建议动作是不可信文本。选择建议只填入提示，不会自动执行代码、修改图谱或授予权限。
-- 节点插件可以把通用运行结果投影为自身内容；画布 runtime 不能按插件 id 分支。
-- run log 是 outcome 的持久事实源；节点上保留的副本只是绑定产出 run id 的可替换 UI 投影。
-- 保留控制文件永远不作为用户产物展示。
+## 信任边界
 
-## 自定义节点
+- Agent transport 只负责启动、恢复、取消和事件翻译；它不知道 Canvas ID、坐标、布局或 command。
+- Agent 可以写 deliverable 和受限 `RunOutcomeV2` sidecar，但不能声明 runId、Task/Node ID、payload、自由 edge、坐标或后续自动执行。
+- outcome 缺失、损坏、超限或不安全时，Run 仍按 transport 终态结束；daemon 对已验证 artifact 做确定性 fallback。
+- error、cancelled、interrupted Run 可以产生 partial plan，但其 task proposal 一律不采用。
+- tool、search、warning、thinking 与 permission 只属于 Run event/log，不生成语义 Edge。
+- 可信 materialization/accept/dismiss HTTP command 只携带 `planId`。daemon 从永久记录解析完整计划，浏览器不能提交 Node patch。
+- V2 run log 保存终态 close 与恢复证据，不能独立删除。
 
-自定义节点拥有自己的内容结构和视图，并可选提供一个纯结果投影函数，把流式文本和已验证
-的产物引用映射成节点补丁。因此代码、网站、文件资源管理器或未来节点都不需要修改 daemon。
+## 上下文编译
 
-投影函数只在权威 `close` 到达后于 UI 进程运行；它不能修改 run log，也不能扩大文件权限。
+Run 的目标由 `taskId` 定位。只有指向该 Task 且 `contextRole` 为 `full` 或 `summary` 的 typed Edge 参与上下文：
 
-## 多节点与节点集群
+- `full`：加入经过边界控制的完整 Node 内容或 verified artifact attachment；
+- `summary`：只加入标题、类型和摘要；
+- `none`：保留画布语义关系，但不进入 Agent 上下文。
 
-多个节点同时工作仍然是多个互相独立的 run。既有 run id、取消、session、日志和终态结果
-继续负责隔离状态，不引入 Agent 间消息层。
+Task、Node 与 Edge 的 ID 是 provenance，不是给 Agent 使用的画布写权限。所有 artifact attachment 都由 daemon 从已关闭 manifest 解析为只读路径、MIME、size 和 digest。
 
-未来的多选或节点集群只改变运行意图的目标范围，以及上下文编译器接收的图谱，不改变
-transport 事件和 outcome envelope。若未来一次 run 可以建议更新多个节点，这些更新必须是
-有界、类型化、由画布校验并经用户确认的 proposal，而不是直接 mutation。
+## 固定插件能力
+
+artifact claim 是 JSON 可序列化数据；React renderer 与 `projectArtifact` 函数不会发送给 daemon。浏览器把启用的 community claims 注册给 daemon，daemon 合并不可覆盖的内置 registry、规范化并返回 content digest。Run 接受时把完整能力快照固定下来，并写入上下文包。
+
+Agent outcome 的 `pluginId` 必须属于该固定快照，path/MIME 也必须满足对应 claim。daemon 将 outcome、manifest 与 claims 求交集；未知文件只由 daemon-owned `file` fallback 接收。浏览器拿到 manifest-backed metadata 后，才调用相同 plugin 的纯投影函数与 Artifact view。
+
+## 会话与并发
+
+会话事实源键为 `canvasBranch + taskId + agentId`。同一 Task 的“继续任务”可以 resume；从已有 Node 派生的新 Task 必须获得独立 session。每个 `(project, branch, taskId)` 同时最多一个活跃 Run，不同 Task 可以并发。
+
+Agent proposal 只是下一批 draft Task 的受限计划。用户可以编辑标题、prompt、选择项和 proposal DAG 内依赖；确认在一个 Canvas command 中创建 Task/Edge/receipt，但不会启动任何 Run、消耗权限或形成嵌套 Task。
 
 ## 演进规则
 
-- 只有旧客户端能够安全忽略时，才给已有 outcome 版本增加可选字段；否则升级 schema version。
-- 优先增加 `citations`、`warnings` 等有界字段，不增加通用应用消息通道。
-- `runId`、目标和未来的上下文 digest 等 provenance 不由 Agent 声明，而由可信的 daemon/UI
-  边界附加。
-- 大画布以后可以从浏览器提交快照改成 daemon 读取 branch revision，但不改变交互内核。
+- 只有旧消费者能安全忽略时才增加可选字段；否则升级 schema version。
+- 身份、坐标、命令与 provenance 始终由 daemon/reducer 边界生成，不扩展 Agent 权限。
+- 新 Node 类型通过 data-only artifact claim、纯 `projectArtifact` 与 view 扩展，不在核心按 plugin ID 分支。
+- 新 Edge relation 不得隐式改变上下文；必须继续显式携带 `contextRole`。
+- artifact GC 必须做跨 runtime、Canvas Git、run log 和 manifest 的可达性分析，不能因当前 Node 被删除就回收。

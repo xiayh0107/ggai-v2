@@ -6,8 +6,9 @@
 ## 项目是什么
 
 生成式图形工具（React 19 + TypeScript + Vite + Tailwind + shadcn/ui；本地 Node daemon）。
-无限画布 + 节点 + 连线，每个节点有内容（text / table / formula / chart …），
-节点上方/下方挂一个"通用指令区"（prompt 面板）。设计规范见仓库根的 `DESIGN.md`。
+Canvas V2 以 Task 为提示与运行边界，Node 只承载内容，typed Edge 分离语义关系与 Agent
+上下文，Collection 只保存顶层布局集合。设计规范见仓库根的 `DESIGN.md`，架构规范见
+`docs/CANVAS-V2.md`。
 
 ## 设计红线（改了会被打回）
 
@@ -20,7 +21,8 @@
 
 ```
 src/
-  types/canvas.ts          # CanvasNode / Edge / CreateMenuState … 纯类型
+  canvas-v2/             # V2 model / command reducer / outbox / Run / selectors
+  components/canvas-v2/  # Task-centric stage、容器、Edge、proposal、版本 UI
   agent/                   # Agent 接入层（见 docs/AGENT-ARCHITECTURE.md）
     types.ts               # 统一事件 / 上下文包 / 会话
     context.ts             # 上下文打包器（三层裁剪，画布→Agent）
@@ -31,47 +33,40 @@ src/
     shared.tsx             # makeEmptyView / MetaLines 共享视图
     builtins/index.tsx     # 9 个内置插件（也是"普通插件"，无任何特权）
     README.md              # 插件规范（人读版，最详细）
-  hooks/useCanvasStore.ts  # zustand store：节点/连线/选择/生成态
-  persistence/             # IndexedDB journal / 相机状态，daemon 断线缓冲
-  components/canvas/
-    CanvasStage.tsx        # 画布：拖拽/连线/框选/成组/待创建虚线
-    NodeCard.tsx           # 节点外壳（头部/端口/缩放），内容委托给插件
-    EdgeLayer.tsx          # 连线路径 + hover 胶囊（标签/从连线新建/删除）
-    InstructionPanel.tsx   # 通用指令区（按插件配置渲染）
-    CreateMenu.tsx         # 新建节点菜单（列出启用中的插件）
-    PluginManager.tsx      # 插件管理界面（左侧栏"资源"入口）
-    EmptyState.tsx         # 空画布引导
 ```
 
 ```
 daemon/
   index.ts                 # 127.0.0.1 服务入口
   server.ts                # HTTP/CORS/SSE 路由
+  canvasCommandStoreV2.ts  # command CAS、exactly-once 与 semantic revision
+  workspaceVersioningV2.ts # V2 checkpoint、branch、conflict、merge
+  runArtifactStorageV2.ts  # Run-owned artifact manifest 与安全读取
+  projectionPlanV2.ts      # outcome × manifest × plugin claims
   runs.ts                  # run 生命周期、事件缓存与取消
-  canvasStore.ts           # revision CAS + 原子画布快照（当前事实源）
   runLogs.ts               # 永久 JSONL 运行日志与摘要
-  canvasGit.ts             # 独立画布 Git 历史与受管 worktree
-  sourceGit.ts             # 可选源码 Git 绑定、worktree 与 checkpoint
-  workspaceVersioning.ts   # 快照、画布 Git、源码 Git 的一致性协调
+  canvasGitV2.ts           # 独立 V2 Canvas Git 历史与受管 worktree
+  taskSessionsV2.ts        # branch + Task + Agent 会话
+  pluginCapabilitiesV2.ts  # Run-fixed artifact claim snapshot
   packer.ts / watcher.ts   # 上下文落盘与 artifact 对账
-  sessions.ts              # 原子会话持久化与损坏隔离
   permissions.ts           # projectRoot、路径与命令安全策略
   translator.ts            # ACP/Codex/plain 输出归一化
   transport/               # acpx 与原生 Codex 子进程适配
 ```
 
-关键数据流：`makeNode(type)` → `getPlugin(type)` 取 `initialPayload()` 存进
-`node.payload`；渲染时 `NodeBody` 用 `plugin.isEmpty(node)` 决定显示 `views.Empty`
-还是 `views.Content`；点“执行”后经 `DaemonClient` 启动本地 run，SSE 的 `file-write`
-事件写回 `node.payload.artifactFiles`。引擎只管“节点有没有内容、是不是在生成”，
-**不懂任何具体类型**。`demoResult` 只保留为插件原型契约，不再是默认执行路径。
+V2 关键数据流：浏览器把 command 写入 IndexedDB outbox 并乐观运行共享 reducer → daemon
+按 revision CAS 与 mutation receipt exactly-once 提交 → `RunIntentV2(taskId, revision)` 从持久
+Canvas 编译上下文 → `file-write` 只显示 ghost → durable close 生成 ArtifactManifest 与可信
+ProjectionPlan → daemon 原子创建 Node/Edge/receipt。Node 只保存 `{runId, artifactId}`，不保存
+prompt、phase、session、日志或磁盘路径。插件通过 data-only `artifactClaims`、纯
+`projectArtifact` 与 `views.Artifact` 渲染 verified artifact；核心不按 plugin id 分支。
 
 ## 多选与成组
 
-`selectedIds: string[]`；Shift+拖拽框选、Shift+点击加选。多选时 CanvasStage 在
-成员节点**下层**画一个"大号节点"（白色卡片 + 四个加号端口 + 图标工具栏），
-从成组端口拖出 = 同时引用所有成员；新建成功后成组框自动消失，留下 N 条连线。
-连线中点 hover 胶囊的"+"可从一条连线新建节点（同时引用两端节点）。
+Shift+拖拽框选、Shift+点击只产生 branch-local 临时多选，不进入 Canvas 文档。用户必须
+点击“保存为集合”才创建 Collection；Collection 不保存 `memberIds`，成员关系只在顶层
+Task/Node 的 `collectionId` 上。Collection 端口是 UI macro：一次 bounded command 创建成员
+的普通 typed Edge，Collection 本身不是 Edge 端点。Task 可以直接成为 Edge 端点。
 
 ## 如何构建一个节点插件（必读）
 
@@ -93,7 +88,11 @@ export const videoPlugin: NodePlugin = {
   views: {
     Empty: makeEmptyView(Clapperboard, '导入视频', '支持 MP4 / MOV'),
     Content: ({ node }) => <div className="p-4">{/* 渲染 payload */}</div>,
+    Artifact: ({ artifact }) => <video controls src={artifact.url} />,
   },
+
+  artifactClaims: [{ extensions: ['.mp4', '.mov'], mediaTypes: ['video/*'], priority: 20 }],
+  projectArtifact: (artifact) => ({ title: artifact.title }),
 
   instr: {                        // 通用指令区配置（可选）
     placeholder: '对这个视频做什么？',
@@ -115,10 +114,12 @@ registerPlugin(videoPlugin);
 规则：
 1. **生成优先**：画布的主线是 Agent 生成。空态主行动写"描述需求，Agent 生成"，导入已有资产只做辅助文案。
 2. 内容一律走 `node.payload`，**不要**给 `CanvasNode` 加类型专属字段。
-3. 不要引入新的节点级状态字段；`instruction.phase === 'generating'` 由引擎统一处理。
-4. 样式只用 `gg.*` 设计 token；遵守上面的设计红线。
-5. `isEmpty` 必须准确 —— 它决定空态/内容态切换，也影响"已生成"汇总条。
-6. 未知类型有回退（文件上标个问号），所以你禁用/卸载插件不会弄坏旧画布。
+3. 不要给 `CanvasNodeV2` 增加 prompt、phase、session 或日志字段；运行态只在 Task Run store。
+4. `artifactClaims` 必须是 JSON 可序列化数据；community 插件不能覆盖内置声明或接管 unknown fallback。
+5. `projectArtifact` 必须是纯函数；拿不到 entity ID、坐标、Edge、command 或 dispatcher。
+6. 样式只用 `gg.*` 设计 token；遵守上面的设计红线。
+7. `isEmpty` 仍应准确；V2 artifact 投影的身份与安全元数据以 daemon manifest 为准。
+8. 未知格式由不可创建的通用 `file` fallback 承接，禁用插件不会破坏已持久化 Node。
 
 ## 构建与验证
 
@@ -137,8 +138,9 @@ npm run daemon -- --project-root "$PWD"
 npm run preview      # 本地预览
 ```
 
-改动画布交互后，用 Playwright（或手动）至少过一遍：新建节点 → 拖出连线新建 →
-框选成组新建 → 禁用某插件后新建菜单里它消失、画布上旧节点变回退态。
+改动画布交互后，用浏览器至少过一遍：新建 Task → Run 生成多个 artifact Node → 折叠 /
+展开 Task → 从产物派生新 Task → Shift 框选并保存 Collection → 创建 typed Edge → checkpoint /
+恢复分支。确认裂解不 fit view、不转移 Task 焦点，刷新和重复 close 不重复物化。
 
 依赖通过 npm 命令增删，并同时更新 `package.json` 与 `package-lock.json`；开发和 CI 安装均允许正常执行依赖生命周期脚本。详细分类、升级流程和外部 CLI 边界见 `docs/DEPENDENCIES.md`。
 
@@ -147,10 +149,8 @@ npm run preview      # 本地预览
 | 想改什么 | 去哪里 |
 | --- | --- |
 | 新增 / 修改节点类型 | `src/plugins/builtins/index.tsx` |
-| 节点外壳（端口、头部、汇总条） | `src/components/canvas/NodeCard.tsx` |
-| 连线路径 / hover 行为 | `src/components/canvas/EdgeLayer.tsx` |
-| 指令区通用行为 | `src/components/canvas/InstructionPanel.tsx` |
-| 插件管理界面 | `src/components/canvas/PluginManager.tsx` |
+| V2 Task/Node 外壳与 Stage | `src/components/canvas-v2/` |
+| V2 model / command / outbox / Run | `src/canvas-v2/` |
+| V2 daemon persistence / artifact / plan | `daemon/*V2.ts` |
 | Agent 上下文 / 执行 | `src/agent/`（先读 `docs/AGENT-ARCHITECTURE.md`，后端见 `docs/AGENT-BACKEND.md`） |
-| 全局状态 | `src/hooks/useCanvasStore.ts` |
-| 画布持久化 / Git 分支 | `docs/CANVAS-PERSISTENCE.md`、`daemon/workspaceVersioning.ts` |
+| 画布持久化 / Git 分支 | `docs/CANVAS-PERSISTENCE.md`、`daemon/workspaceVersioningV2.ts` |

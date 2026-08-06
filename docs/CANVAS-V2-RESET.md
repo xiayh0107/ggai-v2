@@ -46,18 +46,10 @@ artifacts/.branches/
 
 `.git`、tracked source files、`.gg/source-worktrees` 和其他用户源码 worktree 不在 reset 目标内。
 
-Canvas V2 现在是 daemon 与前端的默认模式。reset 完成后可保留以下显式配置，
-但不再需要依靠前端 flag 才能进入 V2：
-
-```dotenv
-GGAI_CANVAS_MODEL_V2=1
-VITE_GGAI_CANVAS_MODEL_V2=1
-```
-
-daemon 的 `--canvas-model v1|v2` 可覆盖环境选择；V1 只保留给归档恢复诊断，
-前端始终只挂载 V2。V2 模式只接受 command/Task Run 协议；V1 模式只接受旧
-snapshot/Node Run 协议。daemon 不是 V2 时前端停止 hydration，后端返回
-`canvas_model_mismatch`，不会降级写入另一种 schema。
+Canvas V2 是 daemon 与前端唯一的生产模型，不再使用前后端 feature flag 或
+`--canvas-model v1|v2` 选择器。reset marker 缺失、损坏或与 schema 不一致时 daemon
+启动失败，前端停止 hydration 并显示恢复说明；系统不会退回旧 snapshot/Node Run
+协议，也不会读取归档目录。
 
 ## 故障处理
 
@@ -66,4 +58,4 @@ snapshot/Node Run 协议。daemon 不是 V2 时前端停止 hydration，后端�
 - `canvas_v2_reset_interrupted` 或 pending journal：保持现状，重新运行相同的 `--apply` 命令继续。
 - `tracked_reset_target` / `unsafe_managed_path`：修正 Git 跟踪或路径结构后重新预览，禁止用 force 绕过。
 
-归档恢复是人工运维动作：先停止 daemon，再把当前 V2 状态另行保存，然后根据 `reset-journal.json` 逆向移动。应用本身不会自动回退到 V1，也不会混合读取两种 schema。
+归档恢复是人工取证或离线运维动作：先停止 daemon，再把当前 V2 状态另行保存，然后根据 `reset-journal.json` 处理归档。应用本身没有 V1 查看器或回退模式，也不会混合读取两种 schema；不要把归档直接搬回生产路径后启动 V2 daemon。

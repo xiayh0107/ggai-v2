@@ -11,6 +11,13 @@ npm ci
 npm run deps:doctor
 ```
 
+新 checkout 第一次启动前先预览并执行 Canvas V2 初始化。该操作不会迁移 V1，也不会删除旧状态；旧 `.gg/runtime`、Canvas V1 历史/worktree 与 `artifacts` 会整体归档到 `.gg/legacy-v1/<timestamp>/`：
+
+```bash
+npm run canvas:v2:reset -- --project-root "$PWD"
+npm run canvas:v2:reset -- --project-root "$PWD" --apply
+```
+
 日常开发只需一个终端：
 
 ```bash
@@ -46,7 +53,7 @@ npm run daemon -- --port 7380 --project-root /path/to/project \
 npm run daemon -- --project-root "$PWD" --acpx-agent codex --acpx-approval approve-all
 ```
 
-这会把 acpx 自身在该项目目录中的 permission 策略放开；默认 Codex transport 的可写范围仍只包含本 run 的 `.gg/runs/<runId>/` 与 `artifacts/<nodeId>/`。
+这会把 acpx 自身在该项目目录中的 permission 策略放开；默认 Codex transport 的 cwd 仍隔离在本 Run 的 `.gg/runs/<runId>/`，项目根只作为只读引用，另以 `--add-dir` 授权 `artifacts/.branches/<branch-hash>/<runId>/files/`。Canvas V2 不提供旧 `/canvas/source` 绑定协议。
 
 Electron、LaunchAgent 等环境的 PATH 与交互式终端不同时，应显式传入 CLI 路径：
 
@@ -88,9 +95,12 @@ npm run verify        # 上述策略、完整 lint、测试、构建与最小 da
 .gg/context/AGENTS.md
 .gg/context/runs/<runId>/
 .gg/skills/
-.gg/sessions.json
+.gg/runtime/task-sessions-v2.json
+.gg/runtime/plugin-capabilities-v2/<digest>.json
+.gg/runtime/projection-plans/<branch-hash>.json
 .gg/runs/<runId>/
-artifacts/<nodeId>/
+artifacts/.branches/<branch-hash>/<runId>/files/<relative-path>
+artifacts/.branches/<branch-hash>/<runId>/.ggai/artifact-manifest.v1.json
 ```
 
 daemon 不覆盖项目已有的根 `AGENTS.md`。详细协议、安全边界与模块说明见 [docs/AGENT-BACKEND.md](./docs/AGENT-BACKEND.md)，依赖升级和生产 runtime 规则见 [docs/DEPENDENCIES.md](./docs/DEPENDENCIES.md)，画布上下文策略见 [docs/AGENT-ARCHITECTURE.md](./docs/AGENT-ARCHITECTURE.md)。

@@ -15,7 +15,7 @@
 | Artifact 声明 | `artifactClaims` | 必填、纯数据：声明插件接受的扩展名 / MIME 类型与优先级 |
 | V2 内容投影 | `projectArtifact(artifact)` | 可选纯函数：把 daemon 已验证的 artifact identity 与元数据投影为 `title` / `text` / `payload` / `meta` |
 | 创建入口 | `creatable` | 缺省为 `true`；设为 `false` 时仅可承接产物投影，不进入创建菜单或首屏面板 |
-| V1 Run 投影 | `materializeRunResult(node, result)` | cutover 期间保留：把旧版 Agent 文本与产物路径投影为节点内容 |
+| Legacy Run 投影 | `materializeRunResult(node, result)` | 旧插件模块残留字段；V2 UI 与 daemon 不调用 |
 | 演示结果 | `demoResult(node, prompt)` | 原型阶段：指令完成后要合并进节点的补丁；返回 `null` 表示无内容变化 |
 
 ## 引擎为所有插件统一提供
@@ -73,7 +73,7 @@ registerPlugin({
     meta: [mediaType, `${size} B`],
     payload: { artifactRef: { runId, artifactId, contentDigest } },
   }),
-  // V1 兼容路径；V2 cutover 后删除。
+  // Legacy 字段；V2 UI 与 daemon 不调用。
   materializeRunResult: (_node, result) => {
     const videoPath = result.artifactFiles.find((file) => /\.(?:mp4|mov)$/iu.test(file))
     return videoPath ? { payload: { videoPath } } : null
@@ -82,8 +82,11 @@ registerPlugin({
 })
 ```
 
-注册即生效：可创建插件会出现在创建菜单与首屏面板；所有插件都可参与 artifact claim、
-来源小窗、连线和指令面板。只用于展示未知产物的 fallback 插件应设置 `creatable: false`。
+注册后，可创建插件会出现在创建菜单与首屏面板。每次 V2 Run 启动前，浏览器把当前启用的
+community data-only claims 注册给 daemon；daemon 返回固定 registry digest，并把该快照绑定到
+整个 Run。后续插件热更新只影响新 Run，不会改变正在执行或恢复中的 artifact 分类。所有插件
+仍可参与来源小窗、连线和指令面板。只用于展示未知产物的 fallback 插件应设置
+`creatable: false`；community 插件不能声明 `acceptsUnknown`。
 
 ## Artifact contract 边界
 
@@ -99,12 +102,15 @@ matcher 各最多 64 个；`priority` 必须是 `-1000..1000` 的安全整数。
 格式的最低优先级兜底，不需要成为创建菜单中的独立 UI 插件。daemon 只导入这个 `.ts` 数据
 模块，绝不导入 `types.tsx`、`builtins/`、React、Lucide 或任何 renderer。
 
-浏览器只在 daemon 用 manifest 校验 `{ runId, artifactId }` 后，才调用 `projectArtifact`。
+浏览器通过 `PUT /plugin-capabilities/v2` 注册 claims；daemon 合并不可覆盖的内置 registry、
+规范化并按 digest 保存到 `.gg/runtime/plugin-capabilities-v2/<digest>.json`。RunIntent 只引用
+这个 digest；live Run 找不到或不能验证指定快照时拒绝启动，不以另一份 community registry
+替代。浏览器只在 daemon 用 manifest 校验 `{ runId, artifactId }` 后，才调用 `projectArtifact`。
 投影函数接收冻结的 `{ runId, artifactId, mediaType, size, contentDigest, title, url }`，只返回可
 结构化克隆的 `NodeContentPatch`；随后由同一插件的 `views.Artifact` 渲染。`url` 仅供当前浏览器
 读取，不写入 Canvas。投影函数拿不到 entity id、坐标、edges、commands 或 dispatcher，因此
 不能创建节点、决定布局或修改图关系；函数与 renderer 也不会被序列化或传到 daemon。
-V1 的 `materializeRunResult` 在 V2 cutover 完成前仍可并存。
+`materializeRunResult` 仍存在于旧插件类型，但生产 UI 与 daemon 均为 V2-only，不读取它。
 
 ## 约定
 

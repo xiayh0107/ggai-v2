@@ -1,169 +1,166 @@
-# Agent Daemon 后端设计与实现（GGAI 画布）
+# Agent Daemon 后端（Canvas V2）
 
-> 前置阅读：`docs/AGENT-ARCHITECTURE.md`（总分层与上下文工程）。
-> 本文档同时记录当前实现与后续协议期边界。
-> 核心原则：**daemon 很薄——不实现 Agent loop，只做五件事**：
-> 打包落盘 → 启动/恢复 Agent 进程 → 翻译事件 → 监听产物 → 会话记账。
+> 前置阅读：[`AGENT-ARCHITECTURE.md`](./AGENT-ARCHITECTURE.md)、[`CANVAS-V2.md`](./CANVAS-V2.md) 与 [`CANVAS-PERSISTENCE.md`](./CANVAS-PERSISTENCE.md)。
+> daemon 不实现 Agent loop；它负责可信上下文、Run 生命周期、日志、artifact 校验、ProjectionPlan 与持久 command 边界。
 
-## 当前状态（2026-08）
+## 当前运行形态
 
-骨架期已经落地并接入画布默认执行路径：
+- 原生 Node HTTP + SSE 服务，只绑定 `127.0.0.1:7380`；
+- 默认 transport 为本机 `codex exec --json`，acpx 是显式 opt-in 的实验性备选；
+- daemon 与 `/canvas` 前端入口均只运行 Canvas V2；
+- 新项目必须先用 `npm run canvas:v2:reset -- --apply` 写入 V2 marker；
+- V1 snapshot/Node Run/source-binding API 已从生产路由移除，不存在 schema fallback。
 
-- 独立 Node 服务：原生 `http` + SSE，只绑定 `127.0.0.1:7380`
-- 两条 transport：`acpx --format json` 与本机可直接验证的 `codex exec --json`
-- `packContext` 落盘、NodePlugin 文件契约导出、chokidar artifact 对账
-- 节点/Agent 会话原子持久化、resume、acpx 协议级取消，以及 POSIX 进程组 / Windows 进程树兜底清理
-- 精确 Origin/JSON 边界校验、projectRoot 防 traversal/symlink、事件缓存与晚订阅重放
-- 浏览器 `DaemonClient` 与画布 `generating → done/cancel/error` 生命周期接线
-
-运行与验证：
+开发与验证：
 
 ```bash
-npm run dev            # Vite + daemon；daemon 源码变更自动重启
-npm run dev:frontend   # 仅前端，供拆分进程调试
+npm run dev
 npm run test:daemon
 npm run build
 ```
 
-## 一、进程形态
+## 一、核心职责
 
-两种部署形态，同一套代码：
+1. **Canvas command**：执行共享 reducer、revision CAS、exactly-once mutation ledger、语义 revision archive 与 Canvas Git checkpoint。
+2. **Task Run**：严格解析 `RunIntentV2`，从持久 branch/revision 编译上下文，对同 Task 强制单活跃 Run。
+3. **Transport**：启动/恢复/取消 Agent CLI，翻译为统一 `CanvasAgentEvent`，处理进程组清理和 daemon shutdown。
+4. **永久记录**：写 JSONL、分页索引、summary 与终态 close；重启时把未完成 Run 结算为 interrupted。
+5. **Artifact**：只授权本 Run 的 `files/`，durable close 时生成 manifest，并在每次读取时复验路径、size 与 digest。
+6. **可信投影**：校验 `RunOutcomeV2`，与 manifest 和固定插件能力求交集，生成 ProjectionPlan，再通过 daemon-only command 原子物化。
+7. **Task session**：以 `canvasBranch + taskId + agentId` 保存 session，供 Task 内继续执行 resume。
 
-| 形态 | 场景 | 说明 |
-|------|------|------|
-| Electron main | 桌面 App | daemon 作为 Electron 主进程模块，渲染进程即画布 UI，IPC 通信 |
-| 独立本地服务 | 浏览器版 | `ggai-daemon` 后台进程，UI 通过 HTTP + SSE 通信（默认 `127.0.0.1:7380`，只绑回环地址） |
+daemon 不存用户凭证、不监听外网、不让 Agent 直接改 Canvas、不接受浏览器整文档 snapshot，也不让 Agent 声明实体 ID、坐标、payload、自由 Edge 或自动运行 proposal。
 
-技术选型：Node 22.22+ 或 Node 24 LTS / TypeScript。不引入重型框架——原生 `http` + 子进程管理 + 文件监听（`chokidar`）即可。
+## 二、关键模块
 
-## 二、职责清单（做与不做）
-
-**做**：
-1. **上下文落盘**：接收画布快照后调用 `packContext`，写 run-scoped `.gg/context/runs/<runId>/`；另维护 `.gg/context/pack.md` 作为“最近一次”调试视图。项目已有的根 `AGENTS.md` 永不覆盖
-2. **进程管理**：启动 Agent 子进程、设置工作目录与沙箱参数；acpx prompt 先通过 named session 发 cooperative cancel，短时等待后才清理本地客户端，并在客户端不可能再入队后对常驻 queue owner 二次 cancel；ensure 阶段直接清理。相同 cwd、adapter、sessionName 强制单飞，避免会话级 cancel 误伤另一 run；关闭服务时先停止接单再取消全部 run
-3. **事件翻译**：ACP `session/update` / Codex JSONL / plain stdout → `CanvasAgentEvent`，经 SSE（或 IPC）推给 UI
-4. **产物与结果对账**：`chokidar` 只监听当前 run 的不可变产物目录，文件写入 → `file-write` 事件（带 nodeId）→ UI 更新节点 payload 与 `phase: done`；成功结束时从私有 `.ggai/` 控制目录安全读取可选的有界 `RunOutcome`，该目录不进入 watcher、artifact snapshot 或预览接口
-5. **会话记账**：`sessions.json` 持久化 `节点 ↔ Agent sessionId` 映射，供 resume
-
-**不做**：
-- 不实现模型调用、工具循环、上下文窗口管理（那是 Agent CLI 的事）
-- 不存用户凭证；只跑 `<cli> login status` 类探针
-- 不直接改画布状态（状态唯一事实源是前端 store；daemon 只发事件，UI 决定如何对账）
-- 不监听外网端口、不做多用户（单机单用户，权限边界即本机用户）
-
-## 三、模块结构
-
-```
+```text
 daemon/
-├── index.ts            # 入口：HTTP/SSE 或 Electron IPC 装配
-├── server.ts           # HTTP/CORS/JSON/SSE 边界
-├── protocol.ts         # wire DTO 与运行时校验
-├── runs.ts             # run 生命周期、事件缓存、取消与最终状态
-├── registry.ts         # Agent 探测：PATH spawn + login status 探针
-├── transport/
-│   ├── acpx.ts         # spawn acpx --format json（快速落地备选）
-│   ├── codex.ts        # codex exec --json / resume
-│   ├── process.ts      # stdio、AbortSignal、SIGTERM/SIGKILL 兜底
-│   └── types.ts        # 后端 transport 契约
-├── translator.ts       # 各协议事件 → CanvasAgentEvent
-├── packer.ts           # 复用 src/agent/context.ts：落盘 .gg/context/ 与 .gg/skills/
-├── watcher.ts          # artifacts/ 文件监听 → file-write 事件
-├── outcome.ts          # 可选 RunOutcome sidecar 的安全、有界读取与校验
-├── sessions.ts         # 会话映射持久化（sessions.json）
-└── permissions.ts      # 权限策略：路径白名单 / 命令分级 / 网络开关
+├── server.ts                       # V2 HTTP/CORS/SSE 边界
+├── runs.ts                         # Run 生命周期、并发租约、取消、恢复与结算
+├── runLogs.ts                      # durable JSONL / index / summary / close
+├── canvasCommandProtocolV2.ts      # command 与 conflict journal 严格 wire parser
+├── canvasCommandStoreV2.ts         # revision CAS、mutation ledger、revision archive
+├── workspaceVersioningV2.ts        # checkpoint、分支、恢复、merge、冲突分支
+├── canvasGitV2.ts                  # 规范化 V2 Canvas Git/worktree
+├── taskRunProtocolV2.ts            # RunIntentV2 parser
+├── taskSessionsV2.ts               # Task-owned session store
+├── runArtifactStorageV2.ts         # Run-owned files/manifest/lookup
+├── outcomeV2.ts                    # 受限 Agent sidecar reader
+├── projectionPlanV2.ts             # outcome × manifest × claims
+├── projectionPlanStoreV2.ts        # durable pending/dismissed plan
+├── pluginCapabilitiesV2.ts         # 固定、内容寻址的插件能力快照
+├── packer.ts                       # Task/typed-edge 上下文包
+├── translator.ts                   # transport event → CanvasAgentEvent
+├── permissions.ts                  # project、path、command 安全边界
+└── transport/                      # Codex / acpx / process adapter
 ```
 
-`transport/` 下每个文件实现同一个接口——就是前端 `src/agent/runtime.ts` 里已定义的 `AgentTransport`，前后端共享这一份契约。新增 Agent 的常规工作量 = 在 ACP Registry 里已有则零代码，全新协议才加一个 transport。
-
-## 四、API 面（独立服务形态）
+## 三、V2 HTTP 面
 
 | 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/agents` | 探测到的 Agent 列表（available / authStatus / models），并行探测、故障隔离 |
-| GET | `/health` | 健康状态与 daemon projectRoot |
-| POST | `/runs` | 发起执行。body: `{ runId?, nodeId, agentId, prompt, projectDir, canvasSnapshot }`；客户端可预分配 `runId` 以消除取消窗口，同 id 重试幂等 |
-| GET | `/runs/:id/events` | SSE 事件流（`CanvasAgentEvent` 序列） |
-| GET | `/runs/:id` | 查询 run 状态 |
-| POST | `/runs/:id/cancel` | 取消并等待 run 进入终态后响应，保证同节点可立即安全重跑 |
-| GET | `/artifacts?projectDir=&path=` | 在项目边界内读取 `artifacts/` 产物；拒绝 traversal / symlink escape，文本预览上限 1 MiB、其他文件 100 MiB |
-| POST | `/permissions/:id` | UI 回传权限裁决（allow/deny） |
-| GET | `/sessions?nodeId=` | 查会话（调试用） |
+| --- | --- | --- |
+| GET | `/health` | 返回 Canvas model、schema、reset 状态和 V2 能力 |
+| GET | `/agents` | 探测允许的本地 Agent CLI |
+| GET | `/canvas/v2?projectDir=&branch=` | 读取 Canvas V2 envelope |
+| POST | `/canvas/commands?projectDir=` | `{ branch, baseRevision, mutationId, command }` |
+| POST | `/canvas/conflicts?projectDir=` | 从 daemon-owned revision 重放 outbox 到新分支 |
+| GET/POST | `/canvas/branches` | 列表与新建分支；DELETE 当前显式返回 405，历史不被丢弃 |
+| GET | `/canvas/status`、`/canvas/history` | 版本状态与 checkpoint 历史 |
+| POST | `/canvas/checkpoints`、`/canvas/restores` | 手动 checkpoint、恢复到新分支 |
+| POST | `/canvas/merges/preview`、`/canvas/merges` | 语义 merge 预览与确认执行 |
+| PUT | `/plugin-capabilities/v2?projectDir=` | 注册 community data-only claims，返回固定 digest |
+| POST | `/runs?projectDir=&pluginCapabilityDigest=` | 启动严格 `RunIntentV2`；成功为 HTTP 202 |
+| GET | `/runs?projectDir=&taskId=&branch=` | 查询 Task Run 历史 |
+| GET | `/runs/:id`、`/runs/:id/log` | Run summary 与永久日志分页 |
+| GET | `/runs/:id/events` | durable-id SSE；支持 `Last-Event-ID` |
+| POST | `/runs/:id/cancel` | 取消并等待进入终态 |
+| GET | `/projection-plans/:planId?projectDir=&branch=` | 读取 pending 可信计划 |
+| GET | `/runs/:runId/artifacts/:artifactId` | 读取 manifest-backed bytes |
+| GET | `/runs/:runId/artifacts/:artifactId/metadata` | 读取 verified MIME/size/digest |
 
-Electron 形态下同样的操作映射为 IPC channel，前端调用层封装成同一个 `DaemonClient` 接口，两种形态可互换。
+`MaterializeProjectionPlan`、`AcceptTaskProposals` 和 `DismissPlan` 在浏览器 wire 上只携带 `planId` 与受限选择/编辑字段。server 从 plan store 取 daemon-owned 完整计划，再交给 reducer。`DELETE /runs/:id/log` 在 V2 返回 405 `run_log_delete_unsupported`。
 
-## 五、一次执行的完整时序
+旧 `/canvas` GET/PUT、`/artifacts?path=`、Node session 和 `/canvas/source*` 不属于 V2 API；客户端不能通过这些路径绕过 command、Task session 或 manifest-backed artifact 边界。
 
+## 四、一次 Task Run 的时序
+
+```text
+browser outbox ──flush──> POST /canvas/commands
+       │
+       └─> PUT /plugin-capabilities/v2 ──> digest
+                                             │
+POST /runs RunIntentV2 + digest               │
+       │                                      │
+       ▼                                      │
+daemon 从 branch/revision 读取 Task + typed-edge inputs
+       │
+       ├─> .gg/context/runs/<runId>/pack.{md,json}
+       ├─> 固定 plugin-capabilities.v2.json
+       ├─> 查 task session，spawn/resume transport
+       ├─> durable event log ──SSE──> ghost progress / permission UI
+       └─> Agent 写 artifacts/.../<runId>/files/
+                                      │
+                                      ▼ durable close
+                 ArtifactManifest + optional RunOutcomeV2
+                                      │
+                                      ▼
+                           trusted ProjectionPlan
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    ▼                                   ▼
+             auto materialize                  proposal review only
+             Node/Edge/receipt                 user confirm → draft Task
 ```
-UI(指令面板执行)
-  │ POST /runs { nodeId, agentId, prompt, canvasSnapshot }
-  ▼
-daemon.packer     → packContext() → 写 .gg/context/runs/<runId>/ + run-scoped skills
-daemon.sessions   → 查 sessionId（有则 resume）
-daemon.transport  → spawn: acpx named-session ensure + prompt / codex exec --json
-  │
-  ├─ Agent stdout ─→ translator ─→ SSE ─→ UI：节点 generating，进度文字
-  ├─ Agent 写 branch/run 隔离的 artifactDir/x.png ─→ watcher ─→ file-write ─→ UI 记录路径
-  ├─ Agent 请求权限 ─→ permission-request（ACP SDK transport 上线后可交互回传）
-  └─ 结束 ─→ translator: done ─→ sessions.ts 记账 ─→ 成功时读取可选 RunOutcome
-                                              └─ close 携完整 artifact snapshot + outcome?
-                                              └─ UI 以 close 为终点，对账后经 GET /artifacts 渲染正文/图片
+
+`file-write` 不是 Node 创建凭证。只有 durable close 之后 verified artifact 才能物化。error、cancelled、interrupted Run 的合法文件进入 partial plan；这些终态不采用 task proposal。
+
+## 五、Artifact 与插件能力
+
+物理布局固定为：
+
+```text
+artifacts/.branches/<branch-hash>/<runId>/
+├── files/<relative-path>
+├── files/.ggai/run-result.json          # Agent 可选 control sidecar；不投影
+└── .ggai/artifact-manifest.v1.json      # daemon 写入；不可变
 ```
 
-`RunOutcome` 不建立第二套消息系统。Agent 只写一个严格 JSON sidecar；daemon 根据当前
-run 的 `artifactDir` 读取，因此身份由 daemon 的 `close.runId` 与 `RunSummary.nodeId`
-绑定，不接受 Agent 自报的 run/node 字段。sidecar 缺失、损坏、超限、未知版本或经
-symlink 重定向时一律视为“无 outcome”，不改变主任务的成功状态。错误和取消的
-`close` 永不携带 outcome。`close` 仍写入永久 JSONL，因此同一字段天然支持刷新重放；
-旧版不含 outcome 的 close 继续有效。
+manifest entry 保存 `artifactId`、normalized relative path、MIME、size 和 content digest。`.ggai`、临时文件、symlink、hardlink/foreign file、socket/device 与 traversal 永不进入 manifest。读取 API 从 manifest 反查，并再次执行 no-follow、realpath、inode/size/digest 检查。
 
-## 六、权限与安全
+浏览器只注册 community data-only claims；daemon-owned built-in registry 不能被覆盖，只有内置 `file` fallback 可以接收 unknown artifact。规范化 registry 按 digest 保存到 `.gg/runtime/plugin-capabilities-v2/`。live Run 指定的 digest 缺失或损坏时拒绝启动；crash recovery 最多降级使用内置 claims，不信任无法恢复的 community 分类。
 
-daemon 启动的是一个能写文件、跑命令、联网的本机进程，必须分级：
+## 六、持久化布局
 
-1. **项目边界**：所有 `projectDir` 必须 canonical resolve 在启动参数 `--project-root` 内；拒绝 traversal、symlink escape 与恶意节点路径
-2. **Codex 写白名单**：源码未绑定时主 cwd 是 `.gg/runs/<runId>` 且项目源码只读；仅用 `--add-dir` 授权当前不可变 artifactDir。显式绑定后 cwd 切到对应的受管 source worktree。
-3. **路径/命令策略**：`permissions.ts` 已实现 artifact/`.gg` 判定，以及允许/确认/危险命令三级分类；写入项目依赖的 install/add/ci 命令在快速开发阶段直接允许，`npx`/`bunx`/`dlx` 一次性下载执行仍需确认，破坏性系统操作仍拒绝，并为 ACP SDK 的 permission bridge 提供纯策略层
-4. **acpx 一期边界**：acpx 默认禁用，必须以 `--acpx-agent` / `GGAI_ACPX_AGENTS` 显式 opt-in。启用后使用 `--cwd <projectDir>`、`--json-strict` 与 `--non-interactive-permissions fail`；每次执行先 `sessions ensure --name <stableName>`，再向该命名会话发送 prompt，同一会话禁止并发。取消走 `cancel -s <stableName>`，确认本地客户端关闭后再 cancel 一次常驻 owner。默认 `approve-reads`，只有操作者显式传 `--acpx-approval approve-all` 才放开非交互写入。细粒度 UI permission round-trip 尚未接 ACP SDK；`POST /permissions/:id` 会明确返回 `501 permission_bridge_unavailable`，不会假装已转发
-5. **HTTP 边界**：只绑回环地址；daemon 默认只接受端口 3000 的 localhost/127.0.0.1 Origin，一体开发启动器会根据 Vite 的 `--host` / `--port` 精确追加本次 Origin，手动拆分时额外来源仍必须显式 `--allow-origin`；限制 Content-Type、请求体大小、图规模、并发 run 数与单 run 订阅数；SSE 支持 `Last-Event-ID` 有界重放；产物读取只允许 canonical path 位于当前项目 `artifacts/` 下，并设置 `nosniff`、CSP 与大小上限
-6. **凭证**：只运行 CLI 自身的登录状态探针，daemon 不读取、不复制、不持久化 key/OAuth 数据
-
-## 七、持久化文件
-
-```
+```text
 project/
 ├── .gg/
-│   ├── runtime/canvas/<branch-hash>/snapshot.json # 当前画布事实源（revision CAS）
-│   ├── runtime/runs/<runId>/events.jsonl           # 永久运行事件
-│   ├── runtime/runs/<runId>/events.idx             # 固定宽度分页索引
-│   ├── runtime/runs/<runId>/summary.json           # 可恢复的运行摘要
-│   ├── runtime/canvas-daemon.lock                  # 项目单写者 lease
-│   ├── runtime/preferences.json                    # 项目级自动化偏好
-│   ├── canvas-state/       # 独立画布 Git 历史（不依赖源码 Git）
-│   ├── canvas-worktrees/   # daemon 锁定的画布分支 worktree
-│   ├── source-worktrees/   # 显式绑定后创建的源码分支 worktree
-│   ├── context/pack.md      # 最近一次上下文包（每次执行覆盖，历史进版本）
-│   ├── context/pack.json    # 同一上下文的机器可读形态
-│   ├── context/AGENTS.md    # 最近一次调试视图（契约仍指向具体 run）
-│   ├── context/runs/<runId>/# 每个并发 run 的隔离上下文与 skills
-│   ├── skills/              # 从 NodePlugin 注册表导出的类型契约 Markdown
-│   ├── runs/<runId>/        # Codex 沙箱的最小主工作目录
-│   └── sessions.json        # { "branch:nodeId:agentId": { sessionId, createdAt, lastActiveAt } }
-└── artifacts/.branches/<branch-hash>/<runId>/<nodeId>/  # 新运行的不可变产物
-    └── .ggai/run-result.json # Agent 写、daemon 校验的私有控制 sidecar；不作为 artifact 暴露
+│   ├── canvas-model.json
+│   ├── runtime/
+│   │   ├── canvas-v2/<branch-hash>/snapshot.json
+│   │   ├── canvas-v2/<branch-hash>/revisions/<revision>.json
+│   │   ├── runs/<runId>/{events.jsonl,events.idx,summary.json}
+│   │   ├── projection-plans/<branch-hash>.json
+│   │   ├── plugin-capabilities-v2/<digest>.json
+│   │   ├── task-sessions-v2.json
+│   │   └── canvas-daemon.lock
+│   ├── canvas-state-v2/                  # 独立 Canvas Git
+│   ├── canvas-worktrees-v2/              # daemon 锁定 worktree
+│   ├── context/runs/<runId>/              # 不可变 Run 上下文
+│   ├── context/{pack.md,pack.json,AGENTS.md} # 最近一次调试视图
+│   └── runs/<runId>/                      # Codex 最小隔离 cwd
+└── artifacts/.branches/<branch-hash>/<runId>/
 ```
 
-完整保存顺序、刷新重连、分支与恢复语义见 `docs/CANVAS-PERSISTENCE.md`。`.gg/` 是 daemon 管理的持久状态，不是可随构建目录一起删除的缓存。
+`.gg/` 与 `artifacts/` 是 daemon-managed persistent state，不是构建缓存；不得手工修改或作为普通 build output 删除。
 
-## 八、落地顺序（三期）
+## 七、安全与故障边界
 
-1. **骨架期（已完成）**：acpx/Codex transport + SSE + watcher + DaemonClient，真实节点执行闭环。
-2. **协议期（下一步）**：加 ACP SDK transport，接 ACP Registry 做 Agent 发现/安装；把现有权限策略接到交互式 permission response。
-3. **体验期**：当前已有并发上限、分支运行租约、永久执行日志和画布版本摘要；后续加入可视队列、大历史时间索引/可达性 GC，以及资源面板里的"计算集群/服务器"远程 daemon。
+1. 所有 `projectDir` 必须 canonical resolve 在 `--project-root` 内；拒绝 traversal 和 symlink component。
+2. daemon 与 reset 共享维护栅栏；项目 lease 防止两个 daemon 各自通过进程内 CAS 后互相覆盖。
+3. HTTP 只绑定回环地址，Origin 精确 allow-list，JSON/查询参数/图规模/订阅数均有边界。
+4. V2 source resolver 只校验 branch/lease 并返回空 source cwd；Codex 因此在 `.gg/runs/<runId>` 的最小 cwd 中执行，项目根只作为 prompt 中的只读引用，另以 `--add-dir` 授权该 Run 的 `files/`。
+5. acpx 默认禁用；启用后 named session 强制单飞，取消先 cooperative cancel，再清理本地进程。
+6. daemon 只调用 CLI 登录探针，不读取、复制或持久化 token/key。
+7. outcome 或 community plugin snapshot 不是权限凭证；无效输入失败关闭或安全降级，不能扩大文件或 Canvas 写权限。
 
-## 九、风险与取舍
-
-- **ACP/acpx 均在 pre-1.0**：接口可能变。用 `transport/` 目录隔离，变化只波及一个文件；acpx 只做备选，协议底座押 ACP SDK。
-- **acpx 跨进程队列边界**：公开 CLI 的 cancel 针对 session 当前 turn，不能按 request id 删除其他进程已提交的 pending 请求。进程内单飞、client-close 后二次 cancel 已封闭正常竞态；非正常 daemon 崩溃或外部共用 GGAI session 仍需人工清理遗留 owner，因此 acpx 不作为默认生产 transport。
-- **外部 CLI 能力门禁**：Codex/acpx 不作为项目 npm 依赖。入口支持 `--codex-command` / `--acpx-command`（及对应环境变量），registry 记录解析后的绝对路径并检查 transport 所需 flags、所选 approval 模式、配置的 adapter、named-session ensure、prompt 与 session cancel 参数；不兼容版本不会进入 run。
-- **plain-text Agent**：只能出文本的 CLI 降级为"约定 `<artifact>` 标签 + 结束后扫描落盘"，体验分级展示，不假装支持完整能力（对应调研第八节）。
-- **Electron 暂缓**：先把独立服务形态做稳，桌面化时 daemon 代码整体平移进 main 进程。
+V2 不迁移 V1 数据。首次切换按 [`CANVAS-V2-RESET.md`](./CANVAS-V2-RESET.md) 归档旧 runtime、Canvas Git/worktree 与 artifacts，再初始化全新 V2 marker 和事实源。
