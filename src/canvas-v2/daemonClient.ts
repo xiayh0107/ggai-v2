@@ -29,6 +29,27 @@ export interface CanvasV2CommandRequest {
   command: CanvasCommandWireV2
 }
 
+export const MAX_CANVAS_V2_CONFLICT_MUTATIONS = 500
+
+export interface CanvasV2ConflictMutationInput {
+  mutationId: string
+  command: CanvasCommandV2
+}
+
+export interface CanvasV2SaveConflictBranchInput {
+  sourceBranch: string
+  newBranch: string
+  baseRevision: number
+  mutations: readonly CanvasV2ConflictMutationInput[]
+}
+
+export interface CanvasV2SaveConflictBranchResult {
+  sourceBranch: string
+  newBranch: string
+  baseRevision: number
+  canvas: CanvasV2Envelope
+}
+
 export type CanvasV2TaskProposalEditWire = TaskProposalEditV2
 export type CanvasV2TaskProposalEditsWire = TaskProposalEditsV2
 
@@ -214,6 +235,77 @@ export class CanvasV2DaemonClient {
       await readJson(response, 'POST /canvas/commands response'),
       scope.branch,
     )
+  }
+
+  async saveConflictBranch(
+    scope: CanvasV2CanvasScope,
+    input: CanvasV2SaveConflictBranchInput,
+  ): Promise<CanvasV2SaveConflictBranchResult> {
+    if (!scope.projectDir.trim()) {
+      throw new CanvasV2ProtocolError('Conflict branch scope requires projectDir')
+    }
+    const sourceBranch = assertCanvasBranch(input.sourceBranch)
+    const newBranch = assertCanvasBranch(input.newBranch)
+    if (sourceBranch !== scope.branch) {
+      throw new CanvasV2ProtocolError('Conflict source branch does not match Canvas scope')
+    }
+    if (sourceBranch === newBranch) {
+      throw new CanvasV2ProtocolError('Conflict branch must differ from its source branch')
+    }
+    if (!isRevision(input.baseRevision)) {
+      throw new CanvasV2ProtocolError('Conflict base revision is invalid')
+    }
+    if (input.mutations.length === 0
+      || input.mutations.length > MAX_CANVAS_V2_CONFLICT_MUTATIONS) {
+      throw new CanvasV2ProtocolError(
+        `Conflict branch requires 1-${MAX_CANVAS_V2_CONFLICT_MUTATIONS} mutations`,
+      )
+    }
+    const mutationIds = new Set<string>()
+    const mutations = input.mutations.map((mutation) => {
+      if (!isMutationId(mutation.mutationId) || mutationIds.has(mutation.mutationId)) {
+        throw new CanvasV2ProtocolError('Conflict mutation id is invalid or duplicated')
+      }
+      mutationIds.add(mutation.mutationId)
+      return {
+        mutationId: mutation.mutationId,
+        command: serializeCanvasCommandV2(mutation.command),
+      }
+    })
+    const url = new URL('/canvas/conflicts', `${this.#baseUrl}/`)
+    url.searchParams.set('projectDir', scope.projectDir)
+    const response = await this.#fetch(url, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        sourceBranch,
+        newBranch,
+        baseRevision: input.baseRevision,
+        mutations,
+      }),
+    })
+    if (!response.ok) throw await decodeHttpError(response, 'POST /canvas/conflicts')
+    if (response.status !== 201) {
+      throw new CanvasV2ProtocolError('POST /canvas/conflicts must return HTTP 201')
+    }
+    const value = await readJson(response, 'POST /canvas/conflicts response')
+    if (!isExactRecord(value, [
+      'sourceBranch', 'newBranch', 'baseRevision', 'canvas',
+    ])
+      || value.sourceBranch !== sourceBranch
+      || value.newBranch !== newBranch
+      || value.baseRevision !== input.baseRevision) {
+      throw new CanvasV2ProtocolError('Conflict branch response is invalid')
+    }
+    return {
+      sourceBranch,
+      newBranch,
+      baseRevision: input.baseRevision,
+      canvas: parseCanvasV2Envelope(value.canvas, newBranch),
+    }
   }
 
   /**
@@ -417,6 +509,32 @@ function normalizeBaseUrl(value: string): string {
 
 function isRevision(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0
+}
+
+function assertCanvasBranch(value: unknown): string {
+  if (typeof value !== 'string'
+    || value.length === 0
+    || value.length > 120
+    || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(value)
+    || value.includes('..')
+    || value.includes('//')
+    || value.endsWith('/')
+    || value.endsWith('.')
+    || value.endsWith('.lock')
+    || value.split('/').some((segment) => segment === '.' || segment.endsWith('.'))) {
+    throw new CanvasV2ProtocolError('Canvas branch is invalid')
+  }
+  return value
+}
+
+function isMutationId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256
+}
+
+function isExactRecord(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  return isRecord(value)
+    && Object.keys(value).length === keys.length
+    && keys.every((key) => Object.hasOwn(value, key))
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

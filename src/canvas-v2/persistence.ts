@@ -34,6 +34,7 @@ export interface CanvasV2CommandLike {
 export interface CanvasV2OutboxEntry<Command extends CanvasV2CommandLike = CanvasCommandV2> {
   branch: string
   baseRevision: number
+  readonly initialBaseRevision: number
   mutationId: string
   command: Command
   createdAt: number
@@ -177,6 +178,7 @@ export class CanvasV2Persistence<Command extends CanvasV2CommandLike = CanvasCom
     const entry: CanvasV2OutboxEntry<Command> = {
       branch: scope.branch,
       baseRevision: input.baseRevision,
+      initialBaseRevision: input.baseRevision,
       mutationId: input.mutationId,
       command: decodedCommand,
       createdAt: finiteTimestamp(input.createdAt ?? this.#now()),
@@ -222,6 +224,27 @@ export class CanvasV2Persistence<Command extends CanvasV2CommandLike = CanvasCom
       entry: clone(entry),
     })))
     return rebased
+  }
+
+  async replaceOutbox(
+    scope: CanvasV2PersistenceScope,
+    entries: readonly CanvasV2OutboxEntry<Command>[],
+  ): Promise<void> {
+    const scopeKey = canvasV2ScopeKey(scope)
+    const decoded = entries.map((entry) => decodeOutboxEntry(
+      clone(entry),
+      scope.branch,
+      this.#decodeCommand,
+    ))
+    if (decoded.some((entry) => entry === null)) {
+      throw new TypeError('Canvas V2 replacement outbox is invalid')
+    }
+    await this.#adapter.replaceOutbox(scopeKey, (decoded as CanvasV2OutboxEntry<Command>[])
+      .map((entry) => ({
+        key: canvasV2OutboxKey(scope, entry.mutationId),
+        scopeKey,
+        entry: clone(entry),
+      })))
   }
 
   async clearBranch(scope: CanvasV2PersistenceScope): Promise<void> {
@@ -458,20 +481,38 @@ function decodeOutboxEntry<Command extends CanvasV2CommandLike>(
   branch: string,
   decodeCommand: (value: unknown) => Command | null,
 ): CanvasV2OutboxEntry<Command> | null {
-  if (!isExactRecord(value, ['branch', 'baseRevision', 'mutationId', 'command', 'createdAt'])
-    || value.branch !== branch
-    || !isRevision(value.baseRevision)
+  if (!isRecord(value)) return null
+  const legacy = hasExactKeys(
+    value,
+    ['branch', 'baseRevision', 'mutationId', 'command', 'createdAt'],
+  )
+  const current = hasExactKeys(
+    value,
+    ['branch', 'baseRevision', 'initialBaseRevision', 'mutationId', 'command', 'createdAt'],
+  )
+  if (!legacy && !current) return null
+  const baseRevision = value.baseRevision
+  const initialBaseRevision = current ? value.initialBaseRevision : baseRevision
+  if (value.branch !== branch
+    || !isRevision(baseRevision)
+    || !isRevision(initialBaseRevision)
     || !isMutationId(value.mutationId)
     || !isTimestamp(value.createdAt)) return null
   const command = decodeCommand(value.command)
   if (!command) return null
   return {
     branch,
-    baseRevision: value.baseRevision,
+    baseRevision,
+    initialBaseRevision,
     mutationId: value.mutationId,
     command: clone(command),
     createdAt: value.createdAt,
   }
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).length === keys.length
+    && keys.every((key) => Object.hasOwn(value, key))
 }
 
 function defaultDecodeCommand<Command extends CanvasV2CommandLike>(value: unknown): Command | null {

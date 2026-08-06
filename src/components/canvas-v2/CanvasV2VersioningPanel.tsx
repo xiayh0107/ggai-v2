@@ -27,6 +27,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import type { CanvasV2StoreState } from '@/canvas-v2/store'
+import type { CanvasV2SaveConflictBranchResult } from '@/canvas-v2/daemonClient'
 import type {
   CanvasV2HistoryEntry,
   CanvasV2VersionBranch,
@@ -38,6 +39,7 @@ import type {
 
 export interface CanvasV2VersioningFlushStore {
   flushCommands(): Promise<void>
+  saveConflictAsBranch(newBranch: string): Promise<CanvasV2SaveConflictBranchResult>
   getSnapshot(): Pick<CanvasV2StoreState, 'commandSync'>
 }
 
@@ -74,6 +76,7 @@ type BusyOperation =
   | 'restore'
   | 'preview'
   | 'merge'
+  | 'save-conflict'
   | null
 
 export default function CanvasV2VersioningPanel({
@@ -97,8 +100,15 @@ export default function CanvasV2VersioningPanel({
   const [restoreDraft, setRestoreDraft] = useState<RestoreDraft | null>(null)
   const [mergeSource, setMergeSource] = useState('')
   const [mergePreview, setMergePreview] = useState<CanvasV2WorkspaceMergePreview | null>(null)
+  const [conflictBranchDraft, setConflictBranchDraft] = useState<string | null>(null)
+  const [conflictBranchError, setConflictBranchError] = useState<string | null>(null)
 
   const scope = useMemo(() => ({ projectDir }), [projectDir])
+  const commandSync = store.getSnapshot().commandSync
+  const commandConflict = commandSync.status === 'conflict' ? commandSync.conflict : null
+  const conflictBranchIssue = conflictBranchDraft === null
+    ? null
+    : validateConflictBranch(conflictBranchDraft, branch)
   const mergeSources = branches.filter((candidate) => candidate.name !== branch)
   const mutationsDisabled = busy !== null || status?.state === 'degraded'
 
@@ -355,6 +365,32 @@ export default function CanvasV2VersioningPanel({
     }
   }
 
+  const openConflictBranch = () => {
+    clearFeedback()
+    setConflictBranchError(null)
+    setConflictBranchDraft(defaultConflictBranchName(branch, commandConflict?.mutationId ?? 'local'))
+  }
+
+  const saveConflictBranch = async () => {
+    if (conflictBranchDraft === null) return
+    const issue = validateConflictBranch(conflictBranchDraft, branch)
+    if (issue) {
+      setConflictBranchError(issue)
+      return
+    }
+    setBusy('save-conflict')
+    setConflictBranchError(null)
+    try {
+      const result = await store.saveConflictAsBranch(conflictBranchDraft.trim())
+      setConflictBranchDraft(null)
+      onNavigateBranch(result.newBranch)
+    } catch (cause) {
+      setConflictBranchError(`保存冲突分支失败：${errorMessage(cause)}`)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   return (
     <>
       <Dialog open onOpenChange={(open) => {
@@ -374,6 +410,33 @@ export default function CanvasV2VersioningPanel({
           </DialogHeader>
 
           <div className="grid gap-5 px-6 py-5 md:grid-cols-2">
+            {commandConflict && (
+              <section
+                aria-labelledby={`${headingId}-command-conflict`}
+                className="rounded-[12px] border border-amber-300 bg-amber-50 p-4 md:col-span-2"
+              >
+                <div className="flex flex-wrap items-start gap-3">
+                  <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-700" />
+                  <div className="min-w-0 flex-1">
+                    <h2 id={`${headingId}-command-conflict`} className="text-[13px] font-semibold text-amber-900">
+                      本地命令与远端分支冲突
+                    </h2>
+                    <p className="mt-1 text-[11px] leading-5 text-amber-800">
+                      {commandConflict.message}。{commandSync.pendingCount} 条本地命令仍安全保留；可将它们保存到新分支后继续。
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busy !== null}
+                    onClick={openConflictBranch}
+                    className="rounded-[9px] bg-amber-700 px-3 py-2 text-[11px] font-semibold text-white disabled:opacity-45"
+                    data-testid="versioning-open-conflict-branch"
+                  >
+                    保存到冲突分支…
+                  </button>
+                </div>
+              </section>
+            )}
             <section aria-labelledby={`${headingId}-status`} className="space-y-3">
               <div className="flex items-center justify-between">
                 <h2 id={`${headingId}-status`} className="text-[13px] font-semibold">当前状态</h2>
@@ -644,6 +707,59 @@ export default function CanvasV2VersioningPanel({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <AlertDialog open={conflictBranchDraft !== null} onOpenChange={(open) => {
+        if (!open && busy !== 'save-conflict') {
+          setConflictBranchDraft(null)
+          setConflictBranchError(null)
+        }
+      }}>
+        <AlertDialogContent className="border-amber-300 bg-gg-node text-gg-ink">
+          <AlertDialogHeader>
+            <AlertDialogTitle>保存本地命令到冲突分支</AlertDialogTitle>
+            <AlertDialogDescription className="text-gg-muted">
+              daemon 将从冲突前的原始修订重放当前 FIFO 命令，不会上传或覆盖整个画布快照。成功后将切换到新分支。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <label className="text-[12px] font-medium" htmlFor={`${headingId}-conflict-branch`}>
+            新分支名称
+          </label>
+          <input
+            id={`${headingId}-conflict-branch`}
+            value={conflictBranchDraft ?? ''}
+            onChange={(event) => {
+              setConflictBranchDraft(event.target.value)
+              setConflictBranchError(null)
+            }}
+            maxLength={120}
+            aria-invalid={conflictBranchIssue ? 'true' : 'false'}
+            aria-describedby={`${headingId}-conflict-branch-help`}
+            className="h-9 rounded-[10px] border border-gg-line px-3 text-[12px] outline-none focus:border-gg-primary"
+            data-testid="versioning-conflict-branch"
+          />
+          <div id={`${headingId}-conflict-branch-help`} aria-live="polite" className="min-h-5 text-[11px]">
+            {conflictBranchError ? (
+              <p role="alert" className="text-red-700">{conflictBranchError}</p>
+            ) : conflictBranchIssue ? (
+              <p className="text-amber-700">{conflictBranchIssue}</p>
+            ) : (
+              <p className="text-gg-muted">允许字母、数字、点、短横线、下划线和斜杠，最长 120 个字符。</p>
+            )}
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy === 'save-conflict'}>取消</AlertDialogCancel>
+            <button
+              type="button"
+              disabled={busy === 'save-conflict' || conflictBranchIssue !== null}
+              onClick={() => void saveConflictBranch()}
+              className="rounded-[9px] bg-amber-700 px-4 py-2 text-[13px] font-medium text-white disabled:opacity-45"
+              data-testid="versioning-confirm-conflict-branch"
+            >
+              {busy === 'save-conflict' ? '保存中…' : '保存到冲突分支'}
+            </button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   )
 }
@@ -686,4 +802,27 @@ function deduplicateHistory(entries: CanvasV2HistoryEntry[]): CanvasV2HistoryEnt
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function validateConflictBranch(value: string, sourceBranch: string): string | null {
+  const branch = value.trim()
+  if (!branch) return '请输入新分支名称。'
+  if (branch === sourceBranch) return '冲突分支必须与当前分支不同。'
+  if (branch.length > 120
+    || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(branch)
+    || branch.includes('..')
+    || branch.includes('//')
+    || branch.endsWith('/')
+    || branch.endsWith('.')
+    || branch.endsWith('.lock')
+    || branch.split('/').some((segment) => segment === '.' || segment.endsWith('.'))) {
+    return '分支名称格式无效。'
+  }
+  return null
+}
+
+function defaultConflictBranchName(sourceBranch: string, mutationId: string): string {
+  const source = sourceBranch.replace(/[^A-Za-z0-9._-]+/gu, '-').replace(/^-+|-+$/gu, '')
+  const suffix = mutationId.replace(/[^A-Za-z0-9]+/gu, '').slice(-8) || 'local'
+  return `conflict/${source || 'canvas'}-${suffix}`.slice(0, 120).replace(/[./]+$/gu, '')
 }

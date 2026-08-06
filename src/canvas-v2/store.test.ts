@@ -422,4 +422,221 @@ describe('Canvas V2 store', () => {
     expect((await subjectPersistence.list(persistenceScope)).map((entry) => entry.mutationId))
       .toEqual(['mutation-conflict'])
   })
+
+  it('saves a conflicted FIFO from its immutable initial base and moves live view state', async () => {
+    const subjectPersistence = persistence()
+    await subjectPersistence.enqueue(persistenceScope, {
+      baseRevision: 4,
+      mutationId: 'mutation-a',
+      command: updateGoal('Local A'),
+    })
+    await subjectPersistence.enqueue(persistenceScope, {
+      baseRevision: 5,
+      mutationId: 'mutation-b',
+      command: updateGoal('Local B'),
+    })
+    const saveConflictBranch = vi.fn<NonNullable<CanvasV2StoreClient['saveConflictBranch']>>(
+      async (_scope, input) => ({
+        sourceBranch: input.sourceBranch,
+        newBranch: input.newBranch,
+        baseRevision: input.baseRevision,
+        canvas: {
+          ...envelope(documentWithTask('Local B'), 11),
+          branch: input.newBranch,
+          lastMutationId: 'mutation-b',
+        },
+      }),
+    )
+    const store = new CanvasV2Store({
+      daemonBaseUrl: persistenceScope.daemonBaseUrl,
+      scope,
+      persistence: subjectPersistence,
+      client: {
+        getCanvas: async () => envelope(documentWithTask(), 4),
+        flushOutbox: async (_scope, outbox) => {
+          await outbox.rebaseConflict(persistenceScope, 9)
+          return {
+            status: 'conflict',
+            reason: 'revision',
+            mutationId: 'mutation-a',
+            currentRevision: 9,
+            code: 'canvas_revision_conflict',
+            message: 'Remote branch advanced',
+          }
+        },
+        saveConflictBranch,
+      },
+    })
+    await store.load()
+    await vi.waitFor(() => expect(store.getSnapshot().commandSync.status).toBe('conflict'))
+    store.setCamera({ x: -240, y: 90, zoom: 1.4 })
+    store.setSelection([{ kind: 'task', id: 'task-1' }])
+
+    const result = await store.saveConflictAsBranch('conflicts/local-work')
+
+    expect(result).toMatchObject({
+      sourceBranch: 'main',
+      newBranch: 'conflicts/local-work',
+      baseRevision: 4,
+    })
+    expect(saveConflictBranch).toHaveBeenCalledWith(scope, {
+      sourceBranch: 'main',
+      newBranch: 'conflicts/local-work',
+      baseRevision: 4,
+      mutations: [
+        { mutationId: 'mutation-a', command: updateGoal('Local A') },
+        { mutationId: 'mutation-b', command: updateGoal('Local B') },
+      ],
+    })
+    expect(await subjectPersistence.list(persistenceScope)).toEqual([])
+    expect(await subjectPersistence.readViewState({
+      ...persistenceScope,
+      branch: 'conflicts/local-work',
+    })).toMatchObject({
+      camera: { x: -240, y: 90, zoom: 1.4 },
+      selection: [{ kind: 'task', id: 'task-1' }],
+    })
+    expect(store.getSnapshot()).toMatchObject({
+      document: { tasks: [{ goal: 'Local B' }] },
+      commandSync: { status: 'saved', pendingCount: 0, conflict: null },
+    })
+  })
+
+  it('keeps the original conflict and outbox when conflict branch saving fails', async () => {
+    const subjectPersistence = persistence()
+    await subjectPersistence.enqueue(persistenceScope, {
+      baseRevision: 2,
+      mutationId: 'mutation-conflict-save',
+      command: updateGoal('Unsaved local goal'),
+    })
+    const store = new CanvasV2Store({
+      daemonBaseUrl: persistenceScope.daemonBaseUrl,
+      scope,
+      persistence: subjectPersistence,
+      client: {
+        getCanvas: async () => envelope(documentWithTask(), 2),
+        flushOutbox: async () => ({
+          status: 'conflict',
+          reason: 'precondition',
+          mutationId: 'mutation-conflict-save',
+          code: 'canvas_command_precondition_failed',
+          message: 'Task changed remotely',
+        }),
+        saveConflictBranch: async () => {
+          throw new Error('Conflict branch request failed')
+        },
+      },
+    })
+    await store.load()
+    await vi.waitFor(() => expect(store.getSnapshot().commandSync.status).toBe('conflict'))
+
+    await expect(store.saveConflictAsBranch('conflicts/retry-me'))
+      .rejects.toThrow('Conflict branch request failed')
+
+    expect((await subjectPersistence.list(persistenceScope)).map((entry) => entry.mutationId))
+      .toEqual(['mutation-conflict-save'])
+    expect(await subjectPersistence.readViewState({
+      ...persistenceScope,
+      branch: 'conflicts/retry-me',
+    })).toBeNull()
+    expect(store.getSnapshot().commandSync).toMatchObject({
+      status: 'conflict',
+      pendingCount: 1,
+      conflict: { mutationId: 'mutation-conflict-save' },
+    })
+  })
+
+  it('restores the complete original outbox when acknowledgement fails after branch creation', async () => {
+    const subjectPersistence = persistence()
+    await subjectPersistence.enqueue(persistenceScope, {
+      baseRevision: 6,
+      mutationId: 'mutation-ack-a',
+      command: updateGoal('Local A'),
+    })
+    await subjectPersistence.enqueue(persistenceScope, {
+      baseRevision: 7,
+      mutationId: 'mutation-ack-b',
+      command: updateGoal('Local B'),
+    })
+    const store = new CanvasV2Store({
+      daemonBaseUrl: persistenceScope.daemonBaseUrl,
+      scope,
+      persistence: subjectPersistence,
+      client: {
+        getCanvas: async () => envelope(documentWithTask(), 6),
+        flushOutbox: async () => ({
+          status: 'conflict',
+          reason: 'revision',
+          mutationId: 'mutation-ack-a',
+          currentRevision: 12,
+          code: 'canvas_revision_conflict',
+          message: 'Remote branch advanced',
+        }),
+        saveConflictBranch: async (_scope, input) => ({
+          sourceBranch: input.sourceBranch,
+          newBranch: input.newBranch,
+          baseRevision: input.baseRevision,
+          canvas: {
+            ...envelope(documentWithTask('Local B'), 8),
+            branch: input.newBranch,
+            lastMutationId: 'mutation-ack-b',
+          },
+        }),
+      },
+    })
+    await store.load()
+    await vi.waitFor(() => expect(store.getSnapshot().commandSync.status).toBe('conflict'))
+    const acknowledge = vi.spyOn(subjectPersistence, 'ack')
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('Local acknowledgement failed'))
+
+    await expect(store.saveConflictAsBranch('conflicts/ack-retry'))
+      .rejects.toThrow('Local acknowledgement failed')
+
+    expect(acknowledge).toHaveBeenCalledTimes(2)
+    expect((await subjectPersistence.list(persistenceScope)).map((entry) => entry.mutationId))
+      .toEqual(['mutation-ack-a', 'mutation-ack-b'])
+    expect(store.getSnapshot().commandSync).toMatchObject({
+      status: 'conflict',
+      pendingCount: 2,
+      conflict: { mutationId: 'mutation-ack-a' },
+    })
+  })
+
+  it('refuses to upload more than 500 conflicted mutations without touching the outbox', async () => {
+    const subjectPersistence = persistence()
+    for (let index = 0; index < 501; index += 1) {
+      await subjectPersistence.enqueue(persistenceScope, {
+        baseRevision: index,
+        mutationId: `mutation-${index}`,
+        command: updateGoal(`Local ${index}`),
+      })
+    }
+    const saveConflictBranch = vi.fn<NonNullable<CanvasV2StoreClient['saveConflictBranch']>>()
+    const store = new CanvasV2Store({
+      daemonBaseUrl: persistenceScope.daemonBaseUrl,
+      scope,
+      persistence: subjectPersistence,
+      client: {
+        getCanvas: async () => envelope(documentWithTask(), 0),
+        flushOutbox: async () => ({
+          status: 'conflict',
+          reason: 'revision',
+          mutationId: 'mutation-0',
+          currentRevision: 4,
+          code: 'canvas_revision_conflict',
+          message: 'Remote branch advanced',
+        }),
+        saveConflictBranch,
+      },
+    })
+    await store.load()
+    await vi.waitFor(() => expect(store.getSnapshot().commandSync.status).toBe('conflict'))
+
+    await expect(store.saveConflictAsBranch('conflicts/too-many'))
+      .rejects.toThrow('501 pending mutations; maximum is 500')
+    expect(saveConflictBranch).not.toHaveBeenCalled()
+    expect(await subjectPersistence.list(persistenceScope)).toHaveLength(501)
+    expect(store.getSnapshot().commandSync.status).toBe('conflict')
+  })
 })

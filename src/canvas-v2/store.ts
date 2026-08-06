@@ -1,10 +1,13 @@
 import { applyCanvasCommandV2, type CanvasCommandV2 } from './commands'
+import { MAX_CANVAS_V2_CONFLICT_MUTATIONS } from './daemonClient'
 import type {
   CanvasV2CanvasScope,
   CanvasV2CommandOutbox,
   CanvasV2DaemonClient,
   CanvasV2Envelope,
   CanvasV2FlushResult,
+  CanvasV2SaveConflictBranchInput,
+  CanvasV2SaveConflictBranchResult,
 } from './daemonClient'
 import { emptyCanvasDocumentV2, type CanvasDocumentV2 } from './model'
 import {
@@ -72,6 +75,10 @@ export interface CanvasV2StoreClient {
     scope: CanvasV2CanvasScope,
     outbox: CanvasV2CommandOutbox,
   ): Promise<CanvasV2FlushResult>
+  saveConflictBranch?(
+    scope: CanvasV2CanvasScope,
+    input: CanvasV2SaveConflictBranchInput,
+  ): Promise<CanvasV2SaveConflictBranchResult>
 }
 
 export interface CanvasV2StoreOptions {
@@ -290,6 +297,68 @@ export class CanvasV2Store {
       commandSync: { ...state.commandSync, status: 'pending', error: null },
     }))
     return this.flushCommands()
+  }
+
+  async saveConflictAsBranch(newBranch: string): Promise<CanvasV2SaveConflictBranchResult> {
+    await this.#enqueueTail
+    if (this.#flushPromise) await this.#flushPromise
+    if (this.#state.commandSync.status !== 'conflict' || !this.#state.commandSync.conflict) {
+      throw new Error('Canvas V2 conflict branch can only be saved from a conflict state')
+    }
+    const saveConflictBranch = this.#client.saveConflictBranch
+    if (!saveConflictBranch) {
+      throw new Error('Canvas V2 conflict branch saving is unavailable')
+    }
+    const entries = await this.#withOutboxLock(() =>
+      this.#persistence.list(this.#persistenceScope))
+    if (entries.length === 0) {
+      throw new Error('Canvas V2 conflict has no pending mutations to save')
+    }
+    if (entries.length > MAX_CANVAS_V2_CONFLICT_MUTATIONS) {
+      throw new Error(
+        `Canvas V2 conflict has ${entries.length} pending mutations; maximum is ${MAX_CANVAS_V2_CONFLICT_MUTATIONS}`,
+      )
+    }
+    const sourceBranch = this.#state.scope.branch
+    const result = await saveConflictBranch.call(this.#client, this.#state.scope, {
+      sourceBranch,
+      newBranch,
+      baseRevision: entries[0]!.initialBaseRevision,
+      mutations: entries.map((entry) => ({
+        mutationId: entry.mutationId,
+        command: structuredClone(entry.command),
+      })),
+    })
+    const targetScope: CanvasV2PersistenceScope = {
+      ...this.#persistenceScope,
+      branch: result.newBranch,
+    }
+    await this.#persistence.writeViewState(targetScope, structuredClone(this.#state.view))
+    await this.#withOutboxLock(async () => {
+      const current = await this.#persistence.list(this.#persistenceScope)
+      if (current.length !== entries.length
+        || current.some((entry, index) => entry.mutationId !== entries[index]?.mutationId)) {
+        throw new Error('Canvas V2 conflict outbox changed while saving its branch')
+      }
+      try {
+        for (const entry of entries) {
+          await this.#persistence.ack(this.#persistenceScope, entry.mutationId)
+        }
+      } catch (error) {
+        await this.#persistence.replaceOutbox(this.#persistenceScope, entries)
+        throw error
+      }
+    })
+    this.#setState((state) => ({
+      ...state,
+      commandSync: {
+        status: 'saved',
+        pendingCount: 0,
+        error: null,
+        conflict: null,
+      },
+    }))
+    return result
   }
 
   setCamera(camera: CanvasV2ViewState['camera']): void {

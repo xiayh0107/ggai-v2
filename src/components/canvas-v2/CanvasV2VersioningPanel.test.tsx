@@ -122,6 +122,18 @@ function syncedStore(overrides: Partial<CanvasV2StoreState['commandSync']> = {})
   }
   return {
     flushCommands: vi.fn(async () => undefined),
+    saveConflictAsBranch: vi.fn(async (newBranch: string) => ({
+      sourceBranch: 'main',
+      newBranch,
+      baseRevision: 2,
+      canvas: {
+        branch: newBranch,
+        revision: 3,
+        updatedAt: '2026-08-05T10:00:00.000Z',
+        lastMutationId: 'mutation-1',
+        document: canvas(newBranch).document,
+      },
+    })),
     getSnapshot: vi.fn(() => ({ commandSync })),
   } satisfies CanvasV2VersioningFlushStore
 }
@@ -264,6 +276,67 @@ describe('CanvasV2VersioningPanel', () => {
     expect(document.querySelector('[role="alert"]')?.textContent).toContain(
       'server revision changed',
     )
+  })
+
+  it('validates and explicitly saves a conflict branch before full navigation', async () => {
+    const store = syncedStore({
+      status: 'conflict',
+      pendingCount: 2,
+      conflict: {
+        reason: 'revision',
+        mutationId: 'mutation-12345678',
+        code: 'revision_conflict',
+        message: 'server revision changed',
+      },
+    })
+    const { onNavigateBranch } = await renderSubject({ store })
+
+    expect(document.body.textContent).toContain('2 条本地命令仍安全保留')
+    await click(testId('versioning-open-conflict-branch'))
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain(
+      '不会上传或覆盖整个画布快照',
+    )
+    const input = testId<HTMLInputElement>('versioning-conflict-branch')
+    setValue(input, 'main')
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect(testId<HTMLButtonElement>('versioning-confirm-conflict-branch').disabled).toBe(true)
+
+    setValue(input, 'conflicts/my-local-work')
+    expect(input.getAttribute('aria-invalid')).toBe('false')
+    await click(testId('versioning-confirm-conflict-branch'))
+
+    expect(store.flushCommands).not.toHaveBeenCalled()
+    expect(store.saveConflictAsBranch).toHaveBeenCalledWith('conflicts/my-local-work')
+    expect(onNavigateBranch).toHaveBeenCalledWith('conflicts/my-local-work')
+  })
+
+  it('keeps the conflict dialog and branch draft when saving fails', async () => {
+    const store = syncedStore({
+      status: 'conflict',
+      pendingCount: 501,
+      conflict: {
+        reason: 'precondition',
+        mutationId: 'mutation-overflow',
+        code: 'command_precondition_failed',
+        message: 'local command no longer applies',
+      },
+    })
+    vi.mocked(store.saveConflictAsBranch).mockRejectedValue(
+      new Error('501 pending mutations; maximum is 500'),
+    )
+    const { onNavigateBranch } = await renderSubject({ store })
+    await click(testId('versioning-open-conflict-branch'))
+    const input = testId<HTMLInputElement>('versioning-conflict-branch')
+    setValue(input, 'conflicts/keep-this-name')
+
+    await click(testId('versioning-confirm-conflict-branch'))
+
+    expect(onNavigateBranch).not.toHaveBeenCalled()
+    expect(document.querySelector('[role="alertdialog"]')).not.toBeNull()
+    expect(testId<HTMLInputElement>('versioning-conflict-branch').value)
+      .toBe('conflicts/keep-this-name')
+    expect(document.querySelector('[role="alert"]')?.textContent)
+      .toContain('maximum is 500')
   })
 
   it('preserves restore input and dialog when daemon reports a partial failure', async () => {

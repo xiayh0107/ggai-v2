@@ -3,6 +3,8 @@ import type { CanvasCommandV2, TrustedProjectionPlanInputV2 } from './commands'
 import {
   CanvasV2DaemonClient,
   CanvasV2HttpError,
+  CanvasV2ProtocolError,
+  MAX_CANVAS_V2_CONFLICT_MUTATIONS,
   serializeCanvasCommandV2,
 } from './daemonClient'
 import { emptyCanvasDocumentV2 } from './model'
@@ -18,9 +20,13 @@ const persistenceScope: CanvasV2PersistenceScope = {
   ...scope,
 }
 
-function envelope(revision: number, lastMutationId: string | null = null) {
+function envelope(
+  revision: number,
+  lastMutationId: string | null = null,
+  branch = 'main',
+) {
   return {
-    branch: 'main',
+    branch,
     revision,
     updatedAt: '2026-08-05T00:00:00.000Z',
     lastMutationId,
@@ -138,11 +144,125 @@ describe('Canvas V2 daemon client', () => {
     const result = await client.executeCommand(scope, {
       branch: 'main',
       baseRevision: 4,
+      initialBaseRevision: 4,
       mutationId: 'mutation-1',
       command: command('UpdateTaskGoal'),
       createdAt: 1,
     })
     expect(result.revision).toBe(5)
+  })
+
+  it('saves only serialized conflict mutations and strictly accepts the HTTP 201 result', async () => {
+    const trustedPlan = plan()
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = new URL(String(input))
+      expect(url.pathname).toBe('/canvas/conflicts')
+      expect(url.searchParams.get('projectDir')).toBe(scope.projectDir)
+      expect(url.searchParams.has('branch')).toBe(false)
+      expect(init?.method).toBe('POST')
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      expect(Object.keys(body).sort()).toEqual([
+        'baseRevision',
+        'mutations',
+        'newBranch',
+        'sourceBranch',
+      ])
+      expect(body).toEqual({
+        sourceBranch: 'main',
+        newBranch: 'conflicts/chart',
+        baseRevision: 4,
+        mutations: [
+          {
+            mutationId: 'mutation-1',
+            command: { type: 'UpdateTaskGoal', taskId: 'task-1', goal: 'Keep local' },
+          },
+          {
+            mutationId: 'mutation-2',
+            command: { type: 'MaterializeProjectionPlan', planId: trustedPlan.planId },
+          },
+        ],
+      })
+      expect(JSON.stringify(body)).not.toContain('document')
+      expect(JSON.stringify(body)).not.toContain('manifestDigest')
+      return json({
+        sourceBranch: 'main',
+        newBranch: 'conflicts/chart',
+        baseRevision: 4,
+        canvas: envelope(6, 'mutation-2', 'conflicts/chart'),
+      }, 201)
+    })
+    const client = new CanvasV2DaemonClient({
+      baseUrl: persistenceScope.daemonBaseUrl,
+      fetch,
+    })
+
+    await expect(client.saveConflictBranch(scope, {
+      sourceBranch: 'main',
+      newBranch: 'conflicts/chart',
+      baseRevision: 4,
+      mutations: [
+        { mutationId: 'mutation-1', command: command('UpdateTaskGoal', 'Keep local') },
+        {
+          mutationId: 'mutation-2',
+          command: { type: 'MaterializeProjectionPlan', plan: trustedPlan },
+        },
+      ],
+    })).resolves.toMatchObject({
+      sourceBranch: 'main',
+      newBranch: 'conflicts/chart',
+      baseRevision: 4,
+      canvas: { branch: 'conflicts/chart', revision: 6 },
+    })
+  })
+
+  it('rejects oversized conflict batches and non-201 or drifting responses', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>()
+    const client = new CanvasV2DaemonClient({
+      baseUrl: persistenceScope.daemonBaseUrl,
+      fetch,
+    })
+    await expect(client.saveConflictBranch(scope, {
+      sourceBranch: 'main',
+      newBranch: 'conflicts/too-many',
+      baseRevision: 1,
+      mutations: Array.from({ length: MAX_CANVAS_V2_CONFLICT_MUTATIONS + 1 }, (_, index) => ({
+        mutationId: `mutation-${index}`,
+        command: command('UpdateTaskGoal'),
+      })),
+    })).rejects.toThrow(`1-${MAX_CANVAS_V2_CONFLICT_MUTATIONS} mutations`)
+    expect(fetch).not.toHaveBeenCalled()
+
+    const wrongStatus = new CanvasV2DaemonClient({
+      baseUrl: persistenceScope.daemonBaseUrl,
+      fetch: async () => json({
+        sourceBranch: 'main',
+        newBranch: 'conflicts/chart',
+        baseRevision: 1,
+        canvas: envelope(2, null, 'conflicts/chart'),
+      }, 200),
+    })
+    await expect(wrongStatus.saveConflictBranch(scope, {
+      sourceBranch: 'main',
+      newBranch: 'conflicts/chart',
+      baseRevision: 1,
+      mutations: [{ mutationId: 'mutation-1', command: command('UpdateTaskGoal') }],
+    })).rejects.toBeInstanceOf(CanvasV2ProtocolError)
+
+    const drift = new CanvasV2DaemonClient({
+      baseUrl: persistenceScope.daemonBaseUrl,
+      fetch: async () => json({
+        sourceBranch: 'main',
+        newBranch: 'other-branch',
+        baseRevision: 1,
+        canvas: envelope(2, null, 'other-branch'),
+      }, 201),
+    })
+    await expect(drift.saveConflictBranch(scope, {
+      sourceBranch: 'main',
+      newBranch: 'conflicts/chart',
+      baseRevision: 1,
+      mutations: [{ mutationId: 'mutation-1', command: command('UpdateTaskGoal') }],
+    })).rejects.toThrow('response is invalid')
   })
 
   it('reduces trusted commands to plan references and bounded user choices', () => {
@@ -212,6 +332,7 @@ describe('Canvas V2 daemon client', () => {
     await expect(client.executeCommand(scope, {
       branch: 'main',
       baseRevision: 4,
+      initialBaseRevision: 4,
       mutationId: 'mutation-1',
       command: command('UpdateTaskGoal'),
       createdAt: 1,

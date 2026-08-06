@@ -59,6 +59,7 @@ describe('Canvas V2 browser persistence', () => {
       expect(entry).toEqual({
         branch: 'main',
         baseRevision: 7,
+        initialBaseRevision: 7,
         mutationId: 'mutation-1',
         command,
         createdAt: 100,
@@ -105,10 +106,14 @@ describe('Canvas V2 browser persistence', () => {
     })
 
     const rebased = await subject.rebaseConflict(main, 9)
-    expect(rebased.map(({ mutationId, baseRevision }) => ({ mutationId, baseRevision })))
+    expect(rebased.map(({ mutationId, baseRevision, initialBaseRevision }) => ({
+      mutationId,
+      baseRevision,
+      initialBaseRevision,
+    })))
       .toEqual([
-        { mutationId: 'mutation-a', baseRevision: 9 },
-        { mutationId: 'mutation-b', baseRevision: 10 },
+        { mutationId: 'mutation-a', baseRevision: 9, initialBaseRevision: 2 },
+        { mutationId: 'mutation-b', baseRevision: 10, initialBaseRevision: 2 },
       ])
     expect(rebased.map((entry) => entry.command.type))
       .toEqual(['move-task', 'rename-task'])
@@ -152,6 +157,7 @@ describe('Canvas V2 browser persistence', () => {
       {
         branch: 'main',
         baseRevision: 1,
+        initialBaseRevision: 1,
         mutationId: 'later',
         command: { type: 'move-task', taskId: 'task-1', dx: 2 },
         createdAt: 2,
@@ -159,6 +165,7 @@ describe('Canvas V2 browser persistence', () => {
       {
         branch: 'main',
         baseRevision: 1,
+        initialBaseRevision: 1,
         mutationId: 'earlier',
         command: { type: 'move-task', taskId: 'task-1', dx: 1 },
         createdAt: 1,
@@ -166,11 +173,41 @@ describe('Canvas V2 browser persistence', () => {
     ]
 
     const rebased = rebaseCanvasV2OutboxEntries(entries, 20)
-    expect(rebased.map(({ mutationId, baseRevision }) => ({ mutationId, baseRevision })))
+    expect(rebased.map(({ mutationId, baseRevision, initialBaseRevision }) => ({
+      mutationId,
+      baseRevision,
+      initialBaseRevision,
+    })))
       .toEqual([
-        { mutationId: 'earlier', baseRevision: 20 },
-        { mutationId: 'later', baseRevision: 21 },
+        { mutationId: 'earlier', baseRevision: 20, initialBaseRevision: 1 },
+        { mutationId: 'later', baseRevision: 21, initialBaseRevision: 1 },
       ])
     expect(entries.map((entry) => entry.baseRevision)).toEqual([1, 1])
+  })
+
+  it('decodes legacy outbox records with their base as the immutable initial base', async () => {
+    const adapter = new MemoryCanvasV2PersistenceAdapter()
+    const subject = persistence(adapter)
+    const scopeKey = JSON.stringify([main.daemonBaseUrl, main.projectDir, main.branch])
+    await adapter.writeOutbox({
+      key: JSON.stringify([scopeKey, 'legacy-mutation']),
+      scopeKey,
+      entry: {
+        branch: 'main',
+        baseRevision: 6,
+        mutationId: 'legacy-mutation',
+        command: { type: 'move-task', taskId: 'task-1', dx: 4 },
+        createdAt: 99,
+      },
+    })
+
+    await expect(subject.list(main)).resolves.toEqual([{
+      branch: 'main',
+      baseRevision: 6,
+      initialBaseRevision: 6,
+      mutationId: 'legacy-mutation',
+      command: { type: 'move-task', taskId: 'task-1', dx: 4 },
+      createdAt: 99,
+    }])
   })
 })
