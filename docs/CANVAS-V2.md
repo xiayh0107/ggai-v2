@@ -152,6 +152,8 @@ interface RunIntentV2 {
 
 启动 Run 前，浏览器必须先冲刷当前分支所有待保存 Canvas command。daemon 从 `canvasBranch + baseRevision` 对应的持久文档编译上下文，不接受浏览器上传的 canvas snapshot。指向 Task 且 `contextRole=full|summary` 的边决定输入：`full` 加入内容，`summary` 只加入标题、类型与摘要，`none` 不进入上下文。
 
+`attachments` 只接受 artifact identity 或 Node ID。显式 Node attachment 会在该持久 revision 上固化为有界的 `title/type/text/payload/artifactRefs` 快照，并在 pack 中与 typed-edge input 分区；其中每个 artifact identity 仍必须通过已关闭 manifest 的路径、size 与 digest 复验，任一引用不可用都会在创建 Run 前失败关闭。浏览器不能随 attachment 提交路径或内容。Run 的 durable summary 保存接受时的实际 `prompt` 与 `baseRevision`，因此终态、重启和 interrupted recovery 都保留可审计的执行意图。
+
 会话键为 `canvasBranch + taskId + agentId`。Task 容器内“继续任务”复用会话；在产物 Node 上提交提示会先创建新的派生 Task，因此自然获得独立会话。RunManager 在保留全局容量限制的同时，对 `(project, branch, taskId)` 实施单活跃 Run 约束。
 
 ## 5. Run-owned Artifact

@@ -43,7 +43,9 @@ interface RunIntentV2 {
 }
 ```
 
-daemon 从指定 branch/revision 的持久 `CanvasDocumentV2` 编译上下文，不接收浏览器 `canvasSnapshot`。输入只来自指向 Task 的 Edge：`contextRole=full` 加入受控完整内容，`summary` 加入摘要，`none` 不进入上下文。
+daemon 从指定 branch/revision 的持久 `CanvasDocumentV2` 编译上下文，不接收浏览器 `canvasSnapshot`。typed-edge 输入来自指向 Task 的 Edge：`contextRole=full` 加入受控完整内容，`summary` 加入摘要，`none` 不进入上下文。RunIntent 还可显式附加 artifact identity 或 Node ID；Node ID 由 daemon 在同一 revision 解析为有界内容快照，不能携带浏览器提供的内容或路径。
+
+Run 的 durable summary 保存接受时的实际 `prompt` 与 `baseRevision`，并随终态更新、历史查询、daemon 重启和 interrupted recovery 原样保留。升级前没有这两个字段的旧 summary 仍可读取；新建 Task Run 必须同时具有两者。
 
 每次 Run 的落盘边界是：
 
@@ -99,9 +101,9 @@ Run 接受时按 digest 严格加载并固定完整快照，随后把同一快�
 | --- | --- | --- |
 | L0 契约 | daemon 安全契约、固定插件能力、Run output contract | 每次 Run |
 | L1 图谱 | 相关 Task/Node/Edge 的标题、类型、关系与摘要 | Task 输入子图 |
-| L2 内容 | `contextRole=full` 的 Node 内容和 verified artifact attachment | 直接输入 |
+| L2 内容 | `contextRole=full` 内容、显式 Node revision 快照和 verified artifact attachment | 直接输入或用户显式 attachment |
 
-verified attachment 由 daemon 从已关闭 manifest 解析并附带 project-relative path、MIME、size 与 digest；浏览器不能把任意磁盘路径伪装成 attachment。
+显式 Node attachment 与 typed-edge context 在 pack 中分区，保留 Node 到 artifact identity 的关联；Node 内容按单项与全体预算裁剪并标注 truncation，artifactRefs 不做静默截断。verified attachment 由 daemon 从已关闭 manifest 解析并附带 project-relative path、MIME、size 与 digest；多个 Node 共享同一 artifact 时只保留一份 verified 元数据，但每个 Node 的引用仍在。浏览器不能把任意磁盘路径伪装成 attachment，任一 Node artifactRef 无法复验时整次 Run 在接受前失败关闭。
 
 ## 六、会话、并发与取消
 

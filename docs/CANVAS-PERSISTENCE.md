@@ -10,7 +10,7 @@
 | 浏览器 outbox | IndexedDB `ggai-canvas-v2` / `command-outbox` | 未确认 command 的 FIFO journal；保存 `mutationId`、当前 `baseRevision` 与不可变 `initialBaseRevision` | 否，仅崩溃与断线缓冲 |
 | 当前 Canvas | `.gg/runtime/canvas-v2/<branch-hash>/snapshot.json` | 当前 `CanvasDocumentV2`、revision、checkpoint 锚点及 daemon 内部 mutation ledger | 是 |
 | 语义 revision | `.gg/runtime/canvas-v2/<branch-hash>/revisions/<revision>.json` | 带 document digest 的不可变历史基底，供显式冲突恢复使用 | 是，限 command 历史 |
-| 运行记录 | `.gg/runtime/runs/<runId>/events.jsonl`、`events.idx`、`summary.json` | durable SSE 事件、终态 close、分页索引和 Run 摘要 | 是 |
+| 运行记录 | `.gg/runtime/runs/<runId>/events.jsonl`、`events.idx`、`summary.json` | durable SSE 事件、终态 close、分页索引，以及固化实际 prompt/baseRevision 的 Run 摘要 | 是 |
 | Task 会话 | `.gg/runtime/task-sessions-v2.json` | `canvasBranch + taskId + agentId` 到 Agent session 的映射 | 是 |
 | ProjectionPlan | `.gg/runtime/projection-plans/<branch-hash>.json` | daemon 生成的 pending/dismissed 可信计划 | 是 |
 | 插件能力 | `.gg/runtime/plugin-capabilities-v2/<digest>.json` | Run 接受时固定的、内容寻址的 artifact claim 快照 | 是 |
@@ -70,6 +70,8 @@ POST /canvas/conflicts?projectDir=...
 - 组件卸载或刷新只断开订阅；只有明确取消操作才请求 daemon 终止 Run。
 - 每个 `(project, branch, taskId)` 同时最多一个活跃 Run；不同 Task 可并发。
 - 会话严格按 `canvasBranch + taskId + agentId` 隔离。Task 内“继续任务”可复用 session，派生 Task 获得独立 session。
+
+Task Run 的 summary 在接受时同时保存实际 `prompt` 与 `baseRevision`，finish 只更新状态而不改写执行意图。显式 Node attachment 从该 revision 的持久文档固化有界内容快照；其 artifactRefs 与直接 artifact、typed-edge artifact 一同经过 closed manifest 和 digest 复验，不能由浏览器内容或路径替代。
 
 V2 的 run log 包含重建 ProjectionPlan 与审计终态所需的 close，不能通过 `DELETE /runs/:id/log` 单独删除；该接口在 V2 返回 `run_log_delete_unsupported`。原始 JSONL 不进入 Canvas Git。
 

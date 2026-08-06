@@ -94,6 +94,7 @@ POST /runs RunIntentV2 + digest               │
        ▼                                      │
 daemon 从 branch/revision 读取 Task + typed-edge inputs
        │
+       ├─> 解析显式 Node/artifact attachments，复验 closed manifest
        ├─> .gg/context/runs/<runId>/pack.{md,json}
        ├─> 固定 plugin-capabilities.v2.json
        ├─> 查 task session，spawn/resume transport
@@ -138,7 +139,7 @@ project/
 │   ├── runtime/
 │   │   ├── canvas-v2/<branch-hash>/snapshot.json
 │   │   ├── canvas-v2/<branch-hash>/revisions/<revision>.json
-│   │   ├── runs/<runId>/{events.jsonl,events.idx,summary.json}
+│   │   ├── runs/<runId>/{events.jsonl,events.idx,summary.json} # 固化 prompt/baseRevision
 │   │   ├── projection-plans/<branch-hash>.json
 │   │   ├── plugin-capabilities-v2/<digest>.json
 │   │   ├── task-sessions-v2.json
