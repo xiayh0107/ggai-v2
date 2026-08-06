@@ -26,6 +26,17 @@ async function withDaemon(
   }
 }
 
+test('programmatic daemon construction defaults to Canvas V2', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-model-default-'))
+  const daemon = createDaemonServer({ projectRoot: root })
+  try {
+    assert.equal(daemon.canvasModel, 'v2')
+  } finally {
+    await daemon.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('V1 mode advertises its actual schema and rejects every V2 write path', async () => {
   await withDaemon('v1', async (baseUrl) => {
     const health = await (await fetch(`${baseUrl}/health`)).json() as {

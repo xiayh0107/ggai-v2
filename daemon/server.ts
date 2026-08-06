@@ -117,7 +117,7 @@ export interface DaemonServer {
 }
 
 export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
-  const canvasModel = options.canvasModel ?? 'v1'
+  const canvasModel = options.canvasModel ?? 'v2'
   const registry = options.registry ?? new AgentRegistry()
   const versions = options.workspaceVersionManager ?? new WorkspaceVersionManager({
     projectRoot: options.projectRoot,

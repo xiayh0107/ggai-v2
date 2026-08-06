@@ -17,7 +17,9 @@ interface Fixture {
 
 async function startDaemon(): Promise<Fixture> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-canvas-http-'))
-  const daemon = createDaemonServer({ projectRoot: root })
+  // This suite exercises the archived V1 protocol explicitly. Production
+  // callers that omit canvasModel receive the V2-only runtime.
+  const daemon = createDaemonServer({ projectRoot: root, canvasModel: 'v1' })
   await new Promise<void>((resolve, reject) => {
     daemon.server.once('error', reject)
     daemon.server.listen(0, '127.0.0.1', resolve)
