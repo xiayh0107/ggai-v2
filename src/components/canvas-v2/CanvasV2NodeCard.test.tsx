@@ -1,0 +1,153 @@
+// @vitest-environment jsdom
+import { act } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { FileQuestion } from 'lucide-react'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import type { CanvasNodeV2 } from '@/canvas-v2/model'
+import { registerBuiltinPlugins } from '@/plugins/builtins'
+import {
+  getPlugin,
+  listCreatablePlugins,
+  registerPlugin,
+  type NodePlugin,
+  unregisterPlugin,
+} from '@/plugins/types'
+import CanvasV2NodeCard from './CanvasV2NodeCard'
+
+const artifactId = `artifact_${'a'.repeat(64)}`
+let root: Root | null = null
+let container: HTMLDivElement | null = null
+
+beforeAll(() => {
+  registerBuiltinPlugins()
+  ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
+    .IS_REACT_ACT_ENVIRONMENT = true
+})
+
+afterEach(() => {
+  act(() => root?.unmount())
+  root = null
+  container?.remove()
+  container = null
+  vi.unstubAllGlobals()
+})
+
+afterAll(() => {
+  delete (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
+    .IS_REACT_ACT_ENVIRONMENT
+})
+
+describe('CanvasV2NodeCard artifact projection', () => {
+  it('renders a community-owned artifact view through its pure projector', async () => {
+    const projected = vi.fn<NonNullable<NodePlugin['projectArtifact']>>((artifact) => ({
+      title: `Projected ${artifact.title}`,
+      payload: { digest: artifact.contentDigest },
+    }))
+    const plugin: NodePlugin = {
+      id: '@tests/notebook-view',
+      label: 'Notebook',
+      desc: 'Notebook artifact view',
+      icon: FileQuestion,
+      defaultWidth: 320,
+      initialPayload: () => ({}),
+      isEmpty: () => false,
+      views: {
+        Empty: () => null,
+        Content: () => null,
+        Artifact: ({ artifact, content }) => (
+          <div data-testid="community-artifact">
+            {content.title} · {artifact.mediaType}
+          </div>
+        ),
+      },
+      instr: { placeholder: 'Use notebook', actions: [] },
+      artifactClaims: [{ extensions: ['.ipynb'] }],
+      projectArtifact: projected,
+      demoResult: () => null,
+    }
+    registerPlugin(plugin)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      schemaVersion: 2,
+      runId: 'run-notebook',
+      artifactId,
+      mediaType: 'application/x-ipynb+json',
+      size: 128,
+      contentDigest: 'b'.repeat(64),
+    }), { headers: { 'Content-Type': 'application/json' } })))
+
+    try {
+      await renderNode({
+        id: 'node-notebook',
+        type: plugin.id,
+        frame: { x: 0, y: 0, w: 320, h: 220, z: 1 },
+        title: 'Analysis notebook',
+        artifactRefs: [{ runId: 'run-notebook', artifactId }],
+        origin: { kind: 'user' },
+      })
+
+      expect(container?.querySelector('[data-testid="community-artifact"]')?.textContent)
+        .toContain('Projected Analysis notebook · application/x-ipynb+json')
+      expect(projected).toHaveBeenCalledTimes(1)
+      expect(Object.keys(projected.mock.calls[0]![0]).sort()).toEqual([
+        'artifactId',
+        'contentDigest',
+        'mediaType',
+        'runId',
+        'size',
+        'title',
+        'url',
+      ])
+    } finally {
+      unregisterPlugin(plugin.id)
+    }
+  })
+
+  it('keeps the generic file fallback renderable but out of creation menus', async () => {
+    expect(getPlugin('file').views.Artifact).toBeTypeOf('function')
+    expect(listCreatablePlugins().map(({ id }) => id)).not.toContain('file')
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      schemaVersion: 2,
+      runId: 'run-file',
+      artifactId,
+      mediaType: 'application/octet-stream',
+      size: 17,
+      contentDigest: 'c'.repeat(64),
+    }), { headers: { 'Content-Type': 'application/json' } })))
+
+    await renderNode({
+      id: 'node-file',
+      type: 'file',
+      frame: { x: 0, y: 0, w: 320, h: 220, z: 1 },
+      title: 'unknown.bin',
+      artifactRefs: [{ runId: 'run-file', artifactId }],
+      origin: { kind: 'user' },
+    })
+
+    expect(container?.textContent).toContain('application/octet-stream')
+    expect(container?.querySelector<HTMLAnchorElement>('a')?.href).toContain(
+      `/runs/run-file/artifacts/${artifactId}`,
+    )
+  })
+})
+
+async function renderNode(node: CanvasNodeV2): Promise<void> {
+  container = document.createElement('div')
+  document.body.append(container)
+  root = createRoot(container)
+  await act(async () => {
+    root?.render(
+      <CanvasV2NodeCard
+        node={node}
+        projectDir="/project"
+        selected={false}
+        tabIndex={0}
+        onFocus={() => undefined}
+        onKeyDown={() => undefined}
+        onDragStart={() => undefined}
+        onResizeStart={() => undefined}
+        registerFocusable={() => undefined}
+      />,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+}

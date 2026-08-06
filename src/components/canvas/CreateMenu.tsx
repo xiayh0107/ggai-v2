@@ -1,7 +1,7 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react'
 import { useCanvas } from '@/hooks/useCanvasStore'
 import type { CreateMenuState } from '@/types/canvas'
-import { listEnabledPlugins, subscribePlugins } from '@/plugins/types'
+import { listCreatablePlugins, subscribePlugins } from '@/plugins/types'
 
 /** 已有节点后的轻量垂直创建菜单（规范 3.4），贴近触发点；条目 = 全部已注册节点插件 */
 export default function CreateMenu({ menu }: { menu: CreateMenuState }) {
@@ -40,7 +40,7 @@ export default function CreateMenu({ menu }: { menu: CreateMenuState }) {
             : '创建并连接'
           : '创建节点'}
       </p>
-      {listEnabledPlugins().map((p) => {
+      {listCreatablePlugins().map((p) => {
         const Icon = p.icon
         return (
           <button

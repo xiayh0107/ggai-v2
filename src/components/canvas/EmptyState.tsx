@@ -1,12 +1,12 @@
 import { useSyncExternalStore } from 'react'
 import { useCanvas } from '@/hooks/useCanvasStore'
-import { listEnabledPlugins, subscribePlugins } from '@/plugins/types'
+import { listCreatablePlugins, subscribePlugins } from '@/plugins/types'
 
 /** 空白画布首屏：平铺展示所有启用中的节点插件（规范 3.3 / 10.1） */
 export default function EmptyState() {
   const { addNode, camera } = useCanvas()
   useSyncExternalStore(subscribePlugins, () => 0)
-  const plugins = listEnabledPlugins()
+  const plugins = listCreatablePlugins()
 
   const create = (id: string) => {
     // 落在当前视口中心，按类型序号轻微错位避免重叠

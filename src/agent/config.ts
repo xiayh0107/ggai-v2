@@ -25,3 +25,16 @@ export function runArtifactUrl(
   url.searchParams.set('projectDir', projectDir)
   return url.toString()
 }
+
+export function runArtifactMetadataUrl(
+  runId: string,
+  artifactId: string,
+  projectDir = DAEMON_PROJECT_DIR,
+): string {
+  const url = new URL(
+    `/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/metadata`,
+    DAEMON_URL,
+  )
+  url.searchParams.set('projectDir', projectDir)
+  return url.toString()
+}

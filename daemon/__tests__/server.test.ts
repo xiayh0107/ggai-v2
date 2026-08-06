@@ -265,6 +265,25 @@ test('V2 plugin capability handshake pins strict data before accepting a Run', a
       /@community\/notebook/u,
     )
 
+    const runLogs = new RunLogStore(fixture.root)
+    await waitFor(async () =>
+      Boolean((await runLogs.terminalClose(intent.runId))?.artifactManifest?.entries[0]))
+    const terminal = await runLogs.terminalClose(intent.runId)
+    const artifact = terminal?.artifactManifest?.entries[0]
+    assert.ok(artifact)
+    const metadataResponse = await fetch(
+      `${fixture.baseUrl}/runs/${intent.runId}/artifacts/${artifact.artifactId}/metadata`,
+    )
+    assert.equal(metadataResponse.status, 200)
+    assert.deepEqual(await metadataResponse.json(), {
+      schemaVersion: 2,
+      runId: intent.runId,
+      artifactId: artifact.artifactId,
+      mediaType: artifact.mediaType,
+      size: artifact.size,
+      contentDigest: artifact.contentDigest,
+    })
+
     const snapshotPath = path.join(
       fixture.root,
       '.gg',

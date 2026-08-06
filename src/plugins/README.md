@@ -10,10 +10,11 @@
 | 身份 | `id` / `label` / `desc` / `icon` | 全局唯一 id；社区插件建议带命名空间 `@author/video` |
 | 几何 | `defaultWidth` | 创建时的缺省宽度（高度由内容自适应，引擎实测回填） |
 | 内容契约 | `initialPayload()` + `isEmpty(node)` | 节点的本体数据结构与"空内容"判定；空 → 空白态，非空 → 内容态 |
-| 视图 | `views.Empty` / `views.Content` | 两个 React 组件；生成中骨架屏由引擎统一接管，插件无需关心 |
+| 视图 | `views.Empty` / `views.Content` / `views.Artifact` | 常规空白态、内容态，以及可选的 V2 已验证产物视图；生成中骨架屏由引擎统一接管 |
 | 指令配置 | `instr.placeholder` / `instr.actions` / `instr.actionsFor` / `instr.ParamSlot` | 输入占位、专属快捷指令、按节点内容与来源动态计算的上下文快捷指令（可选）、底部参数槽（可选） |
 | Artifact 声明 | `artifactClaims` | 必填、纯数据：声明插件接受的扩展名 / MIME 类型与优先级 |
-| V2 内容投影 | `projectArtifact(artifact)` | 可选纯函数：把 daemon 已验证的 artifact identity 投影为 `title` / `text` / `payload` / `meta` |
+| V2 内容投影 | `projectArtifact(artifact)` | 可选纯函数：把 daemon 已验证的 artifact identity 与元数据投影为 `title` / `text` / `payload` / `meta` |
+| 创建入口 | `creatable` | 缺省为 `true`；设为 `false` 时仅可承接产物投影，不进入创建菜单或首屏面板 |
 | V1 Run 投影 | `materializeRunResult(node, result)` | cutover 期间保留：把旧版 Agent 文本与产物路径投影为节点内容 |
 | 演示结果 | `demoResult(node, prompt)` | 原型阶段：指令完成后要合并进节点的补丁；返回 `null` 表示无内容变化 |
 
@@ -49,6 +50,14 @@ registerPlugin({
         <MetaLines node={node} />
       </div>
     ),
+    Artifact: ({ artifact, content }) => (
+      <video
+        controls
+        src={artifact.url}
+        aria-label={content.title ?? artifact.title}
+        className="w-full rounded-[10px]"
+      />
+    ),
   },
   instr: {
     placeholder: '提取关键帧、转录字幕、总结内容…',
@@ -59,9 +68,10 @@ registerPlugin({
     mediaTypes: ['video/*'],
     priority: 20,
   }],
-  projectArtifact: ({ runId, artifactId, mediaType, title }) => ({
+  projectArtifact: ({ runId, artifactId, mediaType, size, contentDigest, title }) => ({
     title,
-    payload: { artifactRef: { runId, artifactId, mediaType } },
+    meta: [mediaType, `${size} B`],
+    payload: { artifactRef: { runId, artifactId, contentDigest } },
   }),
   // V1 兼容路径；V2 cutover 后删除。
   materializeRunResult: (_node, result) => {
@@ -72,7 +82,8 @@ registerPlugin({
 })
 ```
 
-注册即生效：创建菜单、首屏平铺面板、来源小窗、连线、指令面板全部自动获得该类型。
+注册即生效：可创建插件会出现在创建菜单与首屏面板；所有插件都可参与 artifact claim、
+来源小窗、连线和指令面板。只用于展示未知产物的 fallback 插件应设置 `creatable: false`。
 
 ## Artifact contract 边界
 
@@ -88,10 +99,12 @@ matcher 各最多 64 个；`priority` 必须是 `-1000..1000` 的安全整数。
 格式的最低优先级兜底，不需要成为创建菜单中的独立 UI 插件。daemon 只导入这个 `.ts` 数据
 模块，绝不导入 `types.tsx`、`builtins/`、React、Lucide 或任何 renderer。
 
-`projectArtifact` 只接收可信的 `{ runId, artifactId, mediaType, title }`，只返回
-`NodeContentPatch`。它拿不到 entity id、坐标、edges 或 commands，因此不能创建节点、决定布局
-或修改图关系；函数本身也不会被序列化或传到 daemon。V1 的 `materializeRunResult` 在 V2
-cutover 完成前仍可并存。
+浏览器只在 daemon 用 manifest 校验 `{ runId, artifactId }` 后，才调用 `projectArtifact`。
+投影函数接收冻结的 `{ runId, artifactId, mediaType, size, contentDigest, title, url }`，只返回可
+结构化克隆的 `NodeContentPatch`；随后由同一插件的 `views.Artifact` 渲染。`url` 仅供当前浏览器
+读取，不写入 Canvas。投影函数拿不到 entity id、坐标、edges、commands 或 dispatcher，因此
+不能创建节点、决定布局或修改图关系；函数与 renderer 也不会被序列化或传到 daemon。
+V1 的 `materializeRunResult` 在 V2 cutover 完成前仍可并存。
 
 ## 约定
 

@@ -5,7 +5,8 @@
  */
 import { useState } from 'react'
 import {
-  Eye, FileText, Link2, Image as ImageIcon, Pencil, Type, Table2, Sigma, Code2, Shapes, Sparkles, Globe,
+  Eye, ExternalLink, File as FileIcon, FileText, Link2, Image as ImageIcon,
+  Pencil, Type, Table2, Sigma, Code2, Shapes, Sparkles, Globe,
 } from 'lucide-react'
 import { useCanvas } from '@/hooks/useCanvasStore'
 import type { CanvasNode } from '@/types/canvas'
@@ -13,6 +14,7 @@ import {
   registerPlugin,
   unregisterPlugin,
   type NodePlugin,
+  type NodeArtifactViewPropsV2,
   type NodeViewProps,
 } from '../types'
 import { artifactClaimsForBuiltinV2 } from '../artifactContracts'
@@ -30,6 +32,54 @@ const contentNote = (prompt: string) =>
   `✓ 已完成：${(prompt || '指令').slice(0, 18)}${prompt.length > 18 ? '…' : ''}`
 const materializeResponseText: NonNullable<NodePlugin['materializeRunResult']> = (_node, result) =>
   result.responseText.trim() ? { text: result.responseText } : null
+const projectArtifactSummary: NonNullable<NodePlugin['projectArtifact']> = (artifact) => ({
+  title: artifact.title,
+  meta: [artifact.mediaType, formatArtifactSize(artifact.size)],
+})
+
+function formatArtifactSize(size: number): string {
+  if (size < 1_024) return `${size} B`
+  if (size < 1_024 * 1_024) return `${(size / 1_024).toFixed(1)} KB`
+  return `${(size / (1_024 * 1_024)).toFixed(1)} MB`
+}
+
+function FileArtifactContentV2({ artifact, content }: NodeArtifactViewPropsV2) {
+  return (
+    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 rounded-[10px] bg-gg-subtle p-4 text-center">
+      <FileIcon size={30} className="text-gg-muted" strokeWidth={1.35} aria-hidden="true" />
+      <div className="min-w-0 max-w-full">
+        <p className="truncate text-[12px] font-medium text-gg-ink">
+          {content.title ?? artifact.title}
+        </p>
+        <p className="mt-1 text-[10.5px] text-gg-muted">
+          {artifact.mediaType} · {formatArtifactSize(artifact.size)}
+        </p>
+      </div>
+      <a
+        href={artifact.url}
+        target="_blank"
+        rel="noreferrer"
+        data-no-drag
+        className="inline-flex items-center gap-1 rounded-[7px] bg-white px-2.5 py-1.5 text-[10.5px] text-gg-primary outline-none focus-visible:ring-2 focus-visible:ring-gg-primary/35"
+      >
+        <ExternalLink size={11} aria-hidden="true" />
+        打开产物
+      </a>
+    </div>
+  )
+}
+
+function ImageArtifactContentV2({ artifact, content }: NodeArtifactViewPropsV2) {
+  return (
+    <img
+      src={artifact.url}
+      alt={content.title ?? artifact.title}
+      className="h-full min-h-0 w-full rounded-[10px] bg-gg-subtle object-contain"
+      draggable={false}
+      data-no-drag
+    />
+  )
+}
 
 /* ---------------- PDF / 文件 ---------------- */
 function PdfContent({ node }: NodeViewProps) {
@@ -46,12 +96,17 @@ function PdfContent({ node }: NodeViewProps) {
 const pdfPlugin: NodePlugin = {
   id: 'pdf', label: 'PDF / 文件', desc: '让 Agent 检索、解析文献与文件', icon: FileText,
   defaultWidth: 300, initialPayload: () => ({}), isEmpty: (n) => !hasMeta(n),
-  views: { Empty: makeEmptyView(FileText, '拖入文件', '或描述需求，Agent 检索并解析文献'), Content: PdfContent },
+  views: {
+    Empty: makeEmptyView(FileText, '拖入文件', '或描述需求，Agent 检索并解析文献'),
+    Content: PdfContent,
+    Artifact: FileArtifactContentV2,
+  },
   instr: {
     placeholder: '对这个文件提问，或让它提取图表、总结章节…',
     actions: ['总结要点', '提取图表', '提取方法', '翻译', '基于内容提问'],
   },
   artifactClaims: artifactClaimsForBuiltinV2('pdf'),
+  projectArtifact: projectArtifactSummary,
   demoResult: (n) => hasMeta(n)
     ? { meta: [...(n.meta ?? []).filter((m) => !m.startsWith('✓')), contentNote(n.instruction.prompt)] }
     : { title: '文献综述 · Agent 整理', meta: ['Agent 检索 3 篇相关文献', '已提取 6 图 · 4 表 · 12 章节'] },
@@ -114,12 +169,17 @@ function ImageContent({ node }: NodeViewProps) {
 const imagePlugin: NodePlugin = {
   id: 'image', label: '图像', desc: '输入提示词，Agent 生成图像', icon: ImageIcon,
   defaultWidth: 300, initialPayload: () => ({}), isEmpty: (n) => !hasMeta(n) && !hasImageArtifact(n),
-  views: { Empty: makeEmptyView(ImageIcon, '描述并生成图像', '在指令区输入提示词，也可以拖入现有图像'), Content: ImageContent },
+  views: {
+    Empty: makeEmptyView(ImageIcon, '描述并生成图像', '在指令区输入提示词，也可以拖入现有图像'),
+    Content: ImageContent,
+    Artifact: ImageArtifactContentV2,
+  },
   instr: {
     placeholder: '描述想要的图像，例如：线粒体自噬机制示意图，简洁学术风…',
     actions: ['生成图像', '更换风格', '生成变体', '提高分辨率'],
   },
   artifactClaims: artifactClaimsForBuiltinV2('image'),
+  projectArtifact: projectArtifactSummary,
   demoResult: (n) => hasMeta(n)
     ? { meta: [...(n.meta ?? []).filter((m) => !m.startsWith('✓')), contentNote(n.instruction.prompt)] }
     : { title: '生成的图像', meta: ['Agent 生成 · 1920 × 1080', `提示词：${(n.instruction.prompt || '机制示意图').slice(0, 20)}`] },
@@ -189,7 +249,7 @@ function TextContent({ node, selected }: NodeViewProps) {
 const textPlugin: NodePlugin = {
   id: 'text', label: '文本', desc: '描述主题，Agent 撰写与改写', icon: Type,
   defaultWidth: 320, initialPayload: () => ({}), isEmpty: (n) => !hasText(n),
-  views: { Empty: TextEmpty, Content: TextContent },
+  views: { Empty: TextEmpty, Content: TextContent, Artifact: FileArtifactContentV2 },
   instr: {
     placeholder: '一句话，振奋人心，但是简短有力。',
     actions: [],
@@ -203,6 +263,7 @@ const textPlugin: NodePlugin = {
         : [],
   },
   artifactClaims: artifactClaimsForBuiltinV2('text'),
+  projectArtifact: projectArtifactSummary,
   materializeRunResult: materializeResponseText,
   demoResult: (n) => {
     const p = n.instruction.prompt
@@ -249,12 +310,17 @@ function TableContent({ node }: NodeViewProps) {
 const tablePlugin: NodePlugin = {
   id: 'table', label: '表格 / 数据', desc: '描述数据结构，Agent 生成表格', icon: Table2,
   defaultWidth: 340, initialPayload: () => ({}), isEmpty: (n) => !hasMeta(n),
-  views: { Empty: makeEmptyView(Table2, '描述并生成表格', '也可以拖入 CSV / Excel 让 Agent 分析'), Content: TableContent },
+  views: {
+    Empty: makeEmptyView(Table2, '描述并生成表格', '也可以拖入 CSV / Excel 让 Agent 分析'),
+    Content: TableContent,
+    Artifact: FileArtifactContentV2,
+  },
   instr: {
     placeholder: '清洗数据、做可视化、分析趋势…',
     actions: ['清洗数据', '可视化', '趋势分析', '生成摘要'],
   },
   artifactClaims: artifactClaimsForBuiltinV2('table'),
+  projectArtifact: projectArtifactSummary,
   demoResult: (n) => hasMeta(n)
     ? { meta: [...(n.meta ?? []).filter((m) => !m.startsWith('✓')), contentNote(n.instruction.prompt)] }
     : { title: '模型性能对比 · Agent 生成', meta: ['3 行 · 3 列 · 示例数据'] },
@@ -302,12 +368,17 @@ function CodeContent({ node }: NodeViewProps) {
 const codePlugin: NodePlugin = {
   id: 'code', label: '代码', desc: '描述需求，Agent 编写代码', icon: Code2,
   defaultWidth: 340, initialPayload: () => ({}), isEmpty: (n) => !hasText(n),
-  views: { Empty: makeEmptyView(Code2, '描述并生成代码', '也可以直接粘贴已有代码'), Content: CodeContent },
+  views: {
+    Empty: makeEmptyView(Code2, '描述并生成代码', '也可以直接粘贴已有代码'),
+    Content: CodeContent,
+    Artifact: FileArtifactContentV2,
+  },
   instr: {
     placeholder: '解释、重构这段代码，或补充注释…',
     actions: ['解释代码', '重构', '添加注释', '修复问题'],
   },
   artifactClaims: artifactClaimsForBuiltinV2('code'),
+  projectArtifact: projectArtifactSummary,
   materializeRunResult: materializeResponseText,
   demoResult: (n) => hasText(n)
     ? { meta: [...(n.meta ?? []).filter((m) => !m.startsWith('✓')), contentNote(n.instruction.prompt)] }
@@ -420,6 +491,27 @@ const smartPlugin: NodePlugin = {
   demoResult: () => null, // 产物由 SmartChart 依据参数渲染
 }
 
+/* ---------------- 通用文件（仅投影，不出现在创建菜单） ---------------- */
+const filePlugin: NodePlugin = {
+  id: 'file',
+  label: '文件',
+  desc: '未识别产物的安全通用视图',
+  creatable: false,
+  icon: FileIcon,
+  defaultWidth: 320,
+  initialPayload: () => ({}),
+  isEmpty: (node) => !hasMeta(node),
+  views: {
+    Empty: makeEmptyView(FileIcon, '通用文件', '由 Agent 产物自动创建'),
+    Content: PdfContent,
+    Artifact: FileArtifactContentV2,
+  },
+  instr: { placeholder: '基于这个文件创建派生任务…', actions: [] },
+  artifactClaims: artifactClaimsForBuiltinV2('file'),
+  projectArtifact: projectArtifactSummary,
+  demoResult: () => null,
+}
+
 /* ---------------- 注册（顺序即创建菜单顺序） ---------------- */
 const builtinPlugins = [
   pdfPlugin,
@@ -431,6 +523,7 @@ const builtinPlugins = [
   codePlugin,
   graphicPlugin,
   smartPlugin,
+  filePlugin,
 ] as const
 
 let registered = false

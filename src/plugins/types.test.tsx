@@ -4,6 +4,8 @@ import { MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN_V2 } from './artifactContracts'
 import {
   enabledArtifactCapabilitySnapshotV2,
   getPlugin,
+  listCreatablePlugins,
+  projectArtifactContentV2,
   registerPlugin,
   type NodePlugin,
   unregisterPlugin,
@@ -70,8 +72,38 @@ describe('browser plugin registry artifact boundary', () => {
       runId: 'run-1',
       artifactId: 'artifact-1',
       mediaType: 'text/plain',
+      size: 10,
+      contentDigest: 'a'.repeat(64),
       title: 'notes.txt',
+      url: 'http://127.0.0.1/artifact',
     })).toEqual({ title: 'notes.txt' })
+  })
+
+  it('sanitizes pure projections and keeps projection-only plugins out of creation', () => {
+    const subject = {
+      ...plugin('@tests/projection-only', [{ extensions: ['.safe'] }]),
+      creatable: false,
+      projectArtifact: () => ({ title: 'Projected', payload: { safe: true } }),
+    } satisfies NodePlugin
+    registerPlugin(subject)
+    try {
+      const artifact = {
+        runId: 'run-1',
+        artifactId: `artifact_${'a'.repeat(64)}`,
+        mediaType: 'application/octet-stream',
+        size: 12,
+        contentDigest: 'b'.repeat(64),
+        title: 'result.safe',
+        url: 'http://127.0.0.1/artifact',
+      }
+      expect(projectArtifactContentV2(getPlugin(subject.id), artifact)).toEqual({
+        title: 'Projected',
+        payload: { safe: true },
+      })
+      expect(listCreatablePlugins().map(({ id }) => id)).not.toContain(subject.id)
+    } finally {
+      unregisterPlugin(subject.id)
+    }
   })
 
   it('snapshots only enabled non-builtin serializable artifact claims', () => {

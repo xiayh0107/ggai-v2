@@ -1,9 +1,14 @@
 import { ExternalLink, Grip, Maximize2 } from 'lucide-react'
-import type { KeyboardEvent, PointerEvent } from 'react'
+import { useEffect, useMemo, useState, type KeyboardEvent, type PointerEvent } from 'react'
 import { runArtifactUrl } from '@/agent/config'
+import { loadArtifactProjectionV2 } from '@/agent/artifactProjectionV2'
 import type { CanvasNodeV2 } from '@/canvas-v2/model'
 import type { CanvasBoundsV2 } from '@/canvas-v2/selectors'
-import { getPlugin } from '@/plugins/types'
+import {
+  getPlugin,
+  projectArtifactContentV2,
+  type TrustedArtifactProjectionV2,
+} from '@/plugins/types'
 import CanvasV2EdgePort from './CanvasV2EdgePort'
 import CanvasV2EntityMenu from './CanvasV2EntityMenu'
 
@@ -145,8 +150,48 @@ function CanvasV2NodeContent({
   const plugin = getPlugin(node.type)
   const Icon = plugin.icon
   const primaryArtifact = node.artifactRefs[0]
-  const visualArtifact = primaryArtifact
-    && (node.type === 'image' || node.type === 'graphic')
+  const artifactKey = primaryArtifact
+    ? `${primaryArtifact.runId}:${primaryArtifact.artifactId}`
+    : null
+  const [artifactState, setArtifactState] = useState<{
+    key: string
+    status: 'resolved' | 'error'
+    artifact?: TrustedArtifactProjectionV2
+  } | null>(null)
+
+  useEffect(() => {
+    if (!artifactKey || !primaryArtifact || !plugin.projectArtifact || !plugin.views.Artifact) return
+    const abort = new AbortController()
+    void loadArtifactProjectionV2({
+      runId: primaryArtifact.runId,
+      artifactId: primaryArtifact.artifactId,
+      projectDir,
+      title: node.title || plugin.label,
+      signal: abort.signal,
+    }).then(
+      (artifact) => setArtifactState({ key: artifactKey, status: 'resolved', artifact }),
+      (error: unknown) => {
+        if (abort.signal.aborted) return
+        void error
+        setArtifactState({ key: artifactKey, status: 'error' })
+      },
+    )
+    return () => abort.abort()
+  }, [artifactKey, node.title, plugin, primaryArtifact, projectDir])
+
+  const resolvedArtifact = artifactState?.key === artifactKey
+    && artifactState.status === 'resolved'
+    ? artifactState.artifact
+    : undefined
+  const projectedContent = useMemo(() => {
+    if (!resolvedArtifact) return null
+    try {
+      return projectArtifactContentV2(plugin, resolvedArtifact)
+    } catch {
+      return null
+    }
+  }, [plugin, resolvedArtifact])
+  const ArtifactView = plugin.views.Artifact
 
   if (compact) {
     return (
@@ -159,23 +204,22 @@ function CanvasV2NodeContent({
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-2.5">
-      {visualArtifact ? (
-        <img
-          src={runArtifactUrl(primaryArtifact.runId, primaryArtifact.artifactId, projectDir)}
-          alt={node.title || `${plugin.label}产物`}
-          className="min-h-0 flex-1 rounded-[10px] bg-gg-subtle object-contain"
-          draggable={false}
-        />
+      {resolvedArtifact && projectedContent && ArtifactView ? (
+        <div className="min-h-0 flex-1">
+          <ArtifactView artifact={resolvedArtifact} content={projectedContent} />
+        </div>
+      ) : primaryArtifact && plugin.projectArtifact && ArtifactView
+        && artifactState?.key !== artifactKey ? (
+          <div
+            role="status"
+            className="flex min-h-0 flex-1 items-center justify-center rounded-[10px] bg-gg-subtle text-[11px] text-gg-muted"
+          >
+            正在验证产物…
+          </div>
       ) : node.text ? (
-        node.type === 'code' ? (
-          <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap rounded-[10px] bg-gg-subtle p-3 font-mono text-[11px] leading-5 text-gg-ink">
-            {node.text}
-          </pre>
-        ) : (
-          <p className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap text-[12px] leading-5 text-gg-ink">
-            {node.text}
-          </p>
-        )
+        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap rounded-[10px] bg-gg-subtle p-3 text-[11.5px] leading-5 text-gg-ink">
+          {node.text}
+        </pre>
       ) : node.payload && Object.keys(node.payload).length > 0 ? (
         <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap rounded-[10px] bg-gg-subtle p-3 font-mono text-[10.5px] leading-5 text-gg-muted">
           {JSON.stringify(node.payload, null, 2)}

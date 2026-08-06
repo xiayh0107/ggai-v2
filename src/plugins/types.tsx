@@ -52,8 +52,17 @@ export type TrustedArtifactProjectionV2 = Readonly<{
   runId: string
   artifactId: string
   mediaType: string
+  size: number
+  contentDigest: string
   title: string
+  /** Runtime-only verified artifact URL; it is never persisted in Canvas state. */
+  url: string
 }>
+
+export interface NodeArtifactViewPropsV2 {
+  artifact: TrustedArtifactProjectionV2
+  content: Readonly<NodeContentPatch>
+}
 
 /**
  * Pure V2 content projection. The hook cannot allocate entities, choose layout,
@@ -95,6 +104,8 @@ export interface NodeViews {
   Empty: ComponentType<NodeViewProps>
   /** 内容态（有内容时） */
   Content: ComponentType<NodeViewProps>
+  /** Optional V2 renderer for a daemon-verified, purely projected artifact. */
+  Artifact?: ComponentType<NodeArtifactViewPropsV2>
 }
 
 export interface NodePlugin {
@@ -104,6 +115,8 @@ export interface NodePlugin {
   label: string
   /** 一句话描述（首屏平铺面板） */
   desc: string
+  /** False for projection-only types such as the generic `file` fallback. */
+  creatable?: boolean
   icon: LucideIcon
   /** 缺省宽度（创建时） */
   defaultWidth: number
@@ -209,6 +222,43 @@ export function listPlugins(): NodePlugin[] {
 /** 启用中的插件（创建菜单 / 首屏面板用） */
 export function listEnabledPlugins(): NodePlugin[] {
   return listPlugins().filter((p) => !disabled.has(p.id))
+}
+
+/** Enabled plugins that users may explicitly create from menus. */
+export function listCreatablePlugins(): NodePlugin[] {
+  return listEnabledPlugins().filter((plugin) => plugin.creatable !== false)
+}
+
+/**
+ * Runs a pure projector and keeps only structured content fields. Projectors
+ * never receive a dispatcher or Canvas entity/layout authority.
+ */
+export function projectArtifactContentV2(
+  plugin: NodePlugin,
+  artifact: TrustedArtifactProjectionV2,
+): NodeContentPatch | null {
+  if (!plugin.projectArtifact) return null
+  const projected = plugin.projectArtifact(Object.freeze({ ...artifact }))
+  if (projected === null) return null
+  const cloned = structuredClone(projected)
+  if (cloned.title !== undefined && typeof cloned.title !== 'string') {
+    throw new TypeError('artifact projector returned an invalid title')
+  }
+  if (cloned.text !== undefined && typeof cloned.text !== 'string') {
+    throw new TypeError('artifact projector returned invalid text')
+  }
+  if (cloned.meta !== undefined
+    && (!Array.isArray(cloned.meta)
+      || !cloned.meta.every((entry) => typeof entry === 'string'))) {
+    throw new TypeError('artifact projector returned invalid metadata')
+  }
+  if (cloned.payload !== undefined
+    && (typeof cloned.payload !== 'object'
+      || cloned.payload === null
+      || Array.isArray(cloned.payload))) {
+    throw new TypeError('artifact projector returned an invalid payload')
+  }
+  return cloned
 }
 
 /**

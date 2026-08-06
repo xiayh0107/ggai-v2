@@ -740,24 +740,39 @@ async function route(
     return
   }
 
+  const runArtifactMetadataMatch = pathname.match(
+    /^\/runs\/([^/]+)\/artifacts\/([^/]+)\/metadata$/,
+  )
+  if (request.method === 'GET' && runArtifactMetadataMatch) {
+    const runId = runIdFromPath(runArtifactMetadataMatch[1])
+    const artifactId = artifactIdFromPath(runArtifactMetadataMatch[2])
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const artifact = await lookupVerifiedRunArtifactV2(context.runs, {
+      runId,
+      artifactId,
+      projectDir,
+    })
+    writeJson(response, 200, {
+      schemaVersion: 2,
+      runId: artifact.runId,
+      artifactId: artifact.artifactId,
+      mediaType: artifact.mediaType,
+      size: artifact.size,
+      contentDigest: artifact.contentDigest,
+    })
+    return
+  }
+
   const runArtifactMatch = pathname.match(/^\/runs\/([^/]+)\/artifacts\/([^/]+)$/)
   if (request.method === 'GET' && runArtifactMatch) {
     const runId = runIdFromPath(runArtifactMatch[1])
     const artifactId = artifactIdFromPath(runArtifactMatch[2])
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
-    let artifact: RunArtifactLookupV2 | null
-    try {
-      artifact = await context.runs.lookupRunArtifact(runId, artifactId, projectDir)
-    } catch (error) {
-      throw new ProtocolError(
-        `artifact failed its closed-manifest integrity check: ${error instanceof Error
-          ? error.message
-          : String(error)}`,
-        'artifact_integrity_error',
-        409,
-      )
-    }
-    if (!artifact) throw new ProtocolError('artifact not found', 'artifact_not_found', 404)
+    const artifact = await lookupVerifiedRunArtifactV2(context.runs, {
+      runId,
+      artifactId,
+      projectDir,
+    })
     await streamRunArtifactV2(response, artifact)
     return
   }
@@ -863,6 +878,26 @@ async function route(
   }
 
   throw new ProtocolError('route not found', 'not_found', 404)
+}
+
+async function lookupVerifiedRunArtifactV2(
+  runs: RunManager,
+  input: { runId: string; artifactId: string; projectDir: string },
+): Promise<RunArtifactLookupV2> {
+  let artifact: RunArtifactLookupV2 | null
+  try {
+    artifact = await runs.lookupRunArtifact(input.runId, input.artifactId, input.projectDir)
+  } catch (error) {
+    throw new ProtocolError(
+      `artifact failed its closed-manifest integrity check: ${error instanceof Error
+        ? error.message
+        : String(error)}`,
+      'artifact_integrity_error',
+      409,
+    )
+  }
+  if (!artifact) throw new ProtocolError('artifact not found', 'artifact_not_found', 404)
+  return artifact
 }
 
 function optionalPluginCapabilityDigest(url: URL): string | undefined {
