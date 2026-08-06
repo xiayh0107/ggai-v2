@@ -212,6 +212,30 @@ test('a newer Run supersedes only pending plans for the same Task', async () => 
   assert.equal((await store.get(latest.plan.planId))?.state, 'pending')
 })
 
+test('reconciles missing parent Tasks atomically and idempotently across restart', async () => {
+  const filePath = await temporaryStorePath()
+  let now = 100
+  const store = new ProjectionPlanStoreV2(filePath, { now: () => now })
+  const deletedTask = await store.createPending(inputFor('task-deleted', 'run-deleted'))
+  const liveTask = await store.createPending(inputFor('task-live', 'run-live'))
+  now = 200
+
+  assert.deepEqual(await store.dismissPendingForMissingTasks(new Set(['task-live'])), {
+    dismissedPlanIds: [deletedTask.plan.planId],
+  })
+  assert.equal((await store.get(deletedTask.plan.planId))?.state, 'dismissed')
+  assert.equal((await store.get(deletedTask.plan.planId))?.updatedAt, 200)
+  assert.equal((await store.get(liveTask.plan.planId))?.state, 'pending')
+
+  now = 300
+  const reopened = new ProjectionPlanStoreV2(filePath, { now: () => now })
+  assert.deepEqual(await reopened.dismissPendingForMissingTasks(new Set(['task-live'])), {
+    dismissedPlanIds: [],
+  })
+  assert.equal((await reopened.get(deletedTask.plan.planId))?.updatedAt, 200)
+  assert.equal((await reopened.get(liveTask.plan.planId))?.state, 'pending')
+})
+
 test('rejects unknown plan ids and invalid stored data without overwriting it', async () => {
   const filePath = await temporaryStorePath()
   const store = new ProjectionPlanStoreV2(filePath)

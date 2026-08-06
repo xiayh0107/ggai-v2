@@ -4,6 +4,7 @@ import path from 'node:path'
 import { inspectRunOutcomeV2 } from '../src/agent/outcomeV2.js'
 import type { SuggestedAction } from '../src/agent/outcome.js'
 import { atomicWriteText, isNodeError } from './atomic-file.js'
+import { parseTaskIdV2 } from './taskRunProtocolV2.js'
 import {
   buildProjectionPlanV2,
   inspectProjectionPlanV2,
@@ -45,6 +46,10 @@ export interface ProjectionPlanStoreV2Options {
   now?: () => number
   /** Revalidates daemon-owned parent directories before each read or write. */
   validatePath?: () => Promise<void>
+}
+
+export interface ProjectionPlanReconciliationV2 {
+  dismissedPlanIds: string[]
 }
 
 export class ProjectionPlanConflictV2Error extends Error {
@@ -272,6 +277,41 @@ export class ProjectionPlanStoreV2 {
       await this.#persist(next)
       this.#records = next
       return cloneRecord(record)
+    })
+  }
+
+  /**
+   * Closes every pending plan whose parent Task no longer exists in the
+   * authoritative durable Canvas document. The Canvas deletion is committed
+   * before this method is called, so retries and restart recovery may safely
+   * repeat the reconciliation without resurrecting or losing Run close data.
+   */
+  async dismissPendingForMissingTasks(
+    liveTaskIds: ReadonlySet<string>,
+  ): Promise<ProjectionPlanReconciliationV2> {
+    for (const taskId of liveTaskIds) parseTaskIdV2(taskId)
+    return this.#runExclusive(async () => {
+      await this.#preparePath()
+      await this.#ensureLoaded()
+      const pending = [...(this.#records?.values() ?? [])]
+        .filter((record) => record.state === 'pending' && !liveTaskIds.has(record.plan.taskId))
+        .sort((left, right) => left.plan.planId.localeCompare(right.plan.planId))
+      if (pending.length === 0) return { dismissedPlanIds: [] }
+
+      const now = this.#now()
+      assertTimestamp(now, 'now')
+      const next = new Map(this.#records ?? [])
+      for (const existing of pending) {
+        if (now < existing.updatedAt) throw new TypeError('now cannot move backwards')
+        next.set(existing.plan.planId, {
+          ...existing,
+          state: 'dismissed',
+          updatedAt: now,
+        })
+      }
+      await this.#persist(next)
+      this.#records = next
+      return { dismissedPlanIds: pending.map((record) => record.plan.planId) }
     })
   }
 

@@ -305,6 +305,14 @@ async function route(
   if (request.method === 'GET' && pathname === '/canvas/v2') {
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
     const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
+    const initial = (await context.versionsV2.getCanvas(projectDir, branch)).canvas
+    await context.runs.reconcileProjectionPlansForCanvasTasks(
+      projectDir,
+      branch,
+      initial.document.tasks.map((task) => task.id),
+    )
+    // Interrupted-run recovery may have materialized a plan while the Task set
+    // was being reconciled. Return the post-recovery durable revision.
     writeJson(response, 200, (await context.versionsV2.getCanvas(projectDir, branch)).canvas)
     return
   }
@@ -337,21 +345,32 @@ async function route(
       return
     }
 
+    const commitAndReconcile = async () => {
+      const committed = await commit()
+      await context.runs.reconcileProjectionPlansForCanvasTasks(
+        projectDir,
+        parsed.branch,
+        committed.document.tasks.map((task) => task.id),
+      )
+      return committed
+    }
+
     const envelope = (await context.versionsV2.getCanvas(projectDir, parsed.branch)).canvas
     if (envelope.revision !== parsed.baseRevision) {
       // Preserve command-store replay and conflict semantics. A command that
-      // cannot mutate this revision does not need a Task mutation lease.
-      writeJson(response, 200, await commit())
+      // cannot mutate this revision does not need a Task mutation lease. An
+      // exact lost-ack replay still repairs any post-commit plan settlement.
+      writeJson(response, 200, await commitAndReconcile())
       return
     }
     const taskIds = destructiveTaskIdsV2(command, envelope.document)
     const result = taskIds.length === 0
-      ? await commit()
+      ? await commitAndReconcile()
       : await context.runs.withIdleTasks(
           projectDir,
           parsed.branch,
           taskIds,
-          commit,
+          commitAndReconcile,
         )
     writeJson(response, 200, result)
     return

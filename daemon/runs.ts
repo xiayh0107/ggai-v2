@@ -575,6 +575,28 @@ export class RunManager {
     return true
   }
 
+  /**
+   * Reconciles the branch-scoped plan registry against the durable Canvas Task
+   * set. Missing Tasks are authoritative deletions; their pending plans are
+   * closed idempotently while the append-only Run close remains untouched.
+   */
+  async reconcileProjectionPlansForCanvasTasks(
+    projectDirRequest: string,
+    canvasBranchRequest: string,
+    liveTaskIds: readonly string[],
+  ): Promise<string[]> {
+    const projectDir = await this.#leaseProject(projectDirRequest)
+    const canvasBranch = parseCanvasBranch(canvasBranchRequest)
+    const parsedTaskIds = new Set(liveTaskIds.map((taskId) => parseTaskIdV2(taskId)))
+    this.#runLogs(projectDir)
+    await this.#runLogRecovery.get(projectDir)
+    const result = await this.#projectionPlansV2(
+      projectDir,
+      canvasBranch,
+    ).dismissPendingForMissingTasks(parsedTaskIds)
+    return result.dismissedPlanIds
+  }
+
   subscribe(runId: string, listener: RunListener, afterId = 0): RunSubscription | null {
     const run = this.#runs.get(runId)
     if (!run) return null
@@ -705,6 +727,11 @@ export class RunManager {
     const projectDir = await this.#leaseProject(projectDirRequest)
     this.#assertOpen()
     const canvasBranch = parseCanvasBranch(canvasBranchRequest)
+    // Rebuild interrupted durable Run closes before deciding that a Task is
+    // idle. A restart must not create a window where deletion outruns recovery.
+    this.#runLogs(projectDir)
+    await this.#runLogRecovery.get(projectDir)
+    this.#assertOpen()
     const normalizedTaskIds = [...new Set(taskIds.map((taskId) => parseTaskIdV2(taskId)))]
       .sort((left, right) => left.localeCompare(right))
     if (normalizedTaskIds.length === 0) {
