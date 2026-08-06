@@ -29,10 +29,18 @@ async function withDaemon(
 test('V1 mode advertises its actual schema and rejects every V2 write path', async () => {
   await withDaemon('v1', async (baseUrl) => {
     const health = await (await fetch(`${baseUrl}/health`)).json() as {
-      capabilities: { canvasModelV1: boolean; canvasModelV2: boolean }
+      capabilities: {
+        canvasModelV1: boolean
+        canvasModelV2: boolean
+        pluginArtifactCapabilitiesV2: boolean
+      }
       canvas: { model: string; schemaVersion: number; resetRequired: boolean }
     }
-    assert.deepEqual(health.capabilities, { canvasModelV1: true, canvasModelV2: false })
+    assert.deepEqual(health.capabilities, {
+      canvasModelV1: true,
+      canvasModelV2: false,
+      pluginArtifactCapabilitiesV2: false,
+    })
     assert.deepEqual(health.canvas, { model: 'v1', schemaVersion: 1, resetRequired: false })
 
     const canvas = await fetch(`${baseUrl}/canvas/v2`)
@@ -62,10 +70,18 @@ test('V1 mode advertises its actual schema and rejects every V2 write path', asy
 test('V2 mode rejects legacy canvas, path artifact, and snapshot Run APIs', async () => {
   await withDaemon('v2', async (baseUrl) => {
     const health = await (await fetch(`${baseUrl}/health`)).json() as {
-      capabilities: { canvasModelV1: boolean; canvasModelV2: boolean }
+      capabilities: {
+        canvasModelV1: boolean
+        canvasModelV2: boolean
+        pluginArtifactCapabilitiesV2: boolean
+      }
       canvas: { model: string; schemaVersion: number }
     }
-    assert.deepEqual(health.capabilities, { canvasModelV1: false, canvasModelV2: true })
+    assert.deepEqual(health.capabilities, {
+      canvasModelV1: false,
+      canvasModelV2: true,
+      pluginArtifactCapabilitiesV2: true,
+    })
     assert.equal(health.canvas.model, 'v2')
     assert.equal(health.canvas.schemaVersion, 2)
 
