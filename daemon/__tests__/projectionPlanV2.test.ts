@@ -12,6 +12,7 @@ import {
   buildProjectionPlanV2,
   inspectProjectionPluginContractsV2,
   inspectProjectionPlanV2,
+  MAX_ARTIFACT_RULES_PER_PLUGIN_V2,
   MAX_AUTO_MATERIALIZED_OUTPUTS_V2,
   type ProjectionPluginContractV2,
   type ProjectionRunStatusV2,
@@ -264,6 +265,17 @@ test('plugin projection claims are strict serializable data and fallback ranking
     id: 'image',
     artifactRules: [{ extensions: ['.PNG'] }],
   }]).status, 'invalid')
+  assert.equal(inspectProjectionPluginContractsV2([
+    { id: 'image', artifactRules: [{ extensions: ['.png'] }] },
+    { id: 'image', artifactRules: [{ extensions: ['.jpg'] }] },
+  ]).status, 'invalid')
+  assert.equal(inspectProjectionPluginContractsV2([{
+    id: 'image',
+    artifactRules: Array.from(
+      { length: MAX_ARTIFACT_RULES_PER_PLUGIN_V2 + 1 },
+      () => ({ extensions: ['.png'] }),
+    ),
+  }]).status, 'invalid')
 
   const fallbackManifest = buildArtifactManifestV1({
     runId: 'run-fallback',
@@ -307,6 +319,30 @@ test('built-in projection claims are serializable, include R, and retain a gener
   assert.ok(code?.artifactRules.some((rule) => rule.extensions?.includes('.r')))
   assert.equal(generic?.acceptsUnknown, true)
   assert.equal(JSON.parse(JSON.stringify(inspection.plugins)).length, 6)
+})
+
+test('built-in claim priority normalizes uppercase extensions and preserves unknown files', () => {
+  const runId = 'run-built-in-routing'
+  const routingManifest = buildArtifactManifestV1({
+    runId,
+    complete: true,
+    files: [
+      file('source/analysis.R', 'text/plain', runId),
+      file('opaque.custom', 'application/octet-stream', runId),
+    ],
+  })
+  const result = buildProjectionPlanV2({
+    taskId: 'task-built-in-routing',
+    runId,
+    runStatus: 'done',
+    manifest: routingManifest,
+    plugins: BUILTIN_PROJECTION_PLUGIN_CONTRACTS_V2,
+  })
+  const pluginByTitle = new Map(result.plan.outputs.map((output) => [output.title, output.pluginId]))
+
+  assert.equal(pluginByTitle.get('analysis.R'), 'code')
+  assert.equal(pluginByTitle.get('opaque.custom'), 'file')
+  assert.equal(result.diagnostics.length, 0)
 })
 
 test('different outputs may safely share one verified artifact reference', () => {

@@ -9,7 +9,13 @@ import {
 } from 'lucide-react'
 import { useCanvas } from '@/hooks/useCanvasStore'
 import type { CanvasNode } from '@/types/canvas'
-import { registerPlugin, type NodePlugin, type NodeViewProps } from '../types'
+import {
+  registerPlugin,
+  unregisterPlugin,
+  type NodePlugin,
+  type NodeViewProps,
+} from '../types'
+import { artifactClaimsForBuiltinV2 } from '../artifactContracts'
 import { makeEmptyView, MetaLines } from '../shared'
 import { MarkdownView } from '../markdown'
 import SmartChart from '@/components/canvas/SmartChart'
@@ -45,6 +51,7 @@ const pdfPlugin: NodePlugin = {
     placeholder: '对这个文件提问，或让它提取图表、总结章节…',
     actions: ['总结要点', '提取图表', '提取方法', '翻译', '基于内容提问'],
   },
+  artifactClaims: artifactClaimsForBuiltinV2('pdf'),
   demoResult: (n) => hasMeta(n)
     ? { meta: [...(n.meta ?? []).filter((m) => !m.startsWith('✓')), contentNote(n.instruction.prompt)] }
     : { title: '文献综述 · Agent 整理', meta: ['Agent 检索 3 篇相关文献', '已提取 6 图 · 4 表 · 12 章节'] },
@@ -71,6 +78,7 @@ const webPlugin: NodePlugin = {
     placeholder: '总结这个页面，或提取其中的关键信息…',
     actions: ['总结页面', '提取要点', '翻译'],
   },
+  artifactClaims: [],
   demoResult: (n) => hasMeta(n)
     ? { meta: [...(n.meta ?? []).filter((m) => !m.startsWith('✓')), contentNote(n.instruction.prompt)] }
     : { title: '主题检索 · Agent 整理', meta: ['Agent 检索 4 个相关页面', '已抓取摘要与关键数据'] },
@@ -111,6 +119,7 @@ const imagePlugin: NodePlugin = {
     placeholder: '描述想要的图像，例如：线粒体自噬机制示意图，简洁学术风…',
     actions: ['生成图像', '更换风格', '生成变体', '提高分辨率'],
   },
+  artifactClaims: artifactClaimsForBuiltinV2('image'),
   demoResult: (n) => hasMeta(n)
     ? { meta: [...(n.meta ?? []).filter((m) => !m.startsWith('✓')), contentNote(n.instruction.prompt)] }
     : { title: '生成的图像', meta: ['Agent 生成 · 1920 × 1080', `提示词：${(n.instruction.prompt || '机制示意图').slice(0, 20)}`] },
@@ -193,6 +202,7 @@ const textPlugin: NodePlugin = {
         ? ['改写', '缩短', '扩写', '改变语气', '生成标题']
         : [],
   },
+  artifactClaims: artifactClaimsForBuiltinV2('text'),
   materializeRunResult: materializeResponseText,
   demoResult: (n) => {
     const p = n.instruction.prompt
@@ -244,6 +254,7 @@ const tablePlugin: NodePlugin = {
     placeholder: '清洗数据、做可视化、分析趋势…',
     actions: ['清洗数据', '可视化', '趋势分析', '生成摘要'],
   },
+  artifactClaims: artifactClaimsForBuiltinV2('table'),
   demoResult: (n) => hasMeta(n)
     ? { meta: [...(n.meta ?? []).filter((m) => !m.startsWith('✓')), contentNote(n.instruction.prompt)] }
     : { title: '模型性能对比 · Agent 生成', meta: ['3 行 · 3 列 · 示例数据'] },
@@ -269,6 +280,7 @@ const formulaPlugin: NodePlugin = {
     placeholder: '解释这个公式，或转为可运行的代码…',
     actions: ['解释公式', '化简', '转为代码'],
   },
+  artifactClaims: [],
   materializeRunResult: materializeResponseText,
   demoResult: (n) => hasText(n)
     ? { meta: [...(n.meta ?? []).filter((m) => !m.startsWith('✓')), contentNote(n.instruction.prompt)] }
@@ -295,6 +307,7 @@ const codePlugin: NodePlugin = {
     placeholder: '解释、重构这段代码，或补充注释…',
     actions: ['解释代码', '重构', '添加注释', '修复问题'],
   },
+  artifactClaims: artifactClaimsForBuiltinV2('code'),
   materializeRunResult: materializeResponseText,
   demoResult: (n) => hasText(n)
     ? { meta: [...(n.meta ?? []).filter((m) => !m.startsWith('✓')), contentNote(n.instruction.prompt)] }
@@ -326,6 +339,7 @@ const graphicPlugin: NodePlugin = {
     placeholder: '生成变体、调整风格…',
     actions: ['生成变体', '调整配色', '提取样式'],
   },
+  artifactClaims: [],
   demoResult: (n) => hasMeta(n)
     ? { meta: [...(n.meta ?? []).filter((m) => !m.startsWith('✓')), contentNote(n.instruction.prompt)] }
     : { title: '流程示意图 · Agent 绘制', meta: ['可编辑图形 · 3 图层'] },
@@ -402,14 +416,33 @@ const smartPlugin: NodePlugin = {
     actions: [], // 通用型：不给固定动作
     ParamSlot: SmartParamSlot,
   },
+  artifactClaims: [],
   demoResult: () => null, // 产物由 SmartChart 依据参数渲染
 }
 
 /* ---------------- 注册（顺序即创建菜单顺序） ---------------- */
+const builtinPlugins = [
+  pdfPlugin,
+  webPlugin,
+  imagePlugin,
+  textPlugin,
+  tablePlugin,
+  formulaPlugin,
+  codePlugin,
+  graphicPlugin,
+  smartPlugin,
+] as const
+
 let registered = false
 export function registerBuiltinPlugins() {
   if (registered) return
   registered = true
-  ;[pdfPlugin, webPlugin, imagePlugin, textPlugin, tablePlugin, formulaPlugin, codePlugin, graphicPlugin, smartPlugin]
-    .forEach(registerPlugin)
+  builtinPlugins.forEach(registerPlugin)
+}
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    builtinPlugins.forEach((plugin) => unregisterPlugin(plugin.id))
+    registered = false
+  })
 }

@@ -12,7 +12,9 @@
 | 内容契约 | `initialPayload()` + `isEmpty(node)` | 节点的本体数据结构与"空内容"判定；空 → 空白态，非空 → 内容态 |
 | 视图 | `views.Empty` / `views.Content` | 两个 React 组件；生成中骨架屏由引擎统一接管，插件无需关心 |
 | 指令配置 | `instr.placeholder` / `instr.actions` / `instr.actionsFor` / `instr.ParamSlot` | 输入占位、专属快捷指令、按节点内容与来源动态计算的上下文快捷指令（可选）、底部参数槽（可选） |
-| Run 投影 | `materializeRunResult(node, result)` | 可选：把通用 Agent 文本与产物投影为本节点的 `text` / `payload` / `meta` |
+| Artifact 声明 | `artifactClaims` | 必填、纯数据：声明插件接受的扩展名 / MIME 类型与优先级 |
+| V2 内容投影 | `projectArtifact(artifact)` | 可选纯函数：把 daemon 已验证的 artifact identity 投影为 `title` / `text` / `payload` / `meta` |
+| V1 Run 投影 | `materializeRunResult(node, result)` | cutover 期间保留：把旧版 Agent 文本与产物路径投影为节点内容 |
 | 演示结果 | `demoResult(node, prompt)` | 原型阶段：指令完成后要合并进节点的补丁；返回 `null` 表示无内容变化 |
 
 ## 引擎为所有插件统一提供
@@ -52,6 +54,16 @@ registerPlugin({
     placeholder: '提取关键帧、转录字幕、总结内容…',
     actions: ['提取关键帧', '转录字幕', '总结内容'],
   },
+  artifactClaims: [{
+    extensions: ['.mp4', '.mov'],
+    mediaTypes: ['video/*'],
+    priority: 20,
+  }],
+  projectArtifact: ({ runId, artifactId, mediaType, title }) => ({
+    title,
+    payload: { artifactRef: { runId, artifactId, mediaType } },
+  }),
+  // V1 兼容路径；V2 cutover 后删除。
   materializeRunResult: (_node, result) => {
     const videoPath = result.artifactFiles.find((file) => /\.(?:mp4|mov)$/iu.test(file))
     return videoPath ? { payload: { videoPath } } : null
@@ -62,11 +74,31 @@ registerPlugin({
 
 注册即生效：创建菜单、首屏平铺面板、来源小窗、连线、指令面板全部自动获得该类型。
 
+## Artifact contract 边界
+
+`artifactClaims` 的数据契约位于 `artifactContracts.ts`。浏览器 `registerPlugin()` 和 daemon
+使用同一个校验器：插件 id 不得重复；每个插件最多 32 条规则；单条规则的扩展名与 MIME
+matcher 各最多 64 个；`priority` 必须是 `-1000..1000` 的安全整数。扩展名必须带点并使用
+小写（例如 `.r`）；匹配 artifact 路径时会先把实际扩展名规范化为小写，因此 `analysis.R`
+仍由 `code` 插件接收。重复 id 会被拒绝；需要热替换的模块应在 HMR dispose 阶段先调用
+`unregisterPlugin(id)`，内置插件已处理这个生命周期。
+
+内置 `code` / `image` / `pdf` / `table` / `text` / `file` 只在这个 data-only registry 中
+维护一次。typed claim 按 `priority` 排序，同优先级再比较匹配具体度与稳定 id；`file` 是未知
+格式的最低优先级兜底，不需要成为创建菜单中的独立 UI 插件。daemon 只导入这个 `.ts` 数据
+模块，绝不导入 `types.tsx`、`builtins/`、React、Lucide 或任何 renderer。
+
+`projectArtifact` 只接收可信的 `{ runId, artifactId, mediaType, title }`，只返回
+`NodeContentPatch`。它拿不到 entity id、坐标、edges 或 commands，因此不能创建节点、决定布局
+或修改图关系；函数本身也不会被序列化或传到 daemon。V1 的 `materializeRunResult` 在 V2
+cutover 完成前仍可并存。
+
 ## 约定
 
 - **生成优先（generation-first）**：这是 Agent 生成画布，不是资产柜。空态主行动是"描述需求，Agent 生成"；导入已有资产（拖文件、贴链接）只作为次要路径出现在辅助文案里
 - 颜色只用设计令牌（`gg.*`），不引入渐变、不显示模型名与积分
 - 视图组件保持"内容优先"：插件只渲染主体区，外壳与状态条不归插件管
 - `payload` 结构由插件自定，持久化时随节点保存；避免引用引擎内部字段
+- `artifactClaims` 必须是 JSON 可序列化数据；不要放函数、renderer、正则表达式或运行时对象
 - `instr.actions` / `actionsFor` 是无结构化 Agent 结果时的 UI 兜底；成功 run 返回的上下文建议会优先展示
 - 节点来源以 `Edge` 为唯一事实源；`instruction.sources` 仅保留为旧数据兼容镜像，插件不应读写它

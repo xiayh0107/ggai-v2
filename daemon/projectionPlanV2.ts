@@ -8,6 +8,13 @@ import {
 } from '../src/agent/outcomeV2.js'
 import type { SuggestedAction } from '../src/agent/outcome.js'
 import {
+  inspectArtifactClaimRegistryV2,
+  MAX_ARTIFACT_CLAIM_MATCHERS_PER_RULE_V2,
+  MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN_V2,
+  MAX_ARTIFACT_PLUGIN_REGISTRATIONS_V2,
+  type ArtifactClaimRuleV2,
+} from '../src/plugins/artifactContracts.js'
+import {
   artifactManifestDigestV1,
   inspectArtifactManifestV1,
   type ArtifactManifestEntryV1,
@@ -16,19 +23,15 @@ import {
 import { parseRunId } from './protocol.js'
 
 export const PROJECTION_PLAN_V2_SCHEMA_VERSION = 2
-export const MAX_PROJECTION_PLUGINS_V2 = 500
-export const MAX_ARTIFACT_RULES_PER_PLUGIN_V2 = 32
-export const MAX_ARTIFACT_MATCHERS_PER_RULE_V2 = 64
+export const MAX_PROJECTION_PLUGINS_V2 = MAX_ARTIFACT_PLUGIN_REGISTRATIONS_V2
+export const MAX_ARTIFACT_RULES_PER_PLUGIN_V2 = MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN_V2
+export const MAX_ARTIFACT_MATCHERS_PER_RULE_V2 = MAX_ARTIFACT_CLAIM_MATCHERS_PER_RULE_V2
 export const MAX_PROJECTION_OUTPUTS_V2 = 32
 export const MAX_AUTO_MATERIALIZED_OUTPUTS_V2 = 12
 
 export type ProjectionRunStatusV2 = 'done' | 'error' | 'cancelled' | 'interrupted'
 
-export interface ArtifactProjectionRuleV2 {
-  extensions?: string[]
-  mediaTypes?: string[]
-  priority?: number
-}
+export type ArtifactProjectionRuleV2 = ArtifactClaimRuleV2
 
 /** Serializable artifact capability; React materializers never cross this boundary. */
 export interface ProjectionPluginContractV2 {
@@ -435,73 +438,24 @@ function parseProjectionPlugins(
   if (!Array.isArray(values) || values.length > MAX_PROJECTION_PLUGINS_V2) {
     throw new TypeError('plugins exceeds the supported bound')
   }
-  const ids = new Set<string>()
-  return values.map((plugin, pluginIndex) => {
+  const registrations = values.map((plugin, pluginIndex) => {
     if (!isRecord(plugin)
       || !hasOnlyKeys(plugin, ['id', 'artifactRules', 'acceptsUnknown'])) {
       throw new TypeError(`plugins[${pluginIndex}] has unsupported properties`)
     }
-    if (!isPluginId(plugin.id) || ids.has(plugin.id)) {
-      throw new TypeError(`plugins[${pluginIndex}].id is invalid or duplicated`)
-    }
-    ids.add(plugin.id)
-    if (!Array.isArray(plugin.artifactRules)
-      || plugin.artifactRules.length > MAX_ARTIFACT_RULES_PER_PLUGIN_V2) {
-      throw new TypeError(`plugins[${pluginIndex}].artifactRules is invalid`)
-    }
-    if (plugin.acceptsUnknown !== undefined && typeof plugin.acceptsUnknown !== 'boolean') {
-      throw new TypeError(`plugins[${pluginIndex}].acceptsUnknown is invalid`)
-    }
-    const artifactRules = plugin.artifactRules.map((rule, ruleIndex) =>
-      validateRule(rule, pluginIndex, ruleIndex))
     return {
       id: plugin.id,
-      artifactRules,
-      ...(plugin.acceptsUnknown ? { acceptsUnknown: true } : {}),
+      artifactClaims: plugin.artifactRules,
+      ...(plugin.acceptsUnknown !== undefined ? { acceptsUnknown: plugin.acceptsUnknown } : {}),
     }
   })
-}
-
-function validateRule(
-  rule: unknown,
-  pluginIndex: number,
-  ruleIndex: number,
-): ArtifactProjectionRuleV2 {
-  if (!isRecord(rule)) throw new TypeError(`plugins[${pluginIndex}].artifactRules[${ruleIndex}] is invalid`)
-  if (!hasOnlyKeys(rule, ['extensions', 'mediaTypes', 'priority'])) {
-    throw new TypeError(`plugins[${pluginIndex}].artifactRules[${ruleIndex}] has unsupported properties`)
-  }
-  if (rule.extensions !== undefined && !Array.isArray(rule.extensions)) {
-    throw new TypeError(`plugins[${pluginIndex}].artifactRules[${ruleIndex}].extensions is invalid`)
-  }
-  if (rule.mediaTypes !== undefined && !Array.isArray(rule.mediaTypes)) {
-    throw new TypeError(`plugins[${pluginIndex}].artifactRules[${ruleIndex}].mediaTypes is invalid`)
-  }
-  const extensions = (rule.extensions ?? []) as unknown[]
-  const mediaTypes = (rule.mediaTypes ?? []) as unknown[]
-  if (extensions.length > MAX_ARTIFACT_MATCHERS_PER_RULE_V2
-    || mediaTypes.length > MAX_ARTIFACT_MATCHERS_PER_RULE_V2
-    || extensions.length + mediaTypes.length === 0
-    || !extensions.every((extension) =>
-      typeof extension === 'string' && /^\.[a-z0-9][a-z0-9.+_-]{0,31}$/u.test(extension))
-    || !mediaTypes.every((mediaType) =>
-      typeof mediaType === 'string' && isMediaTypeMatcher(mediaType))
-    || new Set(extensions).size !== extensions.length
-    || new Set(mediaTypes).size !== mediaTypes.length) {
-    throw new TypeError(`plugins[${pluginIndex}].artifactRules[${ruleIndex}] matchers are invalid`)
-  }
-  const priority = rule.priority ?? 0
-  if (typeof priority !== 'number'
-    || !Number.isSafeInteger(priority)
-    || priority < -1_000
-    || priority > 1_000) {
-    throw new TypeError(`plugins[${pluginIndex}].artifactRules[${ruleIndex}].priority is invalid`)
-  }
-  return {
-    ...(extensions.length > 0 ? { extensions: [...extensions] as string[] } : {}),
-    ...(mediaTypes.length > 0 ? { mediaTypes: [...mediaTypes] as string[] } : {}),
-    ...(priority !== 0 ? { priority } : {}),
-  }
+  const inspection = inspectArtifactClaimRegistryV2(registrations)
+  if (inspection.status !== 'valid') throw new TypeError(inspection.reason)
+  return inspection.registrations.map((registration) => ({
+    id: registration.id,
+    artifactRules: registration.artifactClaims,
+    ...(registration.acceptsUnknown ? { acceptsUnknown: true } : {}),
+  }))
 }
 
 function selectFallbackPlugin(
@@ -728,10 +682,6 @@ function isPluginId(value: unknown): value is string {
     && /^@?[A-Za-z0-9][A-Za-z0-9._:@/-]*$/u.test(value)
     && !value.includes('..')
     && !value.includes('//')
-}
-
-function isMediaTypeMatcher(value: string): boolean {
-  return /^[a-z0-9!#$&^_.+-]+\/(?:[a-z0-9!#$&^_.+-]+|\*)$/u.test(value)
 }
 
 function isDisplayString(value: unknown, maxLength: number): value is string {

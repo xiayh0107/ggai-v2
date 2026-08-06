@@ -2,6 +2,10 @@ import { FileQuestion, type LucideIcon } from 'lucide-react'
 import type { ComponentType } from 'react'
 import type { CanvasNode } from '@/types/canvas'
 import type { RunOutcome } from '@/agent/outcome'
+import {
+  inspectArtifactClaimRegistryV2,
+  type ArtifactClaimRuleV2,
+} from './artifactContracts'
 
 /**
  * GGAI 节点插件规范（v0.1）
@@ -37,6 +41,22 @@ export type NodeContentPatch = Pick<Partial<CanvasNode>, 'title' | 'text' | 'met
 export type MaterializeRunResult = (
   node: CanvasNode,
   result: NodeRunResult,
+) => NodeContentPatch | null
+
+/** Daemon-verified artifact identity exposed to a browser-only pure projector. */
+export type TrustedArtifactProjectionV2 = Readonly<{
+  runId: string
+  artifactId: string
+  mediaType: string
+  title: string
+}>
+
+/**
+ * Pure V2 content projection. The hook cannot allocate entities, choose layout,
+ * create edges, or dispatch commands because it receives no canvas authority.
+ */
+export type ProjectArtifactV2 = (
+  artifact: TrustedArtifactProjectionV2,
 ) => NodeContentPatch | null
 
 /** 指令参数槽：渲染在指令面板底部控制条左侧（如智能节点的图表类型 / 风格 / 张数） */
@@ -91,7 +111,11 @@ export interface NodePlugin {
   views: NodeViews
   /** 指令区配置 */
   instr: InstrConfig
-  /** 可选：把 Agent 文本/产物投影到插件内容，画布内核不分支具体节点 id。 */
+  /** 可序列化的 V2 产物声明；daemon 与浏览器使用同一份数据规则。 */
+  artifactClaims: readonly ArtifactClaimRuleV2[]
+  /** 可选：仅把 daemon 已验证的 artifact identity 投影为内容补丁。函数绝不跨 daemon。 */
+  projectArtifact?: ProjectArtifactV2
+  /** V1 兼容：把 Agent 文本/路径投影到插件内容，待 V2 cutover 后移除。 */
   materializeRunResult?: MaterializeRunResult
   /** 首次指令演示结果 */
   demoResult: DemoResult
@@ -114,10 +138,29 @@ export function subscribePlugins(l: () => void): () => void {
 
 export function registerPlugin(p: NodePlugin) {
   if (registry.has(p.id)) {
-    console.warn(`[ggai] 节点插件 "${p.id}" 重复注册，已覆盖`)
+    throw new TypeError(`[ggai] 节点插件 "${p.id}" 重复注册`)
   }
-  registry.set(p.id, p)
+  const inspection = inspectArtifactClaimRegistryV2([{
+    id: p.id,
+    artifactClaims: p.artifactClaims,
+  }])
+  if (inspection.status !== 'valid') {
+    throw new TypeError(`[ggai] 节点插件 "${p.id}" 的 artifactClaims 无效：${inspection.reason}`)
+  }
+  registry.set(p.id, {
+    ...p,
+    artifactClaims: inspection.registrations[0]?.artifactClaims ?? [],
+  })
   emit()
+}
+
+/** Explicit lifecycle hook for plugin unload/HMR; normal registration never overwrites. */
+export function unregisterPlugin(id: string): boolean {
+  const removed = registry.delete(id)
+  if (!removed) return false
+  disabled.delete(id)
+  emit()
+  return true
 }
 
 export function setPluginEnabled(id: string, enabled: boolean) {
@@ -149,6 +192,7 @@ export function getPlugin(id: string): NodePlugin {
       ),
     },
     instr: { placeholder: '该节点类型未安装…', actions: [] },
+    artifactClaims: [],
     demoResult: () => null,
   }
 }
