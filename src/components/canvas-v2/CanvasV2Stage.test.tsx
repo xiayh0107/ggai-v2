@@ -2,6 +2,7 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { applyCanvasCommandV2 } from '@/canvas-v2/commands'
 import { TASK_OUTPUT_LAYOUT_V2, taskOutputFrameV2 } from '@/canvas-v2/layout'
 import { emptyCanvasDocumentV2, type CanvasDocumentV2 } from '@/canvas-v2/model'
 import {
@@ -136,7 +137,86 @@ function fixtureDocument(): CanvasDocumentV2 {
   return document
 }
 
-async function createSubject(view?: Partial<CanvasV2ViewState>) {
+function collectionFixture(): CanvasDocumentV2 {
+  const document = emptyCanvasDocumentV2()
+  document.everCreated = true
+  document.collections.push({
+    id: 'collection-1',
+    title: '研究集合',
+    anchor: { x: 20, y: 20 },
+  })
+  document.tasks.push(
+    {
+      id: 'task-a',
+      title: '集合任务',
+      goal: '分析集合内容',
+      anchor: { x: 80, y: 100 },
+      collectionId: 'collection-1',
+      origin: { kind: 'user' },
+    },
+    {
+      id: 'task-b',
+      title: '目标任务',
+      goal: '接收引用',
+      anchor: { x: 980, y: 120 },
+      origin: { kind: 'user' },
+    },
+  )
+  document.nodes.push(
+    {
+      id: 'node-a',
+      type: 'text',
+      frame: { x: 500, y: 120, w: 300, h: 180, z: 1 },
+      title: '集合节点',
+      text: '顶层集合成员',
+      artifactRefs: [],
+      collectionId: 'collection-1',
+      origin: { kind: 'user' },
+    },
+    {
+      id: 'node-child',
+      type: 'code',
+      frame: { x: 120, y: 300, w: 300, h: 180, z: 2 },
+      title: '任务内部节点',
+      text: 'summary(data)',
+      artifactRefs: [],
+      homeTaskId: 'task-a',
+      origin: { kind: 'user' },
+    },
+  )
+  document.edges.push(
+    {
+      id: 'edge-task',
+      from: { kind: 'task', id: 'task-a' },
+      to: { kind: 'task', id: 'task-b' },
+      relation: 'references',
+      contextRole: 'full',
+      origin: { kind: 'user' },
+    },
+    {
+      id: 'edge-node',
+      from: { kind: 'node', id: 'node-a' },
+      to: { kind: 'task', id: 'task-b' },
+      relation: 'references',
+      contextRole: 'full',
+      origin: { kind: 'user' },
+    },
+    {
+      id: 'edge-child',
+      from: { kind: 'node', id: 'node-child' },
+      to: { kind: 'task', id: 'task-b' },
+      relation: 'references',
+      contextRole: 'full',
+      origin: { kind: 'user' },
+    },
+  )
+  return document
+}
+
+async function createSubject(
+  view?: Partial<CanvasV2ViewState>,
+  canvasDocument = fixtureDocument(),
+) {
   const persistence = new CanvasV2Persistence({
     adapter: new MemoryCanvasV2PersistenceAdapter(),
   })
@@ -150,7 +230,8 @@ async function createSubject(view?: Partial<CanvasV2ViewState>) {
       ...view,
     })
   }
-  const canvasDocument = fixtureDocument()
+  let serverDocument = structuredClone(canvasDocument)
+  let serverRevision = 0
   const store = new CanvasV2Store({
     daemonBaseUrl,
     scope,
@@ -163,7 +244,25 @@ async function createSubject(view?: Partial<CanvasV2ViewState>) {
         lastMutationId: null,
         document: canvasDocument,
       }),
-      flushOutbox: async () => ({ status: 'flushed', acknowledged: 0, envelope: null }),
+      flushOutbox: async (_scope, outbox) => {
+        const entries = await outbox.list({ daemonBaseUrl, ...scope })
+        for (const entry of entries) {
+          serverDocument = applyCanvasCommandV2(serverDocument, entry.command)
+          serverRevision += 1
+          await outbox.ack({ daemonBaseUrl, ...scope }, entry.mutationId)
+        }
+        return {
+          status: 'flushed',
+          acknowledged: entries.length,
+          envelope: {
+            branch: 'main',
+            revision: serverRevision,
+            updatedAt: '2026-08-05T00:00:00.000Z',
+            lastMutationId: entries.at(-1)?.mutationId ?? null,
+            document: structuredClone(serverDocument),
+          },
+        }
+      },
     },
   })
   await store.load()
@@ -395,6 +494,280 @@ describe('Canvas V2 interactive stage', () => {
       { kind: 'task', id: 'task-single' },
       { kind: 'node', id: 'node-single' },
     ]))
+  })
+
+  it('explicitly saves a typed top-level selection as a collection and undoes through commands', async () => {
+    const { store, host } = await createSubject()
+    const dispatch = vi.spyOn(store, 'dispatchCommand')
+    act(() => store.setSelection([
+      { kind: 'task', id: 'task-empty' },
+      { kind: 'node', id: 'node-top' },
+    ]))
+
+    const save = required<HTMLButtonElement>(host, '[data-testid="save-selection-collection"]')
+    expect(save.disabled).toBe(false)
+    await act(async () => save.click())
+    await vi.waitFor(() => expect(store.getSnapshot().document.collections).toHaveLength(1))
+    const created = store.getSnapshot().document.collections[0]!
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CreateCollectionFromSelection',
+      members: expect.arrayContaining([
+        { kind: 'task', id: 'task-empty' },
+        { kind: 'node', id: 'node-top' },
+      ]),
+    }))
+    expect(store.getSnapshot().view.selection).toEqual([{ kind: 'collection', id: created.id }])
+
+    const undo = required<HTMLButtonElement>(host, '[data-testid="canvas-v2-undo"] button')
+    await act(async () => undo.click())
+    await vi.waitFor(() => expect(store.getSnapshot().document.collections).toEqual([]))
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'DissolveCollection',
+      collectionId: created.id,
+    })
+  })
+
+  it('assigns, duplicates, and dissolves saved collections through reducer-backed menus', async () => {
+    const { store, host } = await createSubject(undefined, collectionFixture())
+    const dispatch = vi.spyOn(store, 'dispatchCommand')
+    act(() => store.setSelection([{ kind: 'task', id: 'task-b' }]))
+    const assign = [...host.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent?.includes('加入集合'))
+    if (!assign) throw new Error('Missing collection assignment button')
+    await act(async () => assign.click())
+    await vi.waitFor(() => expect(
+      store.getSnapshot().document.tasks.find((task) => task.id === 'task-b')?.collectionId,
+    ).toBe('collection-1'))
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'AssignToCollection',
+      collectionId: 'collection-1',
+      members: [{ kind: 'task', id: 'task-b' }],
+    })
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      '[data-testid="canvas-v2-undo"] button',
+    ).click())
+    await vi.waitFor(() => expect(
+      store.getSnapshot().document.tasks.find((task) => task.id === 'task-b')?.collectionId,
+    ).toBeUndefined())
+
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      '[aria-label="研究集合集合菜单"]',
+    ).click())
+    const duplicate = [...required<HTMLElement>(host, '[role="menu"]').querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('复制集合'))
+    if (!duplicate) throw new Error('Missing duplicate collection action')
+    await act(async () => duplicate.click())
+    await vi.waitFor(() => expect(store.getSnapshot().document.collections).toHaveLength(2))
+    expect(dispatch.mock.calls.some(([command]) => command.type === 'DuplicateCollection')).toBe(true)
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      '[data-testid="canvas-v2-undo"] button',
+    ).click())
+    await vi.waitFor(() => expect(store.getSnapshot().document.collections).toHaveLength(1))
+
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      '[aria-label="研究集合集合菜单"]',
+    ).click())
+    const dissolve = [...required<HTMLElement>(host, '[role="menu"]').querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('解散集合'))
+    if (!dissolve) throw new Error('Missing dissolve collection action')
+    await act(async () => dissolve.click())
+    await vi.waitFor(() => expect(store.getSnapshot().document.collections).toEqual([]))
+    expect(store.getSnapshot().document.tasks.find((task) => task.id === 'task-a')).toBeDefined()
+    expect(store.getSnapshot().document.nodes.find((node) => node.id === 'node-a')).toBeDefined()
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      '[data-testid="canvas-v2-undo"] button',
+    ).click())
+    await vi.waitFor(() => expect(store.getSnapshot().document.collections).toHaveLength(1))
+    expect(store.getSnapshot().document.tasks.find((task) => task.id === 'task-a')?.collectionId)
+      .toBe('collection-1')
+  })
+
+  it('renders a collection once, bundles collapsed external edges, fans out on hover, and moves once', async () => {
+    const { store, host } = await createSubject({
+      collapsedCollectionIds: ['collection-1'],
+    }, collectionFixture())
+    const collection = required<HTMLElement>(host, '[data-collection-id="collection-1"]')
+    expect(collection.getAttribute('data-collapsed')).toBe('true')
+    expect(host.querySelector('[data-task-id="task-a"]')).toBeNull()
+    expect(host.querySelector('[data-node-id="node-a"]')).toBeNull()
+    expect(host.querySelector('[data-node-id="node-child"]')).toBeNull()
+    const bundle = required<SVGGElement>(host, '[data-edge-bundle-count="3"]')
+    expect(bundle.getAttribute('aria-label')).toContain('聚合 3 条连接')
+    expect(bundle.getAttribute('aria-label')).toContain('按 Delete')
+    const dispatch = vi.spyOn(store, 'dispatchCommand').mockResolvedValue({ mutationId: 'ui' })
+    await act(async () => bundle.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Delete',
+      bubbles: true,
+      cancelable: true,
+    })))
+    expect(dispatch).toHaveBeenCalledTimes(3)
+    expect(dispatch.mock.calls.every(([command]) => command.type === 'DeleteEdge')).toBe(true)
+    dispatch.mockClear()
+
+    await act(async () => dispatchPointer(collection, 'pointerover'))
+    expect(host.querySelectorAll('[data-edge-bundle-count="1"]')).toHaveLength(3)
+    await act(async () => dispatchPointer(collection, 'pointerout'))
+
+    const expand = required<HTMLButtonElement>(collection, '[aria-label="展开集合研究集合"]')
+    await act(async () => expand.click())
+    expect(host.querySelectorAll('[data-task-id="task-a"]')).toHaveLength(1)
+    expect(host.querySelectorAll('[data-node-id="node-a"]')).toHaveLength(1)
+    expect(host.querySelectorAll('[data-node-id="node-child"]')).toHaveLength(1)
+
+    const header = required<HTMLButtonElement>(host, '[data-focus-key="collection:collection-1"]')
+    act(() => dispatchPointer(header, 'pointerdown', { clientX: 80, clientY: 70 }))
+    act(() => dispatchPointer(window, 'pointermove', { clientX: 140, clientY: 95 }))
+    expect(dispatch).not.toHaveBeenCalled()
+    await act(async () => dispatchPointer(window, 'pointerup', { clientX: 140, clientY: 95 }))
+    expect(dispatch).toHaveBeenCalledOnce()
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'MoveEntities',
+      entities: [],
+      collectionIds: ['collection-1'],
+      dx: 60,
+      dy: 25,
+    })
+  })
+
+  it('creates typed collection-macro edges with separate relation and context controls', async () => {
+    const { store, host } = await createSubject(undefined, collectionFixture())
+    const dispatch = vi.spyOn(store, 'dispatchCommand')
+    const context = required<HTMLSelectElement>(host, '[aria-label="连接 contextRole"]')
+    act(() => {
+      context.value = 'summary'
+      context.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+
+    const sourcePort = required<HTMLButtonElement>(
+      host,
+      '[data-collection-id="collection-1"] [data-edge-port]',
+    )
+    const targetPort = required<HTMLButtonElement>(
+      host,
+      '[data-task-id="task-b"] [data-edge-port]',
+    )
+    expect(sourcePort.tagName).toBe('BUTTON')
+    expect(sourcePort.getAttribute('aria-label')).toContain('集合研究集合')
+    await act(async () => sourcePort.click())
+    expect(sourcePort.getAttribute('aria-pressed')).toBe('true')
+    await act(async () => targetPort.click())
+
+    await vi.waitFor(() => expect(store.getSnapshot().document.edges).toHaveLength(5))
+    const createCall = dispatch.mock.calls.find(([command]) => command.type === 'CreateEdges')
+    expect(createCall?.[0]).toMatchObject({
+      type: 'CreateEdges',
+      edges: [
+        { relation: 'references', contextRole: 'summary' },
+        { relation: 'references', contextRole: 'summary' },
+      ],
+    })
+    expect((createCall?.[0] as { edges: Array<{ from: { id: string } }> }).edges
+      .map((edge) => edge.from.id).sort()).toEqual(['node-a', 'task-a'])
+    const summaryEdge = [...host.querySelectorAll<SVGGElement>('[data-edge-bundle-count]')]
+      .find((entry) => entry.getAttribute('aria-label')?.includes('上下文摘要'))
+    expect(summaryEdge?.getAttribute('tabindex')).toBe('0')
+    expect(summaryEdge?.textContent).toContain('引用 · 摘要')
+  })
+
+  it('projects destructive deletion immediately, supports undo, and guards active tasks', async () => {
+    const { store, host } = await createSubject()
+    const dispatch = vi.spyOn(store, 'dispatchCommand')
+    const nodeMenu = required<HTMLButtonElement>(host, '[aria-label="独立资料节点菜单"]')
+    await act(async () => nodeMenu.click())
+    const deleteNode = [...required<HTMLElement>(host, '[role="menu"]').querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('删除节点'))
+    if (!deleteNode) throw new Error('Missing node delete menu item')
+    await act(async () => deleteNode.click())
+    const dialog = required<HTMLElement>(host, '[role="alertdialog"]')
+    const confirm = [...dialog.querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('删除节点'))
+    if (!confirm) throw new Error('Missing delete confirmation')
+    await act(async () => confirm.click())
+    expect(host.querySelector('[data-node-id="node-top"]')).toBeNull()
+    expect(dispatch.mock.calls.some(([command]) => command.type === 'DeleteNode')).toBe(false)
+
+    const undo = required<HTMLButtonElement>(host, '[data-testid="canvas-v2-undo"] button')
+    await act(async () => undo.click())
+    expect(required(host, '[data-node-id="node-top"]')).not.toBeNull()
+    expect(dispatch.mock.calls.some(([command]) => command.type === 'DeleteNode')).toBe(false)
+
+    act(() => store.setTaskRuntime({
+      taskId: 'task-empty',
+      phase: 'running',
+      message: '仍在运行',
+      ghosts: [],
+    }))
+    const taskMenu = required<HTMLButtonElement>(host, '[aria-label="空任务任务菜单"]')
+    await act(async () => taskMenu.click())
+    const taskDelete = [...required<HTMLElement>(host, '[role="menu"]').querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('删除任务（保留产物）'))
+    if (!taskDelete) throw new Error('Missing task delete menu item')
+    await act(async () => taskDelete.click())
+    expect(host.querySelector('[role="alertdialog"]')).toBeNull()
+    await vi.waitFor(() => expect(
+      required(host, '[data-testid="canvas-v2-live-region"]').textContent,
+    ).toContain('需要先取消'))
+  })
+
+  it('restores the visual projection when a deferred destructive command is rejected', async () => {
+    vi.useFakeTimers()
+    const { store, host } = await createSubject()
+    const dispatch = vi.spyOn(store, 'dispatchCommand')
+      .mockRejectedValue(new Error('precondition changed'))
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      '[aria-label="独立资料节点菜单"]',
+    ).click())
+    const deleteNode = [...required<HTMLElement>(host, '[role="menu"]').querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('删除节点'))
+    if (!deleteNode) throw new Error('Missing node delete action')
+    await act(async () => deleteNode.click())
+    const confirm = [...required<HTMLElement>(host, '[role="alertdialog"]').querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('删除节点'))
+    if (!confirm) throw new Error('Missing node delete confirmation')
+    await act(async () => confirm.click())
+    expect(host.querySelector('[data-node-id="node-top"]')).toBeNull()
+
+    await act(async () => vi.advanceTimersByTimeAsync(5_000))
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect(dispatch).toHaveBeenCalledWith({ type: 'DeleteNode', nodeId: 'node-top' })
+    expect(required(host, '[data-node-id="node-top"]')).not.toBeNull()
+    expect(required(host, '[data-testid="canvas-v2-live-region"]').textContent)
+      .toContain('已恢复画布')
+  })
+
+  it('submits a visually projected destructive command only after the undo window', async () => {
+    vi.useFakeTimers()
+    const { store, host } = await createSubject()
+    const dispatch = vi.spyOn(store, 'dispatchCommand')
+    act(() => store.setSelection([{ kind: 'node', id: 'node-top' }]))
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      '[aria-label="独立资料节点菜单"]',
+    ).click())
+    const deleteNode = [...required<HTMLElement>(host, '[role="menu"]').querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('删除节点'))
+    if (!deleteNode) throw new Error('Missing node delete action')
+    await act(async () => deleteNode.click())
+    const confirm = [...required<HTMLElement>(host, '[role="alertdialog"]').querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('删除节点'))
+    if (!confirm) throw new Error('Missing node delete confirmation')
+    await act(async () => confirm.click())
+    expect(host.querySelector('[data-node-id="node-top"]')).toBeNull()
+    expect(store.getSnapshot().view.selection).toEqual([{ kind: 'node', id: 'node-top' }])
+    expect(dispatch).not.toHaveBeenCalled()
+
+    await act(async () => vi.advanceTimersByTimeAsync(4_999))
+    expect(dispatch).not.toHaveBeenCalled()
+    await act(async () => vi.advanceTimersByTimeAsync(1))
+    expect(dispatch).toHaveBeenCalledWith({ type: 'DeleteNode', nodeId: 'node-top' })
+    expect(store.getSnapshot().document.nodes.some((node) => node.id === 'node-top')).toBe(false)
+    expect(store.getSnapshot().view.selection).toEqual([])
   })
 
   it('throttles live-region updates instead of announcing every run event', async () => {

@@ -183,6 +183,17 @@ export function parseCanvasCommandWireV2(value: unknown): CanvasCommandWireV2 {
         collectionId: parseIdentifier(value.collectionId, 'command.collectionId'),
         members: parseEntityRefs(value.members, 'command.members', true),
       }
+    case 'RemoveFromCollection':
+      assertCommandKeys(
+        value,
+        ['type', 'collectionId', 'members'],
+        ['type', 'collectionId', 'members'],
+      )
+      return {
+        type: value.type,
+        collectionId: parseIdentifier(value.collectionId, 'command.collectionId'),
+        members: parseEntityRefs(value.members, 'command.members', true),
+      }
     case 'DissolveCollection':
       assertCommandKeys(value, ['type', 'collectionId'], ['type', 'collectionId'])
       return {
@@ -190,17 +201,21 @@ export function parseCanvasCommandWireV2(value: unknown): CanvasCommandWireV2 {
         collectionId: parseIdentifier(value.collectionId, 'command.collectionId'),
       }
     case 'DeleteTask':
+    case 'DeleteTaskAndViews':
       assertCommandKeys(value, ['type', 'taskId'], ['type', 'taskId'])
       return {
         type: value.type,
         taskId: parseIdentifier(value.taskId, 'command.taskId'),
       }
     case 'DeleteCollection':
+    case 'DeleteCollectionAndContents':
       assertCommandKeys(value, ['type', 'collectionId'], ['type', 'collectionId'])
       return {
         type: value.type,
         collectionId: parseIdentifier(value.collectionId, 'command.collectionId'),
       }
+    case 'DuplicateCollection':
+      return parseDuplicateCollection(value)
     case 'DuplicateTaskAsDraft':
       return parseDuplicateTask(value)
     default:
@@ -427,6 +442,32 @@ function parseDuplicateTask(
       y: parseFinite(value.offset.y, 'command.offset.y'),
     },
     ...(title ? { title } : {}),
+  }
+}
+
+function parseDuplicateCollection(
+  value: Record<string, unknown>,
+): Extract<OrdinaryCanvasCommandV2, { type: 'DuplicateCollection' }> {
+  assertCommandKeys(
+    value,
+    ['type', 'sourceCollectionId', 'newCollectionId', 'offset', 'title'],
+    ['type', 'sourceCollectionId', 'newCollectionId', 'offset'],
+  )
+  const title = value.title === undefined
+    ? undefined
+    : parseString(value.title, 'command.title', 1_000, false)
+  return {
+    type: 'DuplicateCollection',
+    sourceCollectionId: parseIdentifier(
+      value.sourceCollectionId,
+      'command.sourceCollectionId',
+    ),
+    newCollectionId: parseClientIdentifier(
+      value.newCollectionId,
+      'command.newCollectionId',
+    ),
+    offset: parsePoint(value.offset, 'command.offset'),
+    ...(title === undefined ? {} : { title }),
   }
 }
 

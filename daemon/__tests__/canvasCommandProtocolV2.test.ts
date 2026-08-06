@@ -176,6 +176,36 @@ test('parses bounded user node, edge, membership, and derived-task commands', ()
     w: 480,
     h: 320,
   }), { type: 'ResizeNode', nodeId: 'node-1', w: 480, h: 320 })
+  assert.deepEqual(parseCanvasCommandWireV2({
+    type: 'RemoveFromCollection',
+    collectionId: 'collection-1',
+    members: [{ kind: 'node', id: 'node-1' }],
+  }), {
+    type: 'RemoveFromCollection',
+    collectionId: 'collection-1',
+    members: [{ kind: 'node', id: 'node-1' }],
+  })
+  assert.deepEqual(parseCanvasCommandWireV2({
+    type: 'DeleteTaskAndViews',
+    taskId: 'task-1',
+  }), { type: 'DeleteTaskAndViews', taskId: 'task-1' })
+  assert.deepEqual(parseCanvasCommandWireV2({
+    type: 'DeleteCollectionAndContents',
+    collectionId: 'collection-1',
+  }), { type: 'DeleteCollectionAndContents', collectionId: 'collection-1' })
+  assert.deepEqual(parseCanvasCommandWireV2({
+    type: 'DuplicateCollection',
+    sourceCollectionId: 'collection-1',
+    newCollectionId: 'collection-copy',
+    offset: { x: 72, y: 48 },
+    title: 'Collection copy',
+  }), {
+    type: 'DuplicateCollection',
+    sourceCollectionId: 'collection-1',
+    newCollectionId: 'collection-copy',
+    offset: { x: 72, y: 48 },
+    title: 'Collection copy',
+  })
 })
 
 test('plan operations remain opaque discriminated wire commands', () => {
@@ -327,6 +357,17 @@ test('rejects malformed request identity, duplicate entities, and non-finite mov
     dx: Number.POSITIVE_INFINITY,
     dy: 0,
   }), /finite/u)
+  assert.throws(() => parseCanvasCommandWireV2({
+    type: 'RemoveFromCollection',
+    collectionId: 'collection-1',
+    members: [],
+  }), /non-empty/u)
+  assert.throws(() => parseCanvasCommandWireV2({
+    type: 'DuplicateCollection',
+    sourceCollectionId: 'collection-1',
+    newCollectionId: `cv2_collection_${'a'.repeat(32)}`,
+    offset: { x: 1, y: 1 },
+  }), /reserved/u)
 })
 
 test('rejects forged artifacts/origins, free patches, invalid topology, and reserved ids', () => {

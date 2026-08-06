@@ -184,14 +184,146 @@ describe('Canvas V2 commands', () => {
       members: [{ kind: 'task', id: 'task-1' }],
     })
     const deleted = applyCanvasCommandV2(assigned, {
-      type: 'DeleteCollection',
+      type: 'DeleteCollectionAndContents',
       collectionId: 'collection-2',
     })
 
     expect(deleted.collections).toEqual([])
     expect(deleted.tasks).toEqual([])
-    expect(deleted.nodes.map((entry) => entry.id)).toEqual(['task-node'])
-    expect(deleted.nodes[0].homeTaskId).toBeUndefined()
+    expect(deleted.nodes).toEqual([])
+  })
+
+  it('removes explicit collection membership and keeps members on ordinary deletion', () => {
+    const initial = emptyCanvasDocumentV2()
+    initial.tasks.push(task())
+    initial.nodes.push(node('top-node', 500, 200), node('task-node', 140, 240, 'task-1'))
+    const collected = applyCanvasCommandV2(initial, {
+      type: 'CreateCollectionFromSelection',
+      collection: {
+        id: 'collection-1',
+        title: 'Saved selection',
+        anchor: { x: 60, y: 80 },
+      },
+      members: [
+        { kind: 'task', id: 'task-1' },
+        { kind: 'node', id: 'top-node' },
+      ],
+    })
+    const removed = applyCanvasCommandV2(collected, {
+      type: 'RemoveFromCollection',
+      collectionId: 'collection-1',
+      members: [{ kind: 'node', id: 'top-node' }],
+    })
+    expect(removed.nodes.find((entry) => entry.id === 'top-node')?.collectionId).toBeUndefined()
+    expect(removed.tasks[0].collectionId).toBe('collection-1')
+
+    const deletedBoundary = applyCanvasCommandV2(removed, {
+      type: 'DeleteCollection',
+      collectionId: 'collection-1',
+    })
+    expect(deletedBoundary.collections).toEqual([])
+    expect(deletedBoundary.tasks.map((entry) => entry.id)).toEqual(['task-1'])
+    expect(deletedBoundary.tasks[0].collectionId).toBeUndefined()
+    expect(deletedBoundary.nodes.map((entry) => entry.id)).toEqual(['top-node', 'task-node'])
+
+    expect(() => applyCanvasCommandV2(collected, {
+      type: 'RemoveFromCollection',
+      collectionId: 'collection-1',
+      members: [{ kind: 'node', id: 'task-node' }],
+    })).toThrowError(CanvasCommandError)
+  })
+
+  it('deep-copies collection tasks, views, internal edges, and immutable artifacts', () => {
+    let current = applyCanvasCommandV2(documentWithTask(), {
+      type: 'MaterializeProjectionPlan',
+      plan: { ...plan(), taskProposals: [] },
+    })
+    current.nodes.push(node('top-node', 620, 160))
+    current = applyCanvasCommandV2(current, {
+      type: 'CreateCollectionFromSelection',
+      collection: {
+        id: 'collection-source',
+        title: 'Analysis set',
+        anchor: { x: 60, y: 80 },
+      },
+      members: [
+        { kind: 'task', id: 'task-1' },
+        { kind: 'node', id: 'top-node' },
+      ],
+    })
+    current = applyCanvasCommandV2(current, {
+      type: 'CreateEdge',
+      edge: {
+        id: 'edge-context',
+        from: { kind: 'node', id: 'top-node' },
+        to: { kind: 'task', id: 'task-1' },
+        relation: 'source',
+        contextRole: 'full',
+        origin: { kind: 'user' },
+      },
+    })
+
+    const duplicated = applyCanvasCommandV2(current, {
+      type: 'DuplicateCollection',
+      sourceCollectionId: 'collection-source',
+      newCollectionId: 'collection-copy',
+      offset: { x: 720, y: 40 },
+    })
+    const copiedTaskId = deterministicCanvasIdV2(
+      'task',
+      'duplicate-collection',
+      'collection-copy',
+      'task-1',
+    )
+    const copiedTopNodeId = deterministicCanvasIdV2(
+      'node',
+      'duplicate-collection',
+      'collection-copy',
+      'top-node',
+    )
+    const copiedTask = duplicated.tasks.find((entry) => entry.id === copiedTaskId)
+    const copiedNodes = duplicated.nodes.filter((entry) =>
+      entry.collectionId === 'collection-copy' || entry.homeTaskId === copiedTaskId)
+
+    expect(copiedTask).toMatchObject({
+      collectionId: 'collection-copy',
+      origin: { kind: 'user' },
+      anchor: { x: 820, y: 160 },
+    })
+    expect(copiedNodes).toHaveLength(3)
+    expect(copiedNodes.every((entry) => entry.origin.kind === 'copied')).toBe(true)
+    expect(copiedNodes.find((entry) => entry.id === copiedTopNodeId)?.collectionId)
+      .toBe('collection-copy')
+    const copiedArtifactNode = copiedNodes.find((entry) => entry.artifactRefs.length > 0)
+    const sourceArtifactNode = current.nodes.find((entry) => entry.artifactRefs.length > 0)
+    expect(copiedArtifactNode?.artifactRefs).toEqual(sourceArtifactNode?.artifactRefs)
+    expect(copiedArtifactNode?.artifactRefs).not.toBe(sourceArtifactNode?.artifactRefs)
+    expect(duplicated.receipts).toEqual(current.receipts)
+
+    const copiedEntityIds = new Set([
+      copiedTaskId,
+      ...copiedNodes.map((entry) => entry.id),
+    ])
+    const copiedEdges = duplicated.edges.filter((edge) =>
+      copiedEntityIds.has(edge.from.id) || copiedEntityIds.has(edge.to.id))
+    expect(copiedEdges).toHaveLength(current.edges.length)
+    expect(copiedEdges.every((edge) =>
+      copiedEntityIds.has(edge.from.id)
+      && copiedEntityIds.has(edge.to.id)
+      && edge.origin.kind === 'user')).toBe(true)
+
+    const deletedSource = applyCanvasCommandV2(duplicated, {
+      type: 'DeleteCollectionAndContents',
+      collectionId: 'collection-source',
+    })
+    expect(deletedSource.collections.map((entry) => entry.id)).toEqual(['collection-copy'])
+    expect(deletedSource.tasks.map((entry) => entry.id)).toEqual([copiedTaskId])
+    expect(deletedSource.nodes.every((entry) => copiedEntityIds.has(entry.id))).toBe(true)
+    expect(deletedSource.receipts).toEqual(current.receipts)
+    expect(applyCanvasCommandV2(deletedSource, {
+      type: 'MaterializeProjectionPlan',
+      plan: { ...plan(), taskProposals: [] },
+    })).toBe(deletedSource)
   })
 
   it('duplicates only task intent and inbound context, then releases nodes on task deletion', () => {
@@ -280,6 +412,19 @@ describe('Canvas V2 commands', () => {
       type: 'MaterializeProjectionPlan',
       plan: trustedPlan,
     })).toBe(materialized)
+
+    const deletedWithViews = applyCanvasCommandV2(materialized, {
+      type: 'DeleteTaskAndViews',
+      taskId: 'task-1',
+    })
+    expect(deletedWithViews.tasks).toEqual([])
+    expect(deletedWithViews.nodes).toEqual([])
+    expect(deletedWithViews.edges).toEqual([])
+    expect(deletedWithViews.receipts).toHaveLength(1)
+    expect(applyCanvasCommandV2(deletedWithViews, {
+      type: 'MaterializeProjectionPlan',
+      plan: trustedPlan,
+    })).toBe(deletedWithViews)
 
     const deleted = applyCanvasCommandV2(materialized, {
       type: 'DeleteTask',

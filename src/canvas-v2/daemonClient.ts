@@ -298,9 +298,13 @@ export function serializeCanvasCommandV2(command: CanvasCommandV2): CanvasComman
     case 'MoveEntities':
     case 'CreateCollectionFromSelection':
     case 'AssignToCollection':
+    case 'RemoveFromCollection':
     case 'DissolveCollection':
     case 'DeleteTask':
+    case 'DeleteTaskAndViews':
     case 'DeleteCollection':
+    case 'DeleteCollectionAndContents':
+    case 'DuplicateCollection':
     case 'DuplicateTaskAsDraft':
       return structuredClone(command)
     default:

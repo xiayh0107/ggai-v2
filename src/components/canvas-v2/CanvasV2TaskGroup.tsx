@@ -16,6 +16,8 @@ import type {
   CanvasTaskViewV2,
 } from '@/canvas-v2/selectors'
 import { getPlugin } from '@/plugins/types'
+import CanvasV2EdgePort from './CanvasV2EdgePort'
+import CanvasV2EntityMenu from './CanvasV2EntityMenu'
 import CanvasV2NodeCard from './CanvasV2NodeCard'
 
 export interface CanvasV2TaskGroupProps {
@@ -32,6 +34,12 @@ export interface CanvasV2TaskGroupProps {
   onTaskDragStart: (event: PointerEvent<HTMLElement>, task: CanvasTaskV2) => void
   onNodeDragStart: (event: PointerEvent<HTMLButtonElement>, node: CanvasNodeV2) => void
   onNodeResizeStart: (event: PointerEvent<HTMLButtonElement>, node: CanvasNodeV2) => void
+  onTaskPortActivate?: (task: CanvasTaskV2) => void
+  onNodePortActivate?: (node: CanvasNodeV2) => void
+  activeConnectionKey?: string | null
+  onTaskMenuAction?: (task: CanvasTaskV2, action: string) => void
+  onNodeMenuAction?: (node: CanvasNodeV2, action: string) => void
+  onHoverChange?: (hovered: boolean) => void
   onEntityFocus: (key: string) => void
   onEntityKeyDown: (key: string, event: KeyboardEvent<HTMLButtonElement>) => void
   registerFocusable: (key: string, element: HTMLButtonElement | null) => void
@@ -51,6 +59,12 @@ export default function CanvasV2TaskGroup({
   onTaskDragStart,
   onNodeDragStart,
   onNodeResizeStart,
+  onTaskPortActivate,
+  onNodePortActivate,
+  activeConnectionKey,
+  onTaskMenuAction,
+  onNodeMenuAction,
+  onHoverChange,
   onEntityFocus,
   onEntityKeyDown,
   registerFocusable,
@@ -72,6 +86,9 @@ export default function CanvasV2TaskGroup({
       onFocus={() => onEntityFocus(taskKey)}
       onKeyDown={(event) => onEntityKeyDown(taskKey, event)}
       onDragStart={(event) => onTaskDragStart(event, task)}
+      connectionActive={activeConnectionKey === taskKey}
+      onPortActivate={onTaskPortActivate ? () => onTaskPortActivate(task) : undefined}
+      onMenuAction={onTaskMenuAction ? (action) => onTaskMenuAction(task, action) : undefined}
       onToggle={() => {
         if (collapsed) onSelectTask(task, false)
         onToggleCollapsed(task.id, collapsed ? false : !explicitlyCollapsed)
@@ -90,6 +107,8 @@ export default function CanvasV2TaskGroup({
       data-selected={selectedTask ? 'true' : 'false'}
       className="pointer-events-none absolute left-0 top-0"
       style={offset ? { transform: `translate(${offset.dx}px, ${offset.dy}px)` } : undefined}
+      onPointerEnter={() => onHoverChange?.(true)}
+      onPointerLeave={() => onHoverChange?.(false)}
     >
       {collapsed ? (
         <div
@@ -206,6 +225,9 @@ export default function CanvasV2TaskGroup({
               onKeyDown={(event) => onEntityKeyDown(`node:${node.id}`, event)}
               onDragStart={onNodeDragStart}
               onResizeStart={onNodeResizeStart}
+              onPortActivate={onNodePortActivate}
+              connectionActive={activeConnectionKey === `node:${node.id}`}
+              onMenuAction={onNodeMenuAction}
               registerFocusable={(element) => registerFocusable(`node:${node.id}`, element)}
             />
           ))}
@@ -228,6 +250,9 @@ function TaskHeader({
   onFocus,
   onKeyDown,
   onDragStart,
+  connectionActive,
+  onPortActivate,
+  onMenuAction,
   onToggle,
   registerFocusable,
 }: {
@@ -240,6 +265,9 @@ function TaskHeader({
   onFocus: () => void
   onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void
   onDragStart: (event: PointerEvent<HTMLButtonElement>) => void
+  connectionActive: boolean
+  onPortActivate?: () => void
+  onMenuAction?: (action: string) => void
   onToggle: () => void
   registerFocusable: (element: HTMLButtonElement | null) => void
 }) {
@@ -259,6 +287,15 @@ function TaskHeader({
         <Grip size={13} className="shrink-0 text-[#98A2B3]" aria-hidden="true" />
         <span className="truncate text-[12.5px] font-semibold text-gg-ink">{task.title}</span>
       </button>
+      {onPortActivate && (
+        <CanvasV2EdgePort
+          label={connectionActive
+            ? `取消从任务${task.title}的连接`
+            : `从任务${task.title}开始或完成连接`}
+          active={connectionActive}
+          onActivate={onPortActivate}
+        />
+      )}
       <TaskStatus status={status} />
       <button
         type="button"
@@ -272,6 +309,20 @@ function TaskHeader({
       >
         {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
       </button>
+      {onMenuAction && (
+        <CanvasV2EntityMenu
+          label={`${task.title}任务菜单`}
+          items={[
+            { id: 'duplicate', label: '复制为草稿任务' },
+            ...(task.collectionId
+              ? [{ id: 'remove-collection', label: '移出集合' }]
+              : []),
+            { id: 'delete', label: '删除任务（保留产物）', destructive: true },
+            { id: 'delete-views', label: '删除任务及全部视图', destructive: true },
+          ]}
+          onAction={onMenuAction}
+        />
+      )}
     </div>
   )
 }

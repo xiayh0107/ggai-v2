@@ -119,13 +119,14 @@ POST /canvas/commands
 规范命令包括：
 
 - `CreateTask`、`UpdateTaskGoal`、`MoveEntities`
-- `CreateCollectionFromSelection`、`AssignToCollection`、`DissolveCollection`
-- `DeleteTask`、`DeleteCollection`、`DuplicateTaskAsDraft`
+- `CreateCollectionFromSelection`、`AssignToCollection`、`RemoveFromCollection`、`DissolveCollection`
+- `DeleteTask`、`DeleteTaskAndViews`、`DeleteCollection`、`DeleteCollectionAndContents`
+- `DuplicateNode`、`DuplicateTaskAsDraft`、`DuplicateCollection`
 - `MaterializeProjectionPlan`、`AcceptTaskProposals`、`DismissPlan`
 
 浏览器先把 command 与 base revision 写入 IndexedDB outbox，再乐观执行同一 reducer。daemon 在分支锁内读取当前 revision、重放 reducer、校验不变量，并以单个 `mutationId` 原子写入。成功返回 envelope 后浏览器确认 outbox。CAS 冲突时浏览器只允许 refetch 后重放一次；若命令前置条件已失效，必须进入显式冲突分支流程，禁止静默覆盖。
 
-拖动时只更新本地临时坐标，`pointerup` 提交一次 `MoveEntities`。即时撤销通过提交反向 command 实现，因此同样进入版本历史。
+拖动时只更新本地临时坐标，`pointerup` 提交一次 `MoveEntities`。普通动作的即时撤销通过提交反向 command 实现，因此同样进入版本历史。二次确认的破坏性动作先使用同一 reducer 生成 branch-local pending-deletion 投影；撤销窗口内不写 command，超时才提交，提交前失败则恢复原投影并提示。
 
 `MaterializeProjectionPlan` 的 HTTP payload 只接受 `planId`。daemon 从永久 run log/plan store 读取带 digest 的可信 `ProjectionPlan`，再把内部 plan 交给 reducer；客户端永远不能提交 Node patch、ID 或坐标。该命令在一个 revision 中创建 Node、Task proposal receipt、typed Edge、确定性布局与 materialization receipt。
 
@@ -264,4 +265,3 @@ V2 不提供 V1 数据迁移或旧画布查看器。显式 reset 脚本必须：
 - 版本历史：merge 前语义校验；Task/Node/Collection/Edge/receipt 身份与 artifact ref 在 checkpoint、恢复和合并后稳定。
 
 基准场景“生成一个 ggplot 散点图”只执行一个 Run，得到一个 Task、一个代码 Node 和一个图像 Node；Task 到 Node 为 `produced`，代码到图像为 `derived`。刷新、SSE 重放、重复 close 与 CAS 重试不得重复创建；在图像 Node 上提交“调整配色”必须生成新的派生 Task，原图不变。
-

@@ -4,6 +4,8 @@ import { runArtifactUrl } from '@/agent/config'
 import type { CanvasNodeV2 } from '@/canvas-v2/model'
 import type { CanvasBoundsV2 } from '@/canvas-v2/selectors'
 import { getPlugin } from '@/plugins/types'
+import CanvasV2EdgePort from './CanvasV2EdgePort'
+import CanvasV2EntityMenu from './CanvasV2EntityMenu'
 
 export interface CanvasV2NodeCardProps {
   node: CanvasNodeV2
@@ -16,6 +18,9 @@ export interface CanvasV2NodeCardProps {
   onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void
   onDragStart: (event: PointerEvent<HTMLButtonElement>, node: CanvasNodeV2) => void
   onResizeStart: (event: PointerEvent<HTMLButtonElement>, node: CanvasNodeV2) => void
+  onPortActivate?: (node: CanvasNodeV2) => void
+  connectionActive?: boolean
+  onMenuAction?: (node: CanvasNodeV2, action: string) => void
   registerFocusable: (element: HTMLButtonElement | null) => void
 }
 
@@ -30,6 +35,9 @@ export default function CanvasV2NodeCard({
   onKeyDown,
   onDragStart,
   onResizeStart,
+  onPortActivate,
+  connectionActive = false,
+  onMenuAction,
   registerFocusable,
 }: CanvasV2NodeCardProps) {
   const plugin = getPlugin(node.type)
@@ -74,6 +82,28 @@ export default function CanvasV2NodeCard({
           </span>
           <Grip size={13} className="shrink-0 text-[#98A2B3]" aria-hidden="true" />
         </button>
+        {onPortActivate && (
+          <CanvasV2EdgePort
+            label={connectionActive
+              ? `取消从节点${node.title || plugin.label}的连接`
+              : `从节点${node.title || plugin.label}开始或完成连接`}
+            active={connectionActive}
+            onActivate={() => onPortActivate(node)}
+          />
+        )}
+        {onMenuAction && (
+          <CanvasV2EntityMenu
+            label={`${node.title || plugin.label}节点菜单`}
+            items={[
+              { id: 'duplicate', label: '复制节点' },
+              ...(node.collectionId
+                ? [{ id: 'remove-collection', label: '移出集合' }]
+                : []),
+              { id: 'delete', label: '删除节点', destructive: true },
+            ]}
+            onAction={(action) => onMenuAction(node, action)}
+          />
+        )}
       </header>
 
       <div className="h-[calc(100%-2.5rem)] overflow-hidden p-3">

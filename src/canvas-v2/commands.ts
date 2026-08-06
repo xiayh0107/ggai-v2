@@ -113,9 +113,19 @@ export type CanvasCommandV2 =
       members: CanvasEntityRef[]
     }
   | { type: 'AssignToCollection'; collectionId: string; members: CanvasEntityRef[] }
+  | { type: 'RemoveFromCollection'; collectionId: string; members: CanvasEntityRef[] }
   | { type: 'DissolveCollection'; collectionId: string }
   | { type: 'DeleteTask'; taskId: string }
+  | { type: 'DeleteTaskAndViews'; taskId: string }
   | { type: 'DeleteCollection'; collectionId: string }
+  | { type: 'DeleteCollectionAndContents'; collectionId: string }
+  | {
+      type: 'DuplicateCollection'
+      sourceCollectionId: string
+      newCollectionId: string
+      offset: CanvasPointV2
+      title?: string
+    }
   | {
       type: 'DuplicateTaskAsDraft'
       sourceTaskId: string
@@ -216,14 +226,26 @@ export function applyCanvasCommandV2(
     case 'AssignToCollection':
       assignToCollection(next, command.collectionId, command.members)
       break
+    case 'RemoveFromCollection':
+      removeFromCollection(next, command.collectionId, command.members)
+      break
     case 'DissolveCollection':
       dissolveCollection(next, command.collectionId)
       break
     case 'DeleteTask':
       deleteTask(next, command.taskId)
       break
+    case 'DeleteTaskAndViews':
+      deleteTaskAndViews(next, command.taskId)
+      break
     case 'DeleteCollection':
       deleteCollection(next, command.collectionId)
+      break
+    case 'DeleteCollectionAndContents':
+      deleteCollectionAndContents(next, command.collectionId)
+      break
+    case 'DuplicateCollection':
+      duplicateCollection(next, command)
       break
     case 'DuplicateTaskAsDraft':
       duplicateTaskAsDraft(next, command)
@@ -666,6 +688,33 @@ function assignToCollection(
   setCollectionMembership(document, collectionId, members)
 }
 
+function removeFromCollection(
+  document: CanvasDocumentV2,
+  collectionId: string,
+  refs: CanvasEntityRef[],
+): void {
+  requireCollection(document, collectionId)
+  const members = requireUniqueRefs(refs)
+  if (members.length === 0) {
+    throw new CanvasCommandError('empty-selection', 'At least one member is required')
+  }
+  for (const ref of members) {
+    if (ref.kind === 'node') {
+      const node = requireNode(document, ref.id)
+      if (node.collectionId !== collectionId) {
+        throw new CanvasCommandError('collection-mismatch', `Node ${node.id} is not in the collection`)
+      }
+      delete node.collectionId
+    } else {
+      const task = requireTask(document, ref.id)
+      if (task.collectionId !== collectionId) {
+        throw new CanvasCommandError('collection-mismatch', `Task ${task.id} is not in the collection`)
+      }
+      delete task.collectionId
+    }
+  }
+}
+
 function dissolveCollection(document: CanvasDocumentV2, collectionId: string): void {
   requireCollection(document, collectionId)
   document.collections = document.collections.filter((entry) => entry.id !== collectionId)
@@ -690,23 +739,144 @@ function deleteTask(document: CanvasDocumentV2, taskId: string): void {
     && !(edge.to.kind === 'task' && edge.to.id === taskId))
 }
 
+function deleteTaskAndViews(document: CanvasDocumentV2, taskId: string): void {
+  requireTask(document, taskId)
+  const taskIds = new Set([taskId])
+  const nodeIds = new Set(document.nodes
+    .filter((node) => node.homeTaskId === taskId)
+    .map((node) => node.id))
+  removeEntities(document, taskIds, nodeIds)
+}
+
 function deleteCollection(document: CanvasDocumentV2, collectionId: string): void {
+  dissolveCollection(document, collectionId)
+}
+
+function deleteCollectionAndContents(
+  document: CanvasDocumentV2,
+  collectionId: string,
+): void {
   requireCollection(document, collectionId)
-  const directTaskIds = new Set(document.tasks
+  const taskIds = new Set(document.tasks
     .filter((task) => task.collectionId === collectionId)
     .map((task) => task.id))
-  const taskIds = directTaskIds
   const nodeIds = new Set(document.nodes
-    .filter((node) => node.collectionId === collectionId)
+    .filter((node) => node.collectionId === collectionId
+      || (node.homeTaskId !== undefined && taskIds.has(node.homeTaskId)))
     .map((node) => node.id))
-  for (const taskId of taskIds) {
-    for (const node of document.nodes) {
-      if (node.homeTaskId !== taskId) continue
-      delete node.homeTaskId
-    }
-  }
   removeEntities(document, taskIds, nodeIds)
   document.collections = document.collections.filter((entry) => entry.id !== collectionId)
+}
+
+function duplicateCollection(
+  document: CanvasDocumentV2,
+  command: Extract<CanvasCommandV2, { type: 'DuplicateCollection' }>,
+): void {
+  const sourceCollection = requireCollection(document, command.sourceCollectionId)
+  requireClientOwnedId(command.newCollectionId, 'collection')
+  ensureEntityIdAvailable(document, command.newCollectionId)
+  if (!Number.isFinite(command.offset.x) || !Number.isFinite(command.offset.y)) {
+    throw new CanvasCommandError('invalid-offset', 'Duplicate offset must be finite')
+  }
+
+  const sourceTasks = document.tasks
+    .filter((task) => task.collectionId === sourceCollection.id)
+  const sourceTaskIds = new Set(sourceTasks.map((task) => task.id))
+  const sourceNodes = document.nodes.filter((node) =>
+    node.collectionId === sourceCollection.id
+    || (node.homeTaskId !== undefined && sourceTaskIds.has(node.homeTaskId)))
+  const entityMap = new Map<string, CanvasEntityRef>()
+  const taskIdMap = new Map<string, string>()
+  const nextTasks: CanvasTaskV2[] = []
+  for (const task of sourceTasks) {
+    const id = deterministicCanvasIdV2(
+      'task',
+      'duplicate-collection',
+      command.newCollectionId,
+      task.id,
+    )
+    ensureEntityIdAvailable(document, id)
+    taskIdMap.set(task.id, id)
+    entityMap.set(entityKeyV2({ kind: 'task', id: task.id }), { kind: 'task', id })
+    nextTasks.push({
+      id,
+      title: task.title,
+      goal: task.goal,
+      anchor: {
+        x: task.anchor.x + command.offset.x,
+        y: task.anchor.y + command.offset.y,
+      },
+      collectionId: command.newCollectionId,
+      origin: { kind: 'user' },
+    })
+  }
+
+  const maxZ = maxNodeZ(document)
+  const nextNodes: CanvasNodeV2[] = []
+  for (const [index, node] of sourceNodes.entries()) {
+    const id = deterministicCanvasIdV2(
+      'node',
+      'duplicate-collection',
+      command.newCollectionId,
+      node.id,
+    )
+    ensureEntityIdAvailable(document, id)
+    entityMap.set(entityKeyV2({ kind: 'node', id: node.id }), { kind: 'node', id })
+    const homeTaskId = node.homeTaskId ? taskIdMap.get(node.homeTaskId) : undefined
+    nextNodes.push({
+      id,
+      type: node.type,
+      frame: {
+        ...node.frame,
+        x: node.frame.x + command.offset.x,
+        y: node.frame.y + command.offset.y,
+        z: maxZ + index + 1,
+      },
+      title: node.title,
+      ...(node.text === undefined ? {} : { text: node.text }),
+      ...(node.payload === undefined ? {} : { payload: structuredClone(node.payload) }),
+      artifactRefs: structuredClone(node.artifactRefs),
+      ...(homeTaskId
+        ? { homeTaskId }
+        : { collectionId: command.newCollectionId }),
+      origin: { kind: 'copied', sourceNodeId: node.id },
+    })
+  }
+
+  const nextEdges: CanvasEdgeV2[] = []
+  for (const edge of document.edges) {
+    const from = entityMap.get(entityKeyV2(edge.from))
+    const to = entityMap.get(entityKeyV2(edge.to))
+    if (!from || !to) continue
+    const id = deterministicCanvasIdV2(
+      'edge',
+      'duplicate-collection',
+      command.newCollectionId,
+      edge.id,
+    )
+    ensureEdgeIdAvailable(document, id)
+    nextEdges.push({
+      id,
+      from: structuredClone(from),
+      to: structuredClone(to),
+      relation: edge.relation,
+      contextRole: edge.contextRole,
+      origin: { kind: 'user' },
+    })
+  }
+
+  document.collections.push({
+    id: command.newCollectionId,
+    title: command.title ?? `${sourceCollection.title} copy`,
+    anchor: {
+      x: sourceCollection.anchor.x + command.offset.x,
+      y: sourceCollection.anchor.y + command.offset.y,
+    },
+  })
+  document.tasks.push(...nextTasks)
+  document.nodes.push(...nextNodes)
+  document.edges.push(...nextEdges)
+  document.everCreated = true
 }
 
 function duplicateTaskAsDraft(

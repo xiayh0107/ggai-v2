@@ -59,14 +59,17 @@ a command enqueued in the same event-loop window.
 state transition, satisfying React's cached snapshot requirement. Task hooks
 derive task views from the subscribed snapshot without persisting derived data.
 
-The V2 shell mounts a real, task-centric stage. The smallest visible vocabulary
-is deliberately limited to Task, Node, Edge, and transient Ghost:
+The V2 shell mounts a real, task-centric stage. Its persistent visible
+vocabulary is limited to Task, Node, Edge, and user-saved Collection, with
+transient Ghost projections during execution:
 
 - a task with no output is a task card;
 - a task with one output is a title strip plus its node;
 - a task with two or more outputs owns one frame around its child nodes;
 - a collapsed task is one summary card, while its internal nodes and internal
   edges remain part of the authoritative document;
+- a collection is an explicit top-level Task/Node grouping. It has no prompt or
+  runtime, and can collapse into one boundary without changing member geometry;
 - a running task may project non-persistent ghost output slots using the same
   layout function as trusted materialization.
 
@@ -84,14 +87,30 @@ one durable command on pointer release:
 - dragging a Task emits one `MoveEntities` command for the Task; reducer
   semantics move the Task and every node whose `homeTaskId` points to it;
 - dragging a Node emits one `MoveEntities` command for that Node;
+- dragging a Collection emits one `MoveEntities` command on pointer release;
+  reducer semantics move its direct Task/Node members and Task child nodes;
 - resizing a Node emits one `ResizeNode` command;
 - panning and cursor-anchored zoom only update branch view state;
-- Shift-click toggles typed Task/Node selection, and Shift-drag on empty canvas
-  adds intersecting Tasks and Nodes through marquee selection.
+- Shift-click toggles typed Task/Node/Collection selection, and Shift-drag on
+  empty canvas adds intersecting visible entities through marquee selection.
 
 Task and Node are separate selection types even when a Node belongs to a Task.
 This preserves a minimal kernel: the Task is the run/prompt boundary and the
 Node is an editable result, without introducing an additional bundle entity.
+
+“Save as collection” persists only selected top-level Tasks and Nodes. Collection
+ports are UI macros: they expand to member endpoints and submit one bounded
+`CreateEdges` command containing ordinary typed edges. `relation` and
+`contextRole` remain separate controls. When a Task or Collection is collapsed,
+external edges aggregate at its boundary; hover or expansion fans them back out.
+
+Destructive menu actions use an accessible confirmation dialog and a five-second
+branch-local pending-deletion projection. The projection applies the same pure
+reducer as a durable command, so entities and incident edges disappear
+immediately. Undo clears the projection without writing a command; timeout writes
+the destructive command, and a local dispatch rejection restores the document
+and announces the failure. Active Tasks must be cancelled and acknowledged by
+the daemon before either Task deletion action can be queued.
 
 ## Accessibility and motion
 
@@ -124,13 +143,18 @@ Focused tests cover:
 - typed Shift selection, additive marquee selection, roving focus, and focus
   retention across runtime updates;
 - one-command pointer release for Task move, Node move, and Node resize;
+- explicit collection save/assignment/removal, duplicate, dissolve, collapse,
+  one-command group drag, and inverse-command undo;
+- typed port connections, Collection macro expansion, collapsed edge bundles,
+  hover fan-out, relation/context labels, and keyboard edge deletion;
+- destructive confirmation, immediate pending-deletion projection, undo without
+  dispatch, timeout dispatch, rejection restore, and active-Task deletion guard;
 - rect-aware panning and cursor-anchored zoom.
 
 ## Deferred UI work
 
 - run/SSE adapter that feeds `setTaskRuntime` and ghost updates;
 - proposal review and materialization controls;
-- collection presentation, bundle edge projection, and collection manipulation;
 - specialized editors and viewers beyond the generic plugin-aware node body;
 - V2 branch/version management UI;
 - command conflict resolution UI beyond the exposed store state.

@@ -28,6 +28,13 @@ export const TASK_CHROME_LAYOUT_V2 = Object.freeze({
   titleStripHeight: 64,
 })
 
+export const COLLECTION_CHROME_LAYOUT_V2 = Object.freeze({
+  collapsedWidth: 380,
+  collapsedHeight: 84,
+  minimumWidth: 420,
+  minimumHeight: 160,
+})
+
 export function taskOutputFrameV2(
   anchor: CanvasPointV2,
   index: number,
