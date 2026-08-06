@@ -3,7 +3,9 @@ import CanvasV2Shell from '@/components/canvas-v2/CanvasV2Shell'
 import { CanvasV2DaemonClient } from '@/canvas-v2/daemonClient'
 import { canvasV2BranchFromSearch } from '@/canvas-v2/featureFlag'
 import { CanvasV2Provider } from '@/canvas-v2/provider'
+import { CanvasV2TaskRunProvider } from '@/canvas-v2/runProvider'
 import { CanvasV2Store } from '@/canvas-v2/store'
+import { DaemonClient } from '@/agent/daemonClient'
 import { DAEMON_PROJECT_DIR, DAEMON_URL } from '@/agent/config'
 
 export default function CanvasV2Home() {
@@ -16,10 +18,13 @@ export default function CanvasV2Home() {
       client,
     })
   }, [branch])
+  const taskRunClient = useMemo(() => new DaemonClient({ baseUrl: DAEMON_URL }), [])
 
   return (
     <CanvasV2Provider store={store}>
-      <CanvasV2Shell />
+      <CanvasV2TaskRunProvider store={store} daemonClient={taskRunClient}>
+        <CanvasV2Shell />
+      </CanvasV2TaskRunProvider>
     </CanvasV2Provider>
   )
 }
