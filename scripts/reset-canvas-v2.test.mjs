@@ -116,6 +116,7 @@ test('apply archives V1 state and initializes only pristine V2 state', async () 
     'utf8',
   ))
   assert.equal(snapshot.revision, 0)
+  assert.equal(snapshot.lastCheckpoint, null)
   assert.deepEqual(snapshot.document, {
     schemaVersion: 2,
     nodes: [],

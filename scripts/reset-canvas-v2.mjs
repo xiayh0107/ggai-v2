@@ -401,6 +401,7 @@ async function initializeCanvasV2(projectDir, journal) {
     revision: 0,
     updatedAt: EMPTY_UPDATED_AT,
     lastMutationId: null,
+    lastCheckpoint: null,
     document: {
       schemaVersion: 2,
       nodes: [],
