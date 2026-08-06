@@ -152,6 +152,144 @@ test('Canvas V2 command API persists reducer commands with CAS', async () => {
   }
 })
 
+test('V2 plugin capability handshake pins strict data before accepting a Run', async () => {
+  const fixture = await startTestDaemon()
+  const headers = { 'Content-Type': 'application/json' }
+  try {
+    const capabilityResponse = await fetch(`${fixture.baseUrl}/plugin-capabilities/v2`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({
+        schemaVersion: 2,
+        plugins: [{
+          id: '@community/notebook',
+          artifactClaims: [{ extensions: ['.ipynb'] }],
+        }],
+      }),
+    })
+    const capabilityText = await capabilityResponse.text()
+    assert.equal(capabilityResponse.status, 200, capabilityText)
+    const capability = JSON.parse(capabilityText) as {
+      schemaVersion: number
+      digest: string
+      pluginCount: number
+    }
+    assert.equal(capability.schemaVersion, 2)
+    assert.match(capability.digest, /^[0-9a-f]{64}$/u)
+    assert.ok(capability.pluginCount > 6)
+
+    const override = await fetch(`${fixture.baseUrl}/plugin-capabilities/v2`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({
+        schemaVersion: 2,
+        plugins: [{ id: 'image', artifactClaims: [{ extensions: ['.evil'] }] }],
+      }),
+    })
+    assert.equal(override.status, 400)
+    assert.equal((await override.json() as { error: { code: string } }).error.code,
+      'invalid_plugin_capabilities')
+
+    const forged = await fetch(`${fixture.baseUrl}/plugin-capabilities/v2`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({
+        schemaVersion: 2,
+        plugins: [],
+        nodes: [{ id: 'forged', x: 10, y: 20, payload: { unsafe: true } }],
+      }),
+    })
+    assert.equal(forged.status, 400)
+
+    const created = await fetch(`${fixture.baseUrl}/canvas/commands`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        branch: 'main',
+        baseRevision: 0,
+        mutationId: 'create-plugin-task',
+        command: {
+          type: 'CreateTask',
+          task: {
+            id: 'task-plugin-capabilities',
+            title: 'Plugin capability task',
+            goal: 'Produce a plugin-owned artifact',
+            anchor: { x: 100, y: 100 },
+            origin: { kind: 'user' },
+          },
+        },
+      }),
+    })
+    assert.equal(created.status, 200, await created.text())
+
+    const intent = {
+      schemaVersion: 2,
+      runId: 'run-plugin-capabilities',
+      taskId: 'task-plugin-capabilities',
+      agentId: 'codex',
+      canvasBranch: 'main',
+      baseRevision: 1,
+      prompt: 'Generate output using the fixed plugin registry.',
+      attachments: [],
+      materializationPolicy: 'auto',
+    }
+    const missing = await fetch(
+      `${fixture.baseUrl}/runs?pluginCapabilityDigest=${'f'.repeat(64)}`,
+      { method: 'POST', headers, body: JSON.stringify({ ...intent, runId: 'run-missing-capability' }) },
+    )
+    assert.equal(missing.status, 409)
+    assert.equal((await missing.json() as { error: { code: string } }).error.code,
+      'plugin_capabilities_not_found')
+    assert.equal(await new RunLogStore(fixture.root).summary('run-missing-capability'), null)
+
+    const accepted = await fetch(
+      `${fixture.baseUrl}/runs?pluginCapabilityDigest=${capability.digest}`,
+      { method: 'POST', headers, body: JSON.stringify(intent) },
+    )
+    assert.equal(accepted.status, 202, await accepted.text())
+    await waitFor(async () =>
+      (await fixture.daemon.runs.getPersisted(intent.runId))?.status === 'done')
+    assert.equal(
+      (await fixture.daemon.runs.getPersisted(intent.runId))?.pluginCapabilityDigest,
+      capability.digest,
+    )
+    assert.match(
+      await readFile(path.join(
+        fixture.root,
+        '.gg',
+        'context',
+        'runs',
+        intent.runId,
+        'pack.md',
+      ), 'utf8'),
+      /@community\/notebook/u,
+    )
+
+    const snapshotPath = path.join(
+      fixture.root,
+      '.gg',
+      'runtime',
+      'plugin-capabilities-v2',
+      `${capability.digest}.json`,
+    )
+    await writeFile(snapshotPath, '{damaged snapshot\n', 'utf8')
+    const damaged = await fetch(
+      `${fixture.baseUrl}/runs?pluginCapabilityDigest=${capability.digest}`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ ...intent, runId: 'run-damaged-capability' }),
+      },
+    )
+    assert.equal(damaged.status, 409)
+    assert.equal((await damaged.json() as { error: { code: string } }).error.code,
+      'plugin_capabilities_unavailable')
+    assert.equal(await new RunLogStore(fixture.root).summary('run-damaged-capability'), null)
+  } finally {
+    await fixture.close()
+  }
+})
+
 function runBody(nodeId: string, prompt: string): Record<string, unknown> {
   return {
     nodeId,

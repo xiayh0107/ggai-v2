@@ -11,6 +11,10 @@ import {
   type SuggestedAction,
 } from './outcome'
 import type { GenerationPanelState } from './generationProgress'
+import {
+  inspectArtifactCapabilitySnapshotRequestV2,
+  type ArtifactCapabilitySnapshotRequestV2,
+} from '@/plugins/artifactContracts'
 import { consumeSse } from './sse'
 import {
   decodeCanvasBranchList,
@@ -355,6 +359,12 @@ export interface DaemonRunSummary {
   sessionId: string | null
   error?: string
   logAvailable?: boolean
+}
+
+export interface DaemonPluginCapabilityRegistrationV2 {
+  schemaVersion: 2
+  digest: string
+  pluginCount: number
 }
 
 export interface DaemonRunsQuery {
@@ -1950,16 +1960,69 @@ export class DaemonClient implements AgentTransport {
     await this.permissions(permissionId, resolution, signal)
   }
 
+  /** PUT a strict data-only plugin registry and receive its immutable digest. */
+  async registerPluginCapabilitiesV2(
+    projectDir: string,
+    snapshot: ArtifactCapabilitySnapshotRequestV2,
+    signal?: AbortSignal,
+  ): Promise<DaemonPluginCapabilityRegistrationV2> {
+    if (!projectDir) throw new DaemonClientError('projectDir must not be empty')
+    const inspection = inspectArtifactCapabilitySnapshotRequestV2(snapshot)
+    if (inspection.status !== 'valid') {
+      throw new DaemonClientError(`plugin capability snapshot is invalid: ${inspection.reason}`)
+    }
+    const url = new URL(this.endpoint('/plugin-capabilities/v2'))
+    url.searchParams.set('projectDir', projectDir)
+    const timeout = new AbortController()
+    const timeoutId = setTimeout(() => {
+      timeout.abort(new DOMException('Registering plugin capabilities timed out', 'TimeoutError'))
+    }, CREATE_RUN_TIMEOUT_MS)
+    const combined = combineAbortSignals([signal, timeout.signal])
+    try {
+      const response = await this.requestUrl(url, {
+        method: 'PUT',
+        body: JSON.stringify(inspection.snapshot),
+      }, combined.signal)
+      const payload = await this.readJson(response, 'PUT /plugin-capabilities/v2 response')
+      if (!isRecord(payload)
+        || !hasExactKeys(payload, ['schemaVersion', 'digest', 'pluginCount'])
+        || payload.schemaVersion !== 2
+        || typeof payload.digest !== 'string'
+        || !/^[0-9a-f]{64}$/u.test(payload.digest)
+        || !Number.isSafeInteger(payload.pluginCount)
+        || (payload.pluginCount as number) < 1
+        || (payload.pluginCount as number) > 500) {
+        throw new DaemonProtocolError('PUT /plugin-capabilities/v2 response was malformed')
+      }
+      return {
+        schemaVersion: 2,
+        digest: payload.digest,
+        pluginCount: payload.pluginCount as number,
+      }
+    } finally {
+      clearTimeout(timeoutId)
+      combined.dispose()
+    }
+  }
+
   /** POST /runs?projectDir= with the exact Task-owned V2 intent. */
   async createTaskRunV2(
     intent: DaemonRunIntentV2,
     projectDir: string,
     signal?: AbortSignal,
+    pluginCapabilityDigest?: string,
   ): Promise<DaemonCreateRunResponse> {
     if (!projectDir) throw new DaemonClientError('projectDir must not be empty')
+    if (pluginCapabilityDigest !== undefined
+      && !/^[0-9a-f]{64}$/u.test(pluginCapabilityDigest)) {
+      throw new DaemonClientError('pluginCapabilityDigest is invalid')
+    }
     const body = canonicalRunIntentV2(intent)
     const url = new URL(this.endpoint('/runs'))
     url.searchParams.set('projectDir', projectDir)
+    if (pluginCapabilityDigest) {
+      url.searchParams.set('pluginCapabilityDigest', pluginCapabilityDigest)
+    }
     const timeout = new AbortController()
     const timeoutId = setTimeout(() => {
       timeout.abort(new DOMException('Creating the Task Run timed out', 'TimeoutError'))

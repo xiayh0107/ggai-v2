@@ -3,7 +3,11 @@ import type { ComponentType } from 'react'
 import type { CanvasNode } from '@/types/canvas'
 import type { RunOutcome } from '@/agent/outcome'
 import {
+  ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION_V2,
+  BUILTIN_ARTIFACT_PLUGIN_IDS_V2,
+  inspectArtifactCapabilitySnapshotRequestV2,
   inspectArtifactClaimRegistryV2,
+  type ArtifactCapabilitySnapshotRequestV2,
   type ArtifactClaimRuleV2,
 } from './artifactContracts'
 
@@ -205,4 +209,25 @@ export function listPlugins(): NodePlugin[] {
 /** 启用中的插件（创建菜单 / 首屏面板用） */
 export function listEnabledPlugins(): NodePlugin[] {
   return listPlugins().filter((p) => !disabled.has(p.id))
+}
+
+/**
+ * Captures enabled browser plugin claims as strict data. Daemon-owned built-ins
+ * are intentionally omitted because the daemon supplies and protects them.
+ */
+export function enabledArtifactCapabilitySnapshotV2(): ArtifactCapabilitySnapshotRequestV2 {
+  const inspection = inspectArtifactCapabilitySnapshotRequestV2({
+    schemaVersion: ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION_V2,
+    plugins: listEnabledPlugins()
+      .filter((plugin) => !BUILTIN_ARTIFACT_PLUGIN_IDS_V2.has(plugin.id))
+      .filter((plugin) => plugin.artifactClaims.length > 0)
+      .map((plugin) => ({
+        id: plugin.id,
+        artifactClaims: plugin.artifactClaims,
+      })),
+  })
+  if (inspection.status !== 'valid') {
+    throw new TypeError(`[ggai] 无法序列化插件能力快照：${inspection.reason}`)
+  }
+  return inspection.snapshot
 }

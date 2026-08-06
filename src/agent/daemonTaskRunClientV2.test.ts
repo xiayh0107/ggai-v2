@@ -7,6 +7,8 @@ import {
 } from './daemonClient'
 import { DaemonTaskRunClientV2 } from './daemonTaskRunClientV2'
 
+const CAPABILITY_DIGEST = 'e'.repeat(64)
+
 function response(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
     status,
@@ -99,7 +101,17 @@ function subject(fetch: typeof globalThis.fetch, historyLimit = 2_000) {
   })
   return {
     client,
-    adapter: new DaemonTaskRunClientV2({ client, historyLimit }),
+    adapter: new DaemonTaskRunClientV2({
+      client,
+      historyLimit,
+      pluginCapabilities: () => ({
+        schemaVersion: 2,
+        plugins: [{
+          id: '@tests/notebook',
+          artifactClaims: [{ extensions: ['.ipynb'] }],
+        }],
+      }),
+    }),
   }
 }
 
@@ -112,8 +124,14 @@ describe('DaemonTaskRunClientV2', () => {
   it('POSTs only the exact RunIntent V2 body and keeps projectDir in the query', async () => {
     let requestUrl: URL | null = null
     let requestBody: Record<string, unknown> | null = null
+    let capabilityBody: Record<string, unknown> | null = null
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      requestUrl = new URL(String(input))
+      const url = new URL(String(input))
+      if (url.pathname === '/plugin-capabilities/v2') {
+        capabilityBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+        return response({ schemaVersion: 2, digest: CAPABILITY_DIGEST, pluginCount: 7 })
+      }
+      requestUrl = url
       requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>
       return response({ runId: 'run-v2' }, 202)
     })
@@ -134,6 +152,14 @@ describe('DaemonTaskRunClientV2', () => {
     const capturedUrl = requireUrl(requestUrl)
     expect(capturedUrl.pathname).toBe('/runs')
     expect(capturedUrl.searchParams.get('projectDir')).toBe('/real-project')
+    expect(capturedUrl.searchParams.get('pluginCapabilityDigest')).toBe(CAPABILITY_DIGEST)
+    expect(capabilityBody).toEqual({
+      schemaVersion: 2,
+      plugins: [{
+        id: '@tests/notebook',
+        artifactClaims: [{ extensions: ['.ipynb'] }],
+      }],
+    })
     expect(Object.keys(requestBody ?? {}).sort()).toEqual([
       'agentId',
       'attachments',
@@ -178,6 +204,21 @@ describe('DaemonTaskRunClientV2', () => {
       branch: 'feature/task-v2',
       limit: '37',
     })
+  })
+
+  it('fails before Run creation when the capability handshake is malformed', async () => {
+    const requests: string[] = []
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      requests.push(new URL(String(input)).pathname)
+      return response({ schemaVersion: 2, digest: 'not-a-digest', pluginCount: 7 })
+    })
+    const { adapter } = subject(fetchMock)
+
+    await expect(adapter.createTaskRun({
+      projectDir: '/project',
+      intent: intent(),
+    })).rejects.toBeInstanceOf(DaemonProtocolError)
+    expect(requests).toEqual(['/plugin-capabilities/v2'])
   })
 
   it.each([
@@ -290,6 +331,9 @@ describe('DaemonTaskRunClientV2', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input))
       requests.push({ method: init?.method ?? 'GET', pathname: url.pathname })
+      if (url.pathname === '/plugin-capabilities/v2' && init?.method === 'PUT') {
+        return response({ schemaVersion: 2, digest: CAPABILITY_DIGEST, pluginCount: 7 })
+      }
       if (url.pathname === '/runs' && init?.method === 'POST') {
         throw new TypeError('network response was lost')
       }
@@ -317,6 +361,7 @@ describe('DaemonTaskRunClientV2', () => {
       await vi.runAllTimersAsync()
       await expect(reconciliation).resolves.toBeNull()
       expect(requests).toEqual([
+        { method: 'PUT', pathname: '/plugin-capabilities/v2' },
         { method: 'POST', pathname: '/runs' },
         { method: 'GET', pathname: '/runs/run-v2' },
         { method: 'GET', pathname: '/runs/run-v2' },

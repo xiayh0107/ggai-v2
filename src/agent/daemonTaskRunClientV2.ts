@@ -6,6 +6,8 @@ import type {
   CanvasV2TaskRunSummary,
 } from '@/canvas-v2/runController'
 import type { CanvasAgentEvent } from './types'
+import { enabledArtifactCapabilitySnapshotV2 } from '@/plugins/types'
+import type { ArtifactCapabilitySnapshotRequestV2 } from '@/plugins/artifactContracts'
 import {
   DaemonClient,
   DaemonHttpError,
@@ -17,6 +19,7 @@ import {
 export interface DaemonTaskRunClientV2Options {
   client: DaemonClient
   historyLimit?: number
+  pluginCapabilities?: () => ArtifactCapabilitySnapshotRequestV2
 }
 
 const RECONCILE_ATTEMPTS = 3
@@ -28,10 +31,12 @@ const RECONCILE_ATTEMPTS = 3
 export class DaemonTaskRunClientV2 implements CanvasV2TaskRunClient {
   readonly #client: DaemonClient
   readonly #historyLimit: number
+  readonly #pluginCapabilities: () => ArtifactCapabilitySnapshotRequestV2
 
   constructor(options: DaemonTaskRunClientV2Options) {
     this.#client = options.client
     this.#historyLimit = options.historyLimit ?? 2_000
+    this.#pluginCapabilities = options.pluginCapabilities ?? enabledArtifactCapabilitySnapshotV2
     if (!Number.isSafeInteger(this.#historyLimit)
       || this.#historyLimit < 1
       || this.#historyLimit > 2_000) {
@@ -43,9 +48,15 @@ export class DaemonTaskRunClientV2 implements CanvasV2TaskRunClient {
     projectDir: string
     intent: CanvasV2RunIntent
   }): Promise<{ runId: string }> {
+    const registration = await this.#client.registerPluginCapabilitiesV2(
+      input.projectDir,
+      this.#pluginCapabilities(),
+    )
     return this.#client.createTaskRunV2(
       input.intent as DaemonRunIntentV2,
       input.projectDir,
+      undefined,
+      registration.digest,
     )
   }
 

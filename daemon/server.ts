@@ -37,6 +37,11 @@ import {
 import { CanvasGitV2Error } from './canvasGitV2.js'
 import { isPathWithin, PermissionPolicyError, resolveProjectDir } from './permissions.js'
 import {
+  BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2,
+  ProjectionPluginCapabilityStoreV2,
+  type ProjectionPluginCapabilitySnapshotV2,
+} from './pluginCapabilitiesV2.js'
+import {
   parseCanvasBranch,
   parseCreateRunRequest,
   parseNodeId,
@@ -280,6 +285,7 @@ async function route(
       capabilities: {
         canvasModelV1: context.canvasModel === 'v1',
         canvasModelV2: context.canvasModel === 'v2',
+        pluginArtifactCapabilitiesV2: context.canvasModel === 'v2',
       },
       canvas: {
         model: context.canvasModel,
@@ -611,12 +617,44 @@ async function route(
     return
   }
 
+  if (request.method === 'PUT' && pathname === '/plugin-capabilities/v2') {
+    assertCanvasModel(context, 'v2')
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const leasedProjectDir = await context.canvasV2.acquireProjectLease(projectDir)
+    let snapshot: ProjectionPluginCapabilitySnapshotV2
+    try {
+      snapshot = await new ProjectionPluginCapabilityStoreV2(leasedProjectDir)
+        .register(await readJson(request))
+    } catch (error) {
+      if (error instanceof TypeError) {
+        throw new ProtocolError(error.message, 'invalid_plugin_capabilities', 400)
+      }
+      throw new ProtocolError(
+        `plugin capabilities could not be persisted: ${error instanceof Error
+          ? error.message
+          : String(error)}`,
+        'plugin_capabilities_unavailable',
+        409,
+      )
+    }
+    writeJson(response, 200, {
+      schemaVersion: 2,
+      digest: snapshot.digest,
+      pluginCount: snapshot.plugins.length,
+    })
+    return
+  }
+
   if (request.method === 'POST' && pathname === '/runs') {
     const raw = await readJson(request)
     if (isRunIntentV2Candidate(raw)) {
       assertCanvasModel(context, 'v2')
       const intent = parseRunIntentV2ForServer(raw)
       const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+      const capabilityDigest = optionalPluginCapabilityDigest(url)
+      const pluginCapabilities = capabilityDigest
+        ? await loadPluginCapabilitiesForRunV2(context, projectDir, capabilityDigest)
+        : structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2)
       assertServerOpen(context)
       const envelope = (await context.versionsV2.getCanvas(
         projectDir,
@@ -639,6 +677,7 @@ async function route(
         projectDir,
         canvasDocument: structuredClone(envelope.document),
         resolvedArtifactAttachments,
+        pluginCapabilities,
         automationMode: 'confirm',
       }, {
         validateReserved: async () => {
@@ -824,6 +863,47 @@ async function route(
   }
 
   throw new ProtocolError('route not found', 'not_found', 404)
+}
+
+function optionalPluginCapabilityDigest(url: URL): string | undefined {
+  const value = singleQueryParameter(url, 'pluginCapabilityDigest')
+  if (value === undefined) return undefined
+  if (!/^[0-9a-f]{64}$/u.test(value)) {
+    throw new ProtocolError(
+      'pluginCapabilityDigest is invalid',
+      'invalid_plugin_capability_digest',
+      400,
+    )
+  }
+  return value
+}
+
+async function loadPluginCapabilitiesForRunV2(
+  context: RouteContext,
+  projectDir: string,
+  digest: string,
+): Promise<ProjectionPluginCapabilitySnapshotV2> {
+  const leasedProjectDir = await context.canvasV2.acquireProjectLease(projectDir)
+  let snapshot: ProjectionPluginCapabilitySnapshotV2 | null
+  try {
+    snapshot = await new ProjectionPluginCapabilityStoreV2(leasedProjectDir).get(digest)
+  } catch (error) {
+    throw new ProtocolError(
+      `plugin capability snapshot failed verification: ${error instanceof Error
+        ? error.message
+        : String(error)}`,
+      'plugin_capabilities_unavailable',
+      409,
+    )
+  }
+  if (!snapshot) {
+    throw new ProtocolError(
+      'plugin capability snapshot was not registered for this project',
+      'plugin_capabilities_not_found',
+      409,
+    )
+  }
+  return snapshot
 }
 
 function runIdFromPath(value: string | undefined): string {

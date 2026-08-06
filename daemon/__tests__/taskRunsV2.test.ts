@@ -16,6 +16,7 @@ import type { CanvasDocumentV2 } from '../../src/canvas-v2/model.js'
 import { ProtocolError } from '../protocol.js'
 import { resolveProjectionPluginCapabilitySnapshotV2 } from '../pluginCapabilitiesV2.js'
 import type { AgentRegistry } from '../registry.js'
+import { RunLogStore } from '../runLogs.js'
 import { RunManager } from '../runs.js'
 import { RunArtifactStoreV2 } from '../runArtifactStorageV2.js'
 import type { ResolvedTaskRunRequestV2 } from '../taskRunTypesV2.js'
@@ -518,6 +519,43 @@ test('Task runs reject a symlinked branch-local pending-plan directory', async (
       manager.create(request('task-run-unsafe-plan-path')),
       (error: unknown) => error instanceof ProtocolError && error.code === 'unsafe_managed_path',
     )
+    assert.deepEqual(await readdir(outside), [])
+  } finally {
+    await manager.close()
+    await Promise.all([
+      rm(root, { recursive: true, force: true }),
+      rm(outside, { recursive: true, force: true }),
+    ])
+  }
+})
+
+test('Task acceptance fails before durable summary when capability pinning is unsafe', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-task-run-capability-pin-'))
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'ggai-task-run-capability-outside-'))
+  let transportStarted = false
+  const transport: AgentProcessTransport = {
+    kind: 'codex',
+    async run(): Promise<TransportRunResult> {
+      transportStarted = true
+      return { sessionId: null }
+    },
+    async cancel() {
+      return false
+    },
+  }
+  await mkdir(path.join(root, '.gg', 'runtime'), { recursive: true })
+  await symlink(outside, path.join(root, '.gg', 'runtime', 'plugin-capabilities-v2'), 'dir')
+  const manager = new RunManager({ projectRoot: root, registry: registry(transport) })
+  const input = request('task-run-unsafe-capability-pin')
+  input.pluginCapabilities = resolveProjectionPluginCapabilitySnapshotV2({
+    schemaVersion: 2,
+    plugins: [{ id: '@community/notebook', artifactClaims: [{ extensions: ['.nbx'] }] }],
+  })
+
+  try {
+    await assert.rejects(manager.create(input), /unsafe plugin capability root/u)
+    assert.equal(transportStarted, false)
+    assert.equal(await new RunLogStore(root).summary(input.runId), null)
     assert.deepEqual(await readdir(outside), [])
   } finally {
     await manager.close()
