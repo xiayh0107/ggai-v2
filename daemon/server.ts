@@ -31,8 +31,10 @@ import {
 import {
   autoMaterializeProjectionPlanV2,
   commitProjectionPlanCommandV2,
+  type CanvasProjectionCommitterV2,
   ProjectionPlanUnavailableV2Error,
 } from './canvasProjectionCoordinatorV2.js'
+import { CanvasGitV2Error } from './canvasGitV2.js'
 import { isPathWithin, PermissionPolicyError, resolveProjectDir } from './permissions.js'
 import {
   parseCanvasBranch,
@@ -64,6 +66,11 @@ import {
   WorkspaceVersionManager,
   type WorkspaceMergeExpectation,
 } from './workspaceVersioning.js'
+import {
+  WorkspaceVersionManagerV2,
+  WorkspaceVersioningV2Error,
+  type WorkspaceMergeExpectationV2,
+} from './workspaceVersioningV2.js'
 
 const MAX_JSON_BODY_BYTES = 8 * 1024 * 1024
 const SSE_HEARTBEAT_MS = 15_000
@@ -83,6 +90,7 @@ export interface DaemonServerOptions {
   runManager?: RunManager
   canvasStoreManager?: CanvasStoreManager
   workspaceVersionManager?: WorkspaceVersionManager
+  workspaceVersionManagerV2?: WorkspaceVersionManagerV2
   preferencesManager?: WorkspacePreferencesManager
   canvasCommandStoreV2Manager?: CanvasCommandStoreV2Manager
   canvasModel?: CanvasModelMode
@@ -96,6 +104,7 @@ export interface DaemonServer {
   runs: RunManager
   canvases: CanvasStoreManager
   versions: WorkspaceVersionManager
+  versionsV2: WorkspaceVersionManagerV2
   preferences: WorkspacePreferencesManager
   canvasV2: CanvasCommandStoreV2Manager
   canvasModel: CanvasModelMode
@@ -114,18 +123,36 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     projectRoot: options.projectRoot,
     acquireProjectLease: (projectDir) => canvases.acquireProjectLease(projectDir),
   })
+  const versionsV2 = options.workspaceVersionManagerV2 ?? new WorkspaceVersionManagerV2({
+    projectRoot: options.projectRoot,
+    canvasStoreManager: canvasV2,
+  })
+  if (options.workspaceVersionManagerV2
+    && options.canvasCommandStoreV2Manager
+    && versionsV2.canvases !== canvasV2) {
+    throw new TypeError('workspaceVersionManagerV2 and canvasCommandStoreV2Manager must share a store')
+  }
+  const projectionCanvases = workspaceProjectionCommitterV2(versionsV2)
   const preferences = options.preferencesManager ?? new WorkspacePreferencesManager(options.projectRoot)
   const runs = options.runManager ?? new RunManager({
     projectRoot: options.projectRoot,
     registry,
-    acquireProjectLease: (projectDir) => versions.canvases.acquireProjectLease(projectDir),
-    resolveSourceProjectDir: ({ projectDir, canvasBranch }) =>
-      versions.sourceExecutionProjectDir(projectDir, canvasBranch),
+    acquireProjectLease: (projectDir) => canvasModel === 'v2'
+      ? canvasV2.acquireProjectLease(projectDir)
+      : versions.canvases.acquireProjectLease(projectDir),
+    resolveSourceProjectDir: async ({ projectDir, canvasBranch, taskOwned }) => {
+      if (!taskOwned) return versions.sourceExecutionProjectDir(projectDir, canvasBranch)
+      // V2 validates that the logical branch exists, but intentionally has no
+      // writable legacy source-worktree binding. A null override keeps the
+      // transport in the leased project root with artifact-only writes.
+      await versionsV2.sourceExecutionProjectDir(projectDir, canvasBranch)
+      return null
+    },
     ...(canvasModel === 'v2' || options.allowCanvasModelMixingForTests
       ? {
           onProjectionPlanReady: ({ plan, projectDir, canvasBranch }) =>
             autoMaterializeProjectionPlanV2({
-              canvases: canvasV2,
+              canvases: projectionCanvases,
               projectDir,
               branch: canvasBranch,
               plan,
@@ -161,6 +188,8 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
       canvases,
       canvasV2,
       versions,
+      versionsV2,
+      projectionCanvases,
       preferences,
       allowedOrigins,
       lifecycle,
@@ -180,6 +209,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     runs,
     canvases,
     versions,
+    versionsV2,
     preferences,
     canvasV2,
     canvasModel,
@@ -189,6 +219,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
         sockets,
         runs,
         versions,
+        versionsV2,
         preferences,
         canvasV2,
         lifecycle,
@@ -205,6 +236,8 @@ interface RouteContext {
   canvases: CanvasStoreManager
   canvasV2: CanvasCommandStoreV2Manager
   versions: WorkspaceVersionManager
+  versionsV2: WorkspaceVersionManagerV2
+  projectionCanvases: CanvasProjectionCommitterV2
   preferences: WorkspacePreferencesManager
   allowedOrigins: Set<string>
   lifecycle: { closing: boolean }
@@ -264,7 +297,7 @@ async function route(
   if (request.method === 'GET' && pathname === '/canvas/v2') {
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
     const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
-    writeJson(response, 200, await context.canvasV2.get(projectDir, branch))
+    writeJson(response, 200, (await context.versionsV2.getCanvas(projectDir, branch)).canvas)
     return
   }
 
@@ -273,7 +306,7 @@ async function route(
     const parsed = parseCanvasCommandRequestV2(await readJson(request))
     if (isTrustedPlanWireCommand(parsed.command)) {
       writeJson(response, 200, await commitProjectionPlanCommandV2({
-        canvases: context.canvasV2,
+        canvases: context.projectionCanvases,
         plans: context.runs,
         projectDir,
         branch: parsed.branch,
@@ -284,19 +317,19 @@ async function route(
       return
     }
     const command = parsed.command as OrdinaryCanvasCommandV2
-    const commit = () => context.canvasV2.commit(
+    const commit = () => context.versionsV2.commitCanvas(
       projectDir,
       parsed.branch,
       parsed.baseRevision,
       parsed.mutationId,
       command,
-    )
+    ).then((result) => result.canvas)
     if (!isTaskDestructiveCanvasCommandV2(command)) {
       writeJson(response, 200, await commit())
       return
     }
 
-    const envelope = await context.canvasV2.get(projectDir, parsed.branch)
+    const envelope = (await context.versionsV2.getCanvas(projectDir, parsed.branch)).canvas
     if (envelope.revision !== parsed.baseRevision) {
       // Preserve command-store replay and conflict semantics. A command that
       // cannot mutate this revision does not need a Task mutation lease.
@@ -339,13 +372,17 @@ async function route(
 
   if (request.method === 'GET' && pathname === '/canvas/status') {
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
-    writeJson(response, 200, await context.versions.status(projectDir))
+    writeJson(response, 200, context.canvasModel === 'v2'
+      ? await context.versionsV2.status(projectDir)
+      : await context.versions.status(projectDir))
     return
   }
 
   if (request.method === 'GET' && pathname === '/canvas/branches') {
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
-    writeJson(response, 200, await context.versions.listBranches(projectDir))
+    writeJson(response, 200, context.canvasModel === 'v2'
+      ? await context.versionsV2.listBranches(projectDir)
+      : await context.versions.listBranches(projectDir))
     return
   }
 
@@ -357,16 +394,30 @@ async function route(
       ? undefined
       : parseCanvasBranch(body.fromBranch)
     assertServerOpen(context)
-    const result = await context.runs.withIdleBranches(
-      projectDir,
-      [fromBranch ?? 'main', name],
-      () => context.versions.createBranch(projectDir, { name, fromBranch }),
-    )
+    const lockedBranches = [fromBranch ?? 'main', name]
+    const result = context.canvasModel === 'v2'
+      ? await context.runs.withIdleBranches(
+          projectDir,
+          lockedBranches,
+          () => context.versionsV2.createBranch(projectDir, { name, fromBranch }),
+        )
+      : await context.runs.withIdleBranches(
+          projectDir,
+          lockedBranches,
+          () => context.versions.createBranch(projectDir, { name, fromBranch }),
+        )
     writeJson(response, 200, result)
     return
   }
 
   if (request.method === 'DELETE' && pathname === '/canvas/branches') {
+    if (context.canvasModel === 'v2') {
+      throw new ProtocolError(
+        'Canvas V2 branch deletion is not available; history remains recoverable',
+        'canvas_v2_branch_delete_unsupported',
+        405,
+      )
+    }
     const body = requestObject(await readJson(request))
     const projectDir = optionalBodyString(body, 'projectDir', 4_096) ?? '.'
     const branch = parseCanvasBranch(requiredBodyString(body, 'branch'))
@@ -385,11 +436,14 @@ async function route(
     const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
     const cursor = singleQueryParameter(url, 'cursor')
     const limit = optionalIntegerQuery(url, 'limit', { min: 1, max: 100 })
-    writeJson(response, 200, await context.versions.history(projectDir, {
+    const options = {
       branch,
       ...(cursor === undefined ? {} : { cursor }),
       ...(limit === undefined ? {} : { limit }),
-    }))
+    }
+    writeJson(response, 200, context.canvasModel === 'v2'
+      ? await context.versionsV2.history(projectDir, options)
+      : await context.versions.history(projectDir, options))
     return
   }
 
@@ -399,7 +453,9 @@ async function route(
     const branch = parseCanvasBranch(requiredBodyString(body, 'branch'))
     const reason = optionalBodyString(body, 'reason') ?? 'manual'
     assertServerOpen(context)
-    writeJson(response, 200, await context.versions.manualCheckpoint(projectDir, branch, reason))
+    writeJson(response, 200, context.canvasModel === 'v2'
+      ? await context.versionsV2.manualCheckpoint(projectDir, branch, reason)
+      : await context.versions.manualCheckpoint(projectDir, branch, reason))
     return
   }
 
@@ -410,15 +466,25 @@ async function route(
     const newBranch = parseCanvasBranch(requiredBodyString(body, 'newBranch'))
     const checkpoint = requiredBodyString(body, 'checkpoint')
     assertServerOpen(context)
-    const result = await context.runs.withIdleBranches(
-      projectDir,
-      [sourceBranch, newBranch],
-      () => context.versions.restoreAsNewBranch(projectDir, {
-        sourceBranch,
-        newBranch,
-        checkpoint,
-      }),
-    )
+    const result = context.canvasModel === 'v2'
+      ? await context.runs.withIdleBranches(
+          projectDir,
+          [sourceBranch, newBranch],
+          () => context.versionsV2.restoreAsNewBranch(projectDir, {
+            sourceBranch,
+            newBranch,
+            checkpoint,
+          }),
+        )
+      : await context.runs.withIdleBranches(
+          projectDir,
+          [sourceBranch, newBranch],
+          () => context.versions.restoreAsNewBranch(projectDir, {
+            sourceBranch,
+            newBranch,
+            checkpoint,
+          }),
+        )
     writeJson(response, 200, result)
     return
   }
@@ -429,14 +495,17 @@ async function route(
     const sourceBranch = parseCanvasBranch(requiredBodyString(body, 'sourceBranch'))
     const targetBranch = parseCanvasBranch(requiredBodyString(body, 'targetBranch'))
     assertServerOpen(context)
-    const result = await context.runs.withIdleBranches(
-      projectDir,
-      [sourceBranch, targetBranch],
-      () => context.versions.previewMerge(projectDir, {
-        sourceBranch,
-        targetBranch,
-      }),
-    )
+    const result = context.canvasModel === 'v2'
+      ? await context.runs.withIdleBranches(
+          projectDir,
+          [sourceBranch, targetBranch],
+          () => context.versionsV2.previewMerge(projectDir, { sourceBranch, targetBranch }),
+        )
+      : await context.runs.withIdleBranches(
+          projectDir,
+          [sourceBranch, targetBranch],
+          () => context.versions.previewMerge(projectDir, { sourceBranch, targetBranch }),
+        )
     writeJson(response, 200, result)
     return
   }
@@ -447,18 +516,31 @@ async function route(
     const sourceBranch = parseCanvasBranch(requiredBodyString(body, 'sourceBranch'))
     const targetBranch = parseCanvasBranch(requiredBodyString(body, 'targetBranch'))
     const confirmed = requiredBodyBoolean(body, 'confirmed')
-    const expected = parseWorkspaceMergeExpectation(body.expected)
+    const expected = context.canvasModel === 'v2'
+      ? parseWorkspaceMergeExpectationV2(body.expected)
+      : parseWorkspaceMergeExpectation(body.expected)
     assertServerOpen(context)
-    const result = await context.runs.withIdleBranches(
-      projectDir,
-      [sourceBranch, targetBranch],
-      () => context.versions.executeMerge(projectDir, {
-        sourceBranch,
-        targetBranch,
-        confirmed,
-        expected,
-      }),
-    )
+    const result = context.canvasModel === 'v2'
+      ? await context.runs.withIdleBranches(
+          projectDir,
+          [sourceBranch, targetBranch],
+          () => context.versionsV2.executeMerge(projectDir, {
+            sourceBranch,
+            targetBranch,
+            confirmed,
+            expected: expected as WorkspaceMergeExpectationV2,
+          }),
+        )
+      : await context.runs.withIdleBranches(
+          projectDir,
+          [sourceBranch, targetBranch],
+          () => context.versions.executeMerge(projectDir, {
+            sourceBranch,
+            targetBranch,
+            confirmed,
+            expected: expected as WorkspaceMergeExpectation,
+          }),
+        )
     writeJson(response, 200, result)
     return
   }
@@ -536,7 +618,10 @@ async function route(
       const intent = parseRunIntentV2ForServer(raw)
       const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
       assertServerOpen(context)
-      const envelope = await context.canvasV2.get(projectDir, intent.canvasBranch)
+      const envelope = (await context.versionsV2.getCanvas(
+        projectDir,
+        intent.canvasBranch,
+      )).canvas
       if (envelope.revision !== intent.baseRevision) {
         throw new CanvasRevisionConflictV2Error(envelope.revision)
       }
@@ -557,7 +642,10 @@ async function route(
         automationMode: 'confirm',
       }, {
         validateReserved: async () => {
-          const current = await context.canvasV2.get(projectDir, intent.canvasBranch)
+          const current = (await context.versionsV2.getCanvas(
+            projectDir,
+            intent.canvasBranch,
+          )).canvas
           if (current.revision !== intent.baseRevision) {
             throw new CanvasRevisionConflictV2Error(current.revision)
           }
@@ -835,6 +923,25 @@ function parseWorkspaceMergeExpectation(value: unknown): WorkspaceMergeExpectati
   }
 }
 
+function parseWorkspaceMergeExpectationV2(value: unknown): WorkspaceMergeExpectationV2 {
+  const expected = requestObject(value)
+  const allowed = new Set([
+    'sourceCommit',
+    'targetCommit',
+    'sourceRevision',
+    'targetRevision',
+  ])
+  if (Object.keys(expected).some((key) => !allowed.has(key))) {
+    throw new ProtocolError('Canvas V2 merge expectation has unsupported properties')
+  }
+  return {
+    sourceCommit: requiredCommit(expected, 'sourceCommit'),
+    targetCommit: requiredCommit(expected, 'targetCommit'),
+    sourceRevision: requiredNonNegativeInteger(expected, 'sourceRevision'),
+    targetRevision: requiredNonNegativeInteger(expected, 'targetRevision'),
+  }
+}
+
 function requiredCommit(body: Record<string, unknown>, name: string): string {
   const commit = requiredBodyString(body, name)
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(commit)) {
@@ -870,6 +977,15 @@ function optionalIntegerQuery(
 
 function canvasRouteModel(pathname: string): CanvasModelMode | null {
   if (
+    pathname === '/canvas/status'
+    || pathname === '/canvas/branches'
+    || pathname === '/canvas/history'
+    || pathname === '/canvas/checkpoints'
+    || pathname === '/canvas/restores'
+    || pathname === '/canvas/merges/preview'
+    || pathname === '/canvas/merges'
+  ) return null
+  if (
     pathname === '/canvas/v2'
     || pathname === '/canvas/commands'
     || pathname.startsWith('/projection-plans/')
@@ -877,7 +993,8 @@ function canvasRouteModel(pathname: string): CanvasModelMode | null {
   ) return 'v2'
   if (
     pathname === '/canvas'
-    || pathname.startsWith('/canvas/')
+    || pathname.startsWith('/canvas/source')
+    || pathname === '/canvas/preferences'
     || pathname === '/artifacts'
     || pathname === '/sessions'
   ) return 'v1'
@@ -899,17 +1016,33 @@ function assertServerOpen(context: RouteContext): void {
   }
 }
 
+function workspaceProjectionCommitterV2(
+  versions: WorkspaceVersionManagerV2,
+): CanvasProjectionCommitterV2 {
+  return {
+    get: (projectDir, branch) => versions
+      .getCanvas(projectDir, branch)
+      .then((result) => result.canvas),
+    commit: (projectDir, branch, baseRevision, mutationId, command) => versions
+      .commitCanvas(projectDir, branch, baseRevision, mutationId, command)
+      .then((result) => result.canvas),
+    commitLatest: (projectDir, branch, mutationId, command) => versions
+      .commitLatestCanvas(projectDir, branch, mutationId, command)
+      .then((result) => result.canvas),
+  }
+}
+
 async function closeDaemonServer(
   server: Server,
   sockets: Set<Socket>,
   runs: RunManager,
   versions: WorkspaceVersionManager,
+  versionsV2: WorkspaceVersionManagerV2,
   preferences: WorkspacePreferencesManager,
   canvasV2: CanvasCommandStoreV2Manager,
   lifecycle: { closing: boolean },
 ): Promise<void> {
   lifecycle.closing = true
-  canvasV2.close()
   const serverClosed = new Promise<void>((resolve, reject) => {
     if (!server.listening) {
       resolve()
@@ -925,8 +1058,9 @@ async function closeDaemonServer(
     // ordinary in-flight HTTP routes before closing their managers.
     await runs.close()
     await serverClosed
-    await Promise.all([versions.close(), preferences.close()])
+    await Promise.all([versions.close(), versionsV2.close(), preferences.close()])
   } finally {
+    canvasV2.close()
     // Runs have emitted their terminal close frames; do not let a stuck client
     // connection keep process shutdown alive indefinitely.
     for (const socket of sockets) socket.destroy()
@@ -1323,6 +1457,24 @@ function writeError(response: ServerResponse, error: unknown): void {
         message: error.message,
         recovery: error.recovery,
       },
+    })
+    return
+  }
+  if (error instanceof CanvasGitV2Error) {
+    const status = error.code === 'BRANCH_NOT_FOUND'
+      || error.code === 'CHECKPOINT_NOT_FOUND'
+      ? 404
+      : error.code === 'GIT_UNAVAILABLE'
+        ? 503
+        : 409
+    writeJson(response, status, {
+      error: { code: error.code.toLowerCase(), message: error.message },
+    })
+    return
+  }
+  if (error instanceof WorkspaceVersioningV2Error) {
+    writeJson(response, 409, {
+      error: { code: error.code, message: error.message },
     })
     return
   }

@@ -991,7 +991,7 @@ export class WorkspaceVersionManagerV2 {
   }
 }
 
-class WorkspaceVersioningV2Error extends Error {
+export class WorkspaceVersioningV2Error extends Error {
   readonly code: string
 
   constructor(code: string, message: string) {

@@ -119,6 +119,7 @@ export interface RunManagerOptions {
   resolveSourceProjectDir?: (input: {
     projectDir: string
     canvasBranch: string
+    taskOwned: boolean
   }) => Promise<string | null>
   /** Test seam for deterministic artifact settlement without OS watcher limits. */
   watchArtifacts?: typeof watchArtifacts
@@ -292,7 +293,11 @@ export class RunManager {
       await validateReserved?.()
       this.#assertOpen()
       const sourceCandidate = this.#resolveSourceProjectDir
-        ? await this.#resolveSourceProjectDir({ projectDir, canvasBranch })
+        ? await this.#resolveSourceProjectDir({
+            projectDir,
+            canvasBranch,
+            taskOwned: isResolvedTaskRunRequestV2(request),
+          })
         : null
       const sourceProjectDir = sourceCandidate
         ? await validateSourceExecutionDir(scope, sourceCandidate)
@@ -1300,6 +1305,7 @@ export class RunManager {
     const candidate = await this.#resolveSourceProjectDir?.({
       projectDir: run.projectDir,
       canvasBranch: run.request.canvasBranch ?? 'main',
+      taskOwned: isResolvedTaskRunRequestV2(run.request),
     })
     if (!candidate) {
       throw new ProtocolError(

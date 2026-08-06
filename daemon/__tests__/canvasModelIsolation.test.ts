@@ -69,7 +69,7 @@ test('V2 mode rejects legacy canvas, path artifact, and snapshot Run APIs', asyn
     assert.equal(health.canvas.model, 'v2')
     assert.equal(health.canvas.schemaVersion, 2)
 
-    for (const route of ['/canvas', '/canvas/history', '/artifacts?path=artifacts/a.txt']) {
+    for (const route of ['/canvas', '/artifacts?path=artifacts/a.txt']) {
       const response = await fetch(`${baseUrl}${route}`)
       assert.equal(response.status, 409, route)
       assert.equal(
@@ -77,6 +77,10 @@ test('V2 mode rejects legacy canvas, path artifact, and snapshot Run APIs', asyn
         'canvas_model_mismatch',
       )
     }
+
+    const history = await fetch(`${baseUrl}/canvas/history?branch=main`)
+    assert.equal(history.status, 200)
+    assert.equal((await history.json() as { ok: boolean }).ok, true)
 
     const legacyRun = await fetch(`${baseUrl}/runs`, {
       method: 'POST',

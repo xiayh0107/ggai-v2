@@ -7,7 +7,6 @@ import type {
   CanvasCommandWireV2,
 } from './canvasCommandProtocolV2.js'
 import type { CanvasEnvelopeV2 } from './canvasCommandStoreV2.js'
-import type { CanvasCommandStoreV2Manager } from './canvasCommandStoreV2Manager.js'
 import type { ProjectionPlanV2, ProjectionSettlementV2 } from './projectionPlanV2.js'
 import type { ProjectionPlanLifecycleV2 } from './projectionPlanStoreV2.js'
 
@@ -32,8 +31,30 @@ export interface ProjectionPlanRegistryV2 {
   ): Promise<boolean>
 }
 
+/**
+ * Structural persistence boundary used by both the raw command store tests and
+ * the production WorkspaceVersionManagerV2 coordinator. Production must pass
+ * the latter so trusted settlement commands participate in checkpointing.
+ */
+export interface CanvasProjectionCommitterV2 {
+  get(projectDir: string, branch: string): Promise<CanvasEnvelopeV2>
+  commit(
+    projectDir: string,
+    branch: string,
+    baseRevision: number,
+    mutationId: string,
+    command: CanvasCommandV2,
+  ): Promise<CanvasEnvelopeV2>
+  commitLatest(
+    projectDir: string,
+    branch: string,
+    mutationId: string,
+    command: CanvasCommandV2,
+  ): Promise<CanvasEnvelopeV2>
+}
+
 export interface CommitProjectionPlanCommandV2Input {
-  canvases: CanvasCommandStoreV2Manager
+  canvases: CanvasProjectionCommitterV2
   plans: ProjectionPlanRegistryV2
   projectDir: string
   branch: string
@@ -107,7 +128,7 @@ export async function commitProjectionPlanCommandV2(
 
 /** Materializes a plan only after RunManager has durably appended its close. */
 export async function autoMaterializeProjectionPlanV2(input: {
-  canvases: CanvasCommandStoreV2Manager
+  canvases: CanvasProjectionCommitterV2
   projectDir: string
   branch: string
   plan: ProjectionPlanV2
