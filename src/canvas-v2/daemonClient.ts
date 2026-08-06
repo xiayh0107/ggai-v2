@@ -159,7 +159,10 @@ export class CanvasV2DaemonClient {
 
   constructor(options: CanvasV2DaemonClientOptions) {
     this.#baseUrl = normalizeBaseUrl(options.baseUrl)
-    const fetchImplementation = options.fetch ?? globalThis.fetch
+    const fetchImplementation = options.fetch
+      ?? (typeof globalThis.fetch === 'function'
+        ? globalThis.fetch.bind(globalThis)
+        : undefined)
     if (!fetchImplementation) throw new CanvasV2ClientError('Fetch is unavailable')
     this.#fetch = fetchImplementation
   }

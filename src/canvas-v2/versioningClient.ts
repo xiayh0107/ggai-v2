@@ -201,7 +201,10 @@ export class CanvasV2VersioningClient {
 
   constructor(options: CanvasV2VersioningClientOptions) {
     this.#baseUrl = normalizeBaseUrl(options.baseUrl)
-    const fetchImplementation = options.fetch ?? globalThis.fetch
+    const fetchImplementation = options.fetch
+      ?? (typeof globalThis.fetch === 'function'
+        ? globalThis.fetch.bind(globalThis)
+        : undefined)
     if (!fetchImplementation) throw new CanvasV2VersioningClientError('Fetch is unavailable')
     this.#fetch = fetchImplementation
   }

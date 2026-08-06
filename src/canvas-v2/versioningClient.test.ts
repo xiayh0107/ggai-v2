@@ -43,6 +43,21 @@ function client(fetch: typeof globalThis.fetch) {
 }
 
 describe('Canvas V2 versioning client', () => {
+  it('binds the default browser fetch to its global receiver', async () => {
+    const receiverFetch = vi.fn(function (this: unknown) {
+      if (this !== globalThis) throw new TypeError('Illegal invocation')
+      return Promise.resolve(response({ versioning: ready }))
+    })
+    vi.stubGlobal('fetch', receiverFetch)
+    try {
+      const versioning = new CanvasV2VersioningClient({ baseUrl: 'http://127.0.0.1:7380' })
+      await expect(versioning.status({ projectDir })).resolves.toEqual({ versioning: ready })
+      expect(receiverFetch).toHaveBeenCalledOnce()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('decodes the V2-only status envelope and rejects legacy source state', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       const url = new URL(String(input))

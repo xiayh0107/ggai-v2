@@ -86,6 +86,24 @@ describe('Canvas V2 daemon client', () => {
     })
   })
 
+  it('binds the default browser fetch to its global receiver', async () => {
+    const receiverFetch = vi.fn(function (this: unknown) {
+      if (this !== globalThis) throw new TypeError('Illegal invocation')
+      return Promise.resolve(json({
+        capabilities: { canvasModelV1: false, canvasModelV2: true },
+        canvas: { model: 'v2', schemaVersion: 2, resetRequired: false },
+      }))
+    })
+    vi.stubGlobal('fetch', receiverFetch)
+    try {
+      const client = new CanvasV2DaemonClient({ baseUrl: persistenceScope.daemonBaseUrl })
+      await expect(client.getCapabilities()).resolves.toMatchObject({ model: 'v2' })
+      expect(receiverFetch).toHaveBeenCalledOnce()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('rejects contradictory health model declarations instead of guessing', async () => {
     const client = new CanvasV2DaemonClient({
       baseUrl: persistenceScope.daemonBaseUrl,

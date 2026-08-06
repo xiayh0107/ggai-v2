@@ -4,6 +4,32 @@ import { loadArtifactProjectionV2 } from './artifactProjectionV2'
 const artifactId = `artifact_${'a'.repeat(64)}`
 
 describe('loadArtifactProjectionV2', () => {
+  it('binds the default browser fetch to its global receiver', async () => {
+    const receiverFetch = vi.fn(function (this: unknown) {
+      if (this !== globalThis) throw new TypeError('Illegal invocation')
+      return Promise.resolve(new Response(JSON.stringify({
+        schemaVersion: 2,
+        runId: 'run-1',
+        artifactId,
+        mediaType: 'image/png',
+        size: 42,
+        contentDigest: 'b'.repeat(64),
+      })))
+    })
+    vi.stubGlobal('fetch', receiverFetch)
+    try {
+      await expect(loadArtifactProjectionV2({
+        runId: 'run-1',
+        artifactId,
+        projectDir: '/project',
+        title: 'Preview',
+      })).resolves.toMatchObject({ artifactId, mediaType: 'image/png' })
+      expect(receiverFetch).toHaveBeenCalledOnce()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('returns a runtime-only trusted projection from exact daemon metadata', async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({
       schemaVersion: 2,

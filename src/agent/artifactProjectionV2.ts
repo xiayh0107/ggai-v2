@@ -14,7 +14,11 @@ export interface LoadArtifactProjectionV2Input {
 export async function loadArtifactProjectionV2(
   input: LoadArtifactProjectionV2Input,
 ): Promise<TrustedArtifactProjectionV2> {
-  const fetchImplementation = input.fetch ?? globalThis.fetch
+  const fetchImplementation = input.fetch
+    ?? (typeof globalThis.fetch === 'function'
+      ? globalThis.fetch.bind(globalThis)
+      : undefined)
+  if (!fetchImplementation) throw new Error('Fetch is unavailable')
   const response = await fetchImplementation(runArtifactMetadataUrl(
     input.runId,
     input.artifactId,
