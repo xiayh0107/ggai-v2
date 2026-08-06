@@ -36,6 +36,10 @@ export class CanvasCommandStoreV2Manager {
     return (await this.#resolve(projectDir, branch)).get()
   }
 
+  async hasSnapshot(projectDir: string, branch: string): Promise<boolean> {
+    return (await this.#resolve(projectDir, branch)).hasSnapshot()
+  }
+
   async commit(
     projectDir: string,
     branch: string,

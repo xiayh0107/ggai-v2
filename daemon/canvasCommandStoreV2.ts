@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises'
+import { lstat, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import {
   applyCanvasCommandV2,
@@ -77,6 +77,23 @@ export class CanvasCommandStoreV2 {
     return this.#runExclusive(async () => {
       await this.#ensureLoaded()
       return cloneEnvelope(this.#current())
+    })
+  }
+
+  /** Checks durable branch existence without constructing or persisting an empty envelope. */
+  async hasSnapshot(): Promise<boolean> {
+    return this.#runExclusive(async () => {
+      try {
+        const info = await lstat(this.filePath)
+        if (!info.isFile() || info.isSymbolicLink()) {
+          throw new TypeError('Canvas V2 snapshot path is not a regular file')
+        }
+        return true
+      } catch (error) {
+        if (isNodeError(error, 'ENOENT')) return false
+        if (error instanceof CanvasSnapshotV2Error) throw error
+        throw new CanvasSnapshotV2Error(this.filePath, error)
+      }
     })
   }
 

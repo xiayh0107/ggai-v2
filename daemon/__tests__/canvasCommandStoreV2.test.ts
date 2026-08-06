@@ -41,6 +41,7 @@ test('serializes concurrent commits with revision CAS', async () => {
   const filePath = await temporarySnapshot()
   const store = new CanvasCommandStoreV2('main', { filePath })
 
+  assert.equal(await store.hasSnapshot(), false)
   assert.deepEqual(await store.get(), {
     branch: 'main',
     revision: 0,
@@ -49,6 +50,7 @@ test('serializes concurrent commits with revision CAS', async () => {
     lastCheckpoint: null,
     document: emptyCanvasDocumentV2(),
   })
+  assert.equal(await store.hasSnapshot(), false)
 
   const results = await Promise.allSettled([
     store.commit(0, 'mutation-a', createTask('task-a')),
@@ -63,6 +65,7 @@ test('serializes concurrent commits with revision CAS', async () => {
   assert.ok(conflict instanceof CanvasRevisionConflictV2Error)
   assert.equal(conflict.currentRevision, 1)
   assert.equal((await store.get()).revision, 1)
+  assert.equal(await store.hasSnapshot(), true)
 })
 
 test('returns the committed envelope for an idempotent mutation retry', async () => {
