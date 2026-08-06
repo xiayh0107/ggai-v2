@@ -36,6 +36,7 @@ afterEach(() => {
   container = null
   vi.useRealTimers()
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 afterAll(() => {
@@ -213,10 +214,50 @@ function collectionFixture(): CanvasDocumentV2 {
   return document
 }
 
+function oversizedCollectionMacroFixture(): CanvasDocumentV2 {
+  const document = emptyCanvasDocumentV2()
+  document.everCreated = true
+  document.collections.push(
+    { id: 'collection-left', title: '左侧集合', anchor: { x: 20, y: 20 } },
+    { id: 'collection-right', title: '右侧集合', anchor: { x: 1_100, y: 20 } },
+  )
+  for (let index = 0; index < 23; index += 1) {
+    document.nodes.push({
+      id: `left-${index}`,
+      type: 'text',
+      frame: { x: 60 + index * 8, y: 100 + index * 8, w: 160, h: 90, z: index },
+      title: `左 ${index}`,
+      artifactRefs: [],
+      collectionId: 'collection-left',
+      origin: { kind: 'user' },
+    })
+  }
+  for (let index = 0; index < 22; index += 1) {
+    document.nodes.push({
+      id: `right-${index}`,
+      type: 'text',
+      frame: { x: 1_140 + index * 8, y: 100 + index * 8, w: 160, h: 90, z: 30 + index },
+      title: `右 ${index}`,
+      artifactRefs: [],
+      collectionId: 'collection-right',
+      origin: { kind: 'user' },
+    })
+  }
+  return document
+}
+
 async function createSubject(
   view?: Partial<CanvasV2ViewState>,
   canvasDocument = fixtureDocument(),
 ) {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    schemaVersion: 2,
+    runId: 'run-multi',
+    artifactId,
+    mediaType: 'image/png',
+    size: 42,
+    contentDigest: 'c'.repeat(64),
+  }), { headers: { 'Content-Type': 'application/json' } })))
   const persistence = new CanvasV2Persistence({
     adapter: new MemoryCanvasV2PersistenceAdapter(),
   })
@@ -286,6 +327,8 @@ async function createSubject(
         <CanvasV2Stage />
       </CanvasV2Provider>,
     )
+    await Promise.resolve()
+    await Promise.resolve()
   })
   return { store, host: container }
 }
@@ -675,6 +718,26 @@ describe('Canvas V2 interactive stage', () => {
       .find((entry) => entry.getAttribute('aria-label')?.includes('上下文摘要'))
     expect(summaryEdge?.getAttribute('tabindex')).toBe('0')
     expect(summaryEdge?.textContent).toContain('引用 · 摘要')
+  })
+
+  it('rejects an oversized collection macro instead of silently truncating its edges', async () => {
+    const { store, host } = await createSubject(undefined, oversizedCollectionMacroFixture())
+    const dispatch = vi.spyOn(store, 'dispatchCommand')
+    const sourcePort = required<HTMLButtonElement>(
+      host,
+      '[data-collection-id="collection-left"] [data-edge-port]',
+    )
+    const targetPort = required<HTMLButtonElement>(
+      host,
+      '[data-collection-id="collection-right"] [data-edge-port]',
+    )
+    await act(async () => sourcePort.click())
+    await act(async () => targetPort.click())
+    expect(dispatch).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(required<HTMLElement>(
+      host,
+      '[data-testid="canvas-v2-live-region"]',
+    ).textContent).toContain('超过 500 条边'))
   })
 
   it('projects destructive deletion immediately, supports undo, and guards active tasks', async () => {
