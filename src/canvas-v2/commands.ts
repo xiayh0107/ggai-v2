@@ -10,6 +10,7 @@ import {
   type CanvasEdgeRelationV2,
   type CanvasEdgeV2,
   type CanvasEntityRef,
+  type CanvasMaterializationReceiptV2,
   type CanvasNodeV2,
   type CanvasPointV2,
   type CanvasReceiptV2,
@@ -44,6 +45,8 @@ export interface TrustedTaskProposalV2 {
 
 export const MAX_ACCEPTED_TASK_PROPOSALS_V2 = 12
 export const MAX_CANVAS_EDGE_BATCH_V2 = 500
+export const MAX_TRUSTED_PROJECTION_OUTPUTS_V2 = 32
+export const MAX_TASK_PROPOSAL_INPUTS_V2 = 32
 export const MAX_TASK_PROPOSAL_KEY_LENGTH_V2 = 80
 export const MAX_TASK_PROPOSAL_EDIT_TITLE_LENGTH_V2 = 240
 export const MAX_TASK_PROPOSAL_EDIT_PROMPT_LENGTH_V2 = 10_000
@@ -963,10 +966,7 @@ function materializeProjectionPlan(
 ): void {
   const { plan } = command
   const task = requireTask(document, plan.taskId)
-  const outputKeys = plan.outputs.map((output) => output.key)
-  if (new Set(outputKeys).size !== outputKeys.length) {
-    throw new CanvasCommandError('invalid-plan', 'Projection plan output keys must be unique')
-  }
+  projectionOutputsByKeyV2(plan)
   const materializedOutputs = plan.outputs
     .map((output, index) => ({ output, index }))
     .filter(({ output }) => output.materialize)
@@ -1034,7 +1034,7 @@ function materializeProjectionPlan(
       { kind: 'task', id: task.id },
       { kind: 'node', id: outputNodeId },
       'produced',
-      output.role === 'primary' ? 'full' : output.role === 'supporting' ? 'summary' : 'none',
+      projectionOutputContextRoleV2(output.role),
       plan.runId,
       plan.planId,
     ))
@@ -1105,9 +1105,23 @@ function acceptTaskProposals(
   })
   validateSelectedProposalGraphV2(proposals, selectedKeys)
   const materialization = findReceipt(document, 'materialization', plan.planId)
-  if (materialization?.dismissedProposalKeys.some((key) => command.proposalKeys.includes(key))) {
+  if (!materialization) {
+    throw new CanvasCommandError(
+      'materialization-receipt-missing',
+      `Plan ${plan.planId} must be materialized before its proposals can be accepted`,
+    )
+  }
+  if (materialization.dismissedProposalKeys.some((key) => command.proposalKeys.includes(key))) {
     throw new CanvasCommandError('proposal-dismissed', 'A dismissed proposal cannot be accepted')
   }
+
+  const outcomeNodeIdByKey = materializeProposalInputOutputsV2(
+    document,
+    parent,
+    plan,
+    materialization,
+    proposals,
+  )
 
   const newTasks = proposals.map((proposal, index): CanvasTaskV2 => {
     const taskId = deterministicCanvasIdV2('task', plan.planId, proposal.key)
@@ -1130,15 +1144,12 @@ function acceptTaskProposals(
     proposal.key,
     newTasks[index]!.id,
   ]))
-  const outcomeNodeIdByKey = new Map(
-    materialization?.outcomes.map((outcome) => [outcome.outputKey, outcome.nodeId]) ?? [],
-  )
   const newEdges: CanvasEdgeV2[] = []
   for (const proposal of proposals) {
     const proposalTaskId = requireMappedId(taskIdByProposal, proposal.key)
     for (const outputKey of proposal.inputOutputKeys) {
-      const nodeId = outcomeNodeIdByKey.get(outputKey)
-      if (!nodeId || !document.nodes.some((node) => node.id === nodeId)) continue
+      const nodeId = requireMappedId(outcomeNodeIdByKey, outputKey)
+      requireNode(document, nodeId)
       newEdges.push(agentEdge(
         deterministicCanvasIdV2('edge', plan.planId, 'proposal-source', outputKey, proposal.key),
         { kind: 'node', id: nodeId },
@@ -1195,6 +1206,196 @@ function acceptTaskProposals(
     })
   }
   document.everCreated = true
+}
+
+function materializeProposalInputOutputsV2(
+  document: CanvasDocumentV2,
+  parent: CanvasTaskV2,
+  plan: TrustedProjectionPlanInputV2,
+  materialization: CanvasMaterializationReceiptV2,
+  proposals: readonly TrustedTaskProposalV2[],
+): Map<string, string> {
+  const outputsByKey = projectionOutputsByKeyV2(plan)
+  const directInputKeys = new Set<string>()
+  for (const proposal of proposals) {
+    if (proposal.inputOutputKeys.length > MAX_TASK_PROPOSAL_INPUTS_V2
+      || new Set(proposal.inputOutputKeys).size !== proposal.inputOutputKeys.length) {
+      throw new CanvasCommandError(
+        'invalid-proposal-inputs',
+        `Proposal ${proposal.key} input outputs must be bounded and unique`,
+      )
+    }
+    for (const outputKey of proposal.inputOutputKeys) {
+      if (!outputsByKey.has(outputKey)) {
+        throw new CanvasCommandError(
+          'proposal-input-output-not-found',
+          `Proposal ${proposal.key} references missing output ${outputKey}`,
+        )
+      }
+      directInputKeys.add(outputKey)
+    }
+  }
+
+  const requiredOutputKeys = new Set(directInputKeys)
+  const pendingLineageKeys = [...directInputKeys]
+  while (pendingLineageKeys.length > 0) {
+    const outputKey = pendingLineageKeys.pop()!
+    const output = outputsByKey.get(outputKey)!
+    for (const parentKey of output.derivedFrom) {
+      if (!outputsByKey.has(parentKey)) {
+        throw new CanvasCommandError(
+          'proposal-input-lineage-output-not-found',
+          `Proposal input ${output.key} derives from missing output ${parentKey}`,
+        )
+      }
+      if (requiredOutputKeys.has(parentKey)) continue
+      requiredOutputKeys.add(parentKey)
+      pendingLineageKeys.push(parentKey)
+    }
+  }
+
+  const outcomeNodeIdByKey = new Map<string, string>()
+  for (const outcome of materialization.outcomes) {
+    const output = outputsByKey.get(outcome.outputKey)
+    if (!output) {
+      throw new CanvasCommandError(
+        'plan-receipt-conflict',
+        `Materialization receipt references unknown output ${outcome.outputKey}`,
+      )
+    }
+    outcomeNodeIdByKey.set(outcome.outputKey, outcome.nodeId)
+    if (requiredOutputKeys.has(outcome.outputKey)) {
+      requireExistingProposalInputNodeV2(document, plan, output, outcome.nodeId)
+    }
+  }
+
+  const missingOutputs = plan.outputs.filter((output) =>
+    requiredOutputKeys.has(output.key) && !outcomeNodeIdByKey.has(output.key))
+  if (missingOutputs.length === 0) return outcomeNodeIdByKey
+
+  const newNodeIdByKey = new Map<string, string>()
+  for (const output of missingOutputs) {
+    const nodeId = deterministicCanvasIdV2('node', plan.planId, output.key)
+    ensureEntityIdAvailable(document, nodeId)
+    newNodeIdByKey.set(output.key, nodeId)
+    outcomeNodeIdByKey.set(output.key, nodeId)
+  }
+
+  const maxZ = maxNodeZ(document)
+  const firstLayoutIndex = materialization.outcomes.length
+  const newNodes = missingOutputs.map((output, index): CanvasNodeV2 => ({
+    id: requireMappedId(newNodeIdByKey, output.key),
+    type: output.pluginId,
+    frame: projectionFrame(parent.anchor, firstLayoutIndex + index, maxZ),
+    title: output.title,
+    artifactRefs: structuredClone(output.artifactRefs),
+    homeTaskId: parent.id,
+    origin: {
+      kind: 'agent-output',
+      taskId: parent.id,
+      runId: plan.runId,
+      planId: plan.planId,
+      outputKey: output.key,
+    },
+  }))
+
+  const newEdges: CanvasEdgeV2[] = []
+  for (const output of missingOutputs) {
+    const nodeId = requireMappedId(newNodeIdByKey, output.key)
+    newEdges.push(agentEdge(
+      deterministicCanvasIdV2('edge', plan.planId, 'produced', output.key),
+      { kind: 'task', id: parent.id },
+      { kind: 'node', id: nodeId },
+      'produced',
+      projectionOutputContextRoleV2(output.role),
+      plan.runId,
+      plan.planId,
+    ))
+  }
+
+  const missingKeys = new Set(missingOutputs.map((output) => output.key))
+  for (const output of plan.outputs) {
+    const outputNodeId = outcomeNodeIdByKey.get(output.key)
+    if (!outputNodeId) continue
+    for (const parentKey of output.derivedFrom) {
+      const parentNodeId = outcomeNodeIdByKey.get(parentKey)
+      if (!parentNodeId || (!missingKeys.has(output.key) && !missingKeys.has(parentKey))) continue
+      const edge = agentEdge(
+        deterministicCanvasIdV2('edge', plan.planId, 'derived', parentKey, output.key),
+        { kind: 'node', id: parentNodeId },
+        { kind: 'node', id: outputNodeId },
+        'derived',
+        'full',
+        plan.runId,
+        plan.planId,
+      )
+      const existing = document.edges.find((candidate) => candidate.id === edge.id)
+      if (existing) {
+        if (!sameCanvasEdgeV2(existing, edge)) {
+          throw new CanvasCommandError('edge-id-conflict', `Edge id ${edge.id} is already in use`)
+        }
+        continue
+      }
+      newEdges.push(edge)
+    }
+  }
+
+  for (const edge of newEdges) ensureEdgeIdAvailable(document, edge.id)
+  materialization.outcomes.push(...missingOutputs.map((output) => ({
+    outputKey: output.key,
+    nodeId: requireMappedId(newNodeIdByKey, output.key),
+  })))
+  document.nodes.push(...newNodes)
+  document.edges.push(...newEdges)
+  return outcomeNodeIdByKey
+}
+
+function projectionOutputsByKeyV2(
+  plan: TrustedProjectionPlanInputV2,
+): Map<string, TrustedProjectionOutputV2> {
+  if (plan.outputs.length > MAX_TRUSTED_PROJECTION_OUTPUTS_V2) {
+    throw new CanvasCommandError(
+      'invalid-plan',
+      `Projection plan may contain at most ${MAX_TRUSTED_PROJECTION_OUTPUTS_V2} outputs`,
+    )
+  }
+  const outputKeys = plan.outputs.map((output) => output.key)
+  if (new Set(outputKeys).size !== outputKeys.length) {
+    throw new CanvasCommandError('invalid-plan', 'Projection plan output keys must be unique')
+  }
+  return new Map(plan.outputs.map((output) => [output.key, output]))
+}
+
+function requireExistingProposalInputNodeV2(
+  document: CanvasDocumentV2,
+  plan: TrustedProjectionPlanInputV2,
+  output: TrustedProjectionOutputV2,
+  nodeId: string,
+): CanvasNodeV2 {
+  const node = document.nodes.find((candidate) => candidate.id === nodeId)
+  if (!node) {
+    throw new CanvasCommandError(
+      'proposal-input-node-missing',
+      `Materialized proposal input ${output.key} is no longer on the canvas`,
+    )
+  }
+  if (node.type !== output.pluginId
+    || node.origin.kind !== 'agent-output'
+    || node.origin.taskId !== plan.taskId
+    || node.origin.runId !== plan.runId
+    || node.origin.planId !== plan.planId
+    || node.origin.outputKey !== output.key
+    || JSON.stringify(node.artifactRefs) !== JSON.stringify(output.artifactRefs)) {
+    throw new CanvasCommandError(
+      'proposal-input-node-conflict',
+      `Materialized proposal input ${output.key} does not match its trusted output`,
+    )
+  }
+  return node
+}
+
+function sameCanvasEdgeV2(left: CanvasEdgeV2, right: CanvasEdgeV2): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
 }
 
 function parseTaskProposalEditsV2(
@@ -1641,6 +1842,14 @@ function outputRoleRank(role: TrustedProjectionOutputRoleV2): number {
   if (role === 'primary') return 0
   if (role === 'supporting') return 1
   return 2
+}
+
+function projectionOutputContextRoleV2(
+  role: TrustedProjectionOutputRoleV2,
+): CanvasEdgeContextRoleV2 {
+  if (role === 'primary') return 'full'
+  if (role === 'supporting') return 'summary'
+  return 'none'
 }
 
 function fnv1a(value: string, seed: number): number {

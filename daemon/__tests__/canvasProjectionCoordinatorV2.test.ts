@@ -237,6 +237,119 @@ test('resolves proposal edits from an opaque plan and repairs lifecycle on repla
   assert.equal(plans.dismissCount, 1)
 })
 
+test('accepting an opaque proposal atomically materializes its auxiliary input', async () => {
+  const { canvases } = await fixture()
+  const trustedPlan = plan()
+  trustedPlan.outputs[2]!.derivedFrom = ['preview']
+  trustedPlan.taskProposals = [{
+    key: 'inspect-notes',
+    title: 'Inspect notes',
+    prompt: 'Inspect the auxiliary notes',
+    inputOutputKeys: ['notes'],
+    dependsOn: [],
+  }]
+  const plans = registry(trustedPlan)
+  const materialized = await autoMaterializeProjectionPlanV2({
+    canvases,
+    projectDir: '.',
+    branch: 'main',
+    plan: plans.record.plan,
+  })
+  assert.equal(materialized.revision, 2)
+  assert.equal(materialized.document.nodes.length, 2)
+
+  const accepted = await commitProjectionPlanCommandV2({
+    canvases,
+    plans,
+    projectDir: '.',
+    branch: 'main',
+    baseRevision: 2,
+    mutationId: 'accept-auxiliary-input',
+    command: {
+      type: 'AcceptTaskProposals',
+      planId: PLAN_ID,
+      proposalKeys: ['inspect-notes'],
+    },
+  })
+
+  assert.equal(accepted.revision, 3)
+  const input = accepted.document.nodes.find((node) =>
+    node.origin.kind === 'agent-output' && node.origin.outputKey === 'notes')
+  assert.ok(input)
+  const proposal = accepted.document.tasks.find((task) =>
+    task.origin.kind === 'agent-proposal' && task.origin.proposalKey === 'inspect-notes')
+  assert.ok(proposal)
+  assert.deepEqual(accepted.document.edges.find((edge) =>
+    edge.relation === 'produced' && edge.to.id === input.id), {
+    id: accepted.document.edges.find((edge) =>
+      edge.relation === 'produced' && edge.to.id === input.id)?.id,
+    from: { kind: 'task', id: 'task-1' },
+    to: { kind: 'node', id: input.id },
+    relation: 'produced',
+    contextRole: 'none',
+    origin: { kind: 'agent', runId: 'run-1', planId: PLAN_ID },
+  })
+  assert.deepEqual(accepted.document.edges.find((edge) =>
+    edge.relation === 'derived' && edge.to.id === input.id)?.from, {
+    kind: 'node',
+    id: materialized.document.nodes[1]?.id,
+  })
+  assert.deepEqual(accepted.document.edges.find((edge) =>
+    edge.relation === 'source' && edge.to.id === proposal.id)?.from, {
+    kind: 'node',
+    id: input.id,
+  })
+  const receipt = accepted.document.receipts.find((entry) => entry.kind === 'materialization')
+  assert.deepEqual(receipt?.outcomes.map((outcome) => outcome.outputKey), [
+    'source',
+    'preview',
+    'notes',
+  ])
+  assert.equal(plans.record.state, 'dismissed')
+})
+
+test('keeps canvas and plan pending when a proposal input lineage is unresolved', async () => {
+  const { canvases } = await fixture()
+  const trustedPlan = plan()
+  trustedPlan.outputs[2]!.derivedFrom = ['missing-parent']
+  trustedPlan.taskProposals = [{
+    key: 'inspect-notes',
+    title: 'Inspect notes',
+    prompt: 'Inspect the auxiliary notes',
+    inputOutputKeys: ['notes'],
+    dependsOn: [],
+  }]
+  const plans = registry(trustedPlan)
+  await autoMaterializeProjectionPlanV2({
+    canvases,
+    projectDir: '.',
+    branch: 'main',
+    plan: plans.record.plan,
+  })
+
+  await assert.rejects(commitProjectionPlanCommandV2({
+    canvases,
+    plans,
+    projectDir: '.',
+    branch: 'main',
+    baseRevision: 2,
+    mutationId: 'reject-unresolved-input-lineage',
+    command: {
+      type: 'AcceptTaskProposals',
+      planId: PLAN_ID,
+      proposalKeys: ['inspect-notes'],
+    },
+  }), /derives from missing output/u)
+
+  const current = await canvases.get('.', 'main')
+  assert.equal(current.revision, 2)
+  assert.equal(current.document.nodes.length, 2)
+  assert.equal(current.document.tasks.length, 1)
+  assert.deepEqual(current.document.receipts.map((receipt) => receipt.kind), ['materialization'])
+  assert.equal(plans.record.state, 'pending')
+  assert.equal(plans.dismissCount, 0)
+})
+
 test('delegates reordered content and dependency edits to the atomic canvas reducer', async () => {
   const { canvases } = await fixture()
   const plans = registry()

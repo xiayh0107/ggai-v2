@@ -487,6 +487,246 @@ describe('Canvas V2 commands', () => {
     })).toBe(dismissed)
   })
 
+  it('materializes an auxiliary proposal input with trusted relations and extends the receipt', () => {
+    const trustedPlan = plan()
+    trustedPlan.outputs[2]!.derivedFrom = ['preview']
+    trustedPlan.taskProposals = [{
+      key: 'inspect-notes',
+      title: 'Inspect notes',
+      prompt: 'Inspect the supporting notes alongside the preview',
+      inputOutputKeys: ['notes', 'preview'],
+      dependsOn: [],
+    }]
+    const materialized = applyCanvasCommandV2(documentWithTask(), {
+      type: 'MaterializeProjectionPlan',
+      plan: trustedPlan,
+    })
+    expect(materialized.nodes).toHaveLength(2)
+
+    const accepted = applyCanvasCommandV2(materialized, {
+      type: 'AcceptTaskProposals',
+      plan: trustedPlan,
+      proposalKeys: ['inspect-notes'],
+    })
+    const notesNodeId = deterministicCanvasIdV2('node', PLAN_ID, 'notes')
+    const previewNodeId = deterministicCanvasIdV2('node', PLAN_ID, 'preview')
+    const proposalTaskId = deterministicCanvasIdV2('task', PLAN_ID, 'inspect-notes')
+
+    expect(accepted.nodes).toHaveLength(3)
+    expect(accepted.nodes.find((entry) => entry.id === notesNodeId)).toMatchObject({
+      type: 'file',
+      title: 'Notes',
+      homeTaskId: 'task-1',
+      origin: {
+        kind: 'agent-output',
+        taskId: 'task-1',
+        runId: 'run-1',
+        planId: PLAN_ID,
+        outputKey: 'notes',
+      },
+    })
+    expect(accepted.edges.find((edge) =>
+      edge.relation === 'produced' && edge.to.id === notesNodeId)).toMatchObject({
+      from: { kind: 'task', id: 'task-1' },
+      contextRole: 'none',
+    })
+    expect(accepted.edges.find((edge) =>
+      edge.relation === 'derived' && edge.to.id === notesNodeId)).toMatchObject({
+      from: { kind: 'node', id: previewNodeId },
+      contextRole: 'full',
+    })
+    expect(accepted.edges.filter((edge) =>
+      edge.relation === 'source' && edge.to.id === proposalTaskId).map((edge) => edge.from.id))
+      .toEqual([notesNodeId, previewNodeId])
+    expect(accepted.receipts.find((receipt) => receipt.kind === 'materialization'))
+      .toMatchObject({
+        outcomes: [
+          { outputKey: 'source' },
+          { outputKey: 'preview' },
+          { outputKey: 'notes', nodeId: notesNodeId },
+        ],
+      })
+    expect(Object.keys(accepted.tasks.find((entry) => entry.id === proposalTaskId)!).sort())
+      .toEqual(['anchor', 'goal', 'id', 'origin', 'title'])
+  })
+
+  it('recursively materializes trusted lineage for a proposal input', () => {
+    const trustedPlan = plan()
+    for (const output of trustedPlan.outputs) output.materialize = false
+    trustedPlan.outputs[2]!.derivedFrom = ['preview']
+    trustedPlan.taskProposals = [{
+      key: 'inspect-notes',
+      title: 'Inspect notes',
+      prompt: 'Inspect notes with their full lineage',
+      inputOutputKeys: ['notes'],
+      dependsOn: [],
+    }]
+    const materialized = applyCanvasCommandV2(documentWithTask(), {
+      type: 'MaterializeProjectionPlan',
+      plan: trustedPlan,
+    })
+    expect(materialized.nodes).toEqual([])
+
+    const accepted = applyCanvasCommandV2(materialized, {
+      type: 'AcceptTaskProposals',
+      plan: trustedPlan,
+      proposalKeys: ['inspect-notes'],
+    })
+    const nodeIdByOutputKey = new Map(accepted.nodes.map((entry) => [
+      entry.origin.kind === 'agent-output' ? entry.origin.outputKey : '',
+      entry.id,
+    ]))
+    const proposalTaskId = deterministicCanvasIdV2('task', PLAN_ID, 'inspect-notes')
+
+    expect([...nodeIdByOutputKey.keys()]).toEqual(['source', 'preview', 'notes'])
+    expect(accepted.edges.filter((edge) => edge.relation === 'produced').map((edge) => {
+      const outputNode = accepted.nodes.find((node) => node.id === edge.to.id)
+      return [
+        outputNode?.origin.kind === 'agent-output' ? outputNode.origin.outputKey : null,
+        edge.contextRole,
+      ]
+    })).toEqual([
+      ['source', 'full'],
+      ['preview', 'summary'],
+      ['notes', 'none'],
+    ])
+    expect(accepted.edges.filter((edge) => edge.relation === 'derived').map((edge) => [
+      edge.from.id,
+      edge.to.id,
+    ])).toEqual([
+      [nodeIdByOutputKey.get('source'), nodeIdByOutputKey.get('preview')],
+      [nodeIdByOutputKey.get('preview'), nodeIdByOutputKey.get('notes')],
+    ])
+    expect(accepted.edges.filter((edge) => edge.relation === 'source')).toEqual([
+      expect.objectContaining({
+        from: { kind: 'node', id: nodeIdByOutputKey.get('notes') },
+        to: { kind: 'task', id: proposalTaskId },
+      }),
+    ])
+    expect(accepted.receipts.find((receipt) => receipt.kind === 'materialization'))
+      .toMatchObject({
+        outcomes: [
+          { outputKey: 'source' },
+          { outputKey: 'preview' },
+          { outputKey: 'notes' },
+        ],
+      })
+  })
+
+  it('materializes a confirmed proposal input beyond the twelve automatic output slots', () => {
+    const trustedPlan = plan()
+    trustedPlan.outputs = Array.from({ length: 13 }, (_, index) => ({
+      key: `output-${index + 1}`,
+      pluginId: 'file',
+      role: 'supporting' as const,
+      title: `Output ${index + 1}`,
+      artifactRefs: [{
+        runId: 'run-1',
+        artifactId: `artifact_${(index + 1).toString(16).padStart(64, '0')}`,
+      }],
+      derivedFrom: [],
+      materialize: index < 12,
+    }))
+    trustedPlan.taskProposals = [{
+      key: 'use-tray-output',
+      title: 'Use tray output',
+      prompt: 'Use the thirteenth output',
+      inputOutputKeys: ['output-13'],
+      dependsOn: [],
+    }]
+    const materialized = applyCanvasCommandV2(documentWithTask(), {
+      type: 'MaterializeProjectionPlan',
+      plan: trustedPlan,
+    })
+    expect(materialized.nodes).toHaveLength(12)
+
+    const accepted = applyCanvasCommandV2(materialized, {
+      type: 'AcceptTaskProposals',
+      plan: trustedPlan,
+      proposalKeys: ['use-tray-output'],
+    })
+    const inputNodeId = deterministicCanvasIdV2('node', PLAN_ID, 'output-13')
+    const proposalTaskId = deterministicCanvasIdV2('task', PLAN_ID, 'use-tray-output')
+    expect(accepted.nodes).toHaveLength(13)
+    expect(accepted.nodes.find((node) => node.id === inputNodeId)?.origin).toMatchObject({
+      kind: 'agent-output',
+      outputKey: 'output-13',
+    })
+    expect(accepted.edges.find((edge) =>
+      edge.relation === 'produced' && edge.to.id === inputNodeId)?.contextRole).toBe('summary')
+    expect(accepted.edges.find((edge) =>
+      edge.relation === 'source' && edge.to.id === proposalTaskId)?.from)
+      .toEqual({ kind: 'node', id: inputNodeId })
+    expect(accepted.receipts.find((receipt) => receipt.kind === 'materialization'))
+      .toMatchObject({ outcomes: expect.arrayContaining([{ outputKey: 'output-13', nodeId: inputNodeId }]) })
+  })
+
+  it('rejects unresolved or unbounded proposal inputs without changing the canvas', () => {
+    const missingOutputPlan = plan()
+    missingOutputPlan.taskProposals = [{
+      key: 'missing-input',
+      title: 'Missing input',
+      prompt: 'Use an output that is not in the plan',
+      inputOutputKeys: ['missing-output'],
+      dependsOn: [],
+    }]
+    const materialized = applyCanvasCommandV2(documentWithTask(), {
+      type: 'MaterializeProjectionPlan',
+      plan: missingOutputPlan,
+    })
+    const materializedSnapshot = structuredClone(materialized)
+    expectCanvasCommandError(() => applyCanvasCommandV2(materialized, {
+      type: 'AcceptTaskProposals',
+      plan: missingOutputPlan,
+      proposalKeys: ['missing-input'],
+    }), 'proposal-input-output-not-found')
+    expect(materialized).toEqual(materializedSnapshot)
+
+    const missingLineagePlan = plan()
+    missingLineagePlan.outputs[2]!.derivedFrom = ['missing-parent']
+    missingLineagePlan.taskProposals = [{
+      key: 'missing-lineage',
+      title: 'Missing lineage',
+      prompt: 'Use an output with unresolved lineage',
+      inputOutputKeys: ['notes'],
+      dependsOn: [],
+    }]
+    const lineageMaterialized = applyCanvasCommandV2(documentWithTask(), {
+      type: 'MaterializeProjectionPlan',
+      plan: missingLineagePlan,
+    })
+    const lineageSnapshot = structuredClone(lineageMaterialized)
+    expectCanvasCommandError(() => applyCanvasCommandV2(lineageMaterialized, {
+      type: 'AcceptTaskProposals',
+      plan: missingLineagePlan,
+      proposalKeys: ['missing-lineage'],
+    }), 'proposal-input-lineage-output-not-found')
+    expect(lineageMaterialized).toEqual(lineageSnapshot)
+
+    const deletedInput = applyCanvasCommandV2(materialized, {
+      type: 'DeleteNode',
+      nodeId: deterministicCanvasIdV2('node', PLAN_ID, 'source'),
+    })
+    const deletedSnapshot = structuredClone(deletedInput)
+    expectCanvasCommandError(() => applyCanvasCommandV2(deletedInput, {
+      type: 'AcceptTaskProposals',
+      plan: plan(),
+      proposalKeys: ['explain'],
+    }), 'proposal-input-node-missing')
+    expect(deletedInput).toEqual(deletedSnapshot)
+
+    const unboundedPlan = plan()
+    unboundedPlan.taskProposals[0]!.inputOutputKeys = Array.from(
+      { length: 33 },
+      (_, index) => `input-${index}`,
+    )
+    expectCanvasCommandError(() => applyCanvasCommandV2(materialized, {
+      type: 'AcceptTaskProposals',
+      plan: unboundedPlan,
+      proposalKeys: ['explain'],
+    }), 'invalid-proposal-inputs')
+  })
+
   it('uses edited proposal order, content, and dependencies without starting a run', () => {
     const trustedPlan = plan()
     const materialized = applyCanvasCommandV2(documentWithTask(), {
@@ -1007,3 +1247,14 @@ describe('Canvas V2 commands', () => {
     expect(initial).toEqual(snapshot)
   })
 })
+
+function expectCanvasCommandError(run: () => unknown, code: string): void {
+  let thrown: unknown
+  try {
+    run()
+  } catch (error) {
+    thrown = error
+  }
+  expect(thrown).toBeInstanceOf(CanvasCommandError)
+  expect(thrown).toMatchObject({ code })
+}

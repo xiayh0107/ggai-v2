@@ -112,16 +112,14 @@ function canvasDocument(settledProposalKey?: string): CanvasDocumentV2 {
   const document = emptyCanvasDocumentV2()
   document.everCreated = true
   document.tasks.push(task)
-  if (settledProposalKey) {
-    document.receipts.push({
-      kind: 'materialization',
-      planId,
-      runId: plan.runId,
-      taskId: task.id,
-      outcomes: [],
-      dismissedProposalKeys: [settledProposalKey],
-    })
-  }
+  document.receipts.push({
+    kind: 'materialization',
+    planId,
+    runId: plan.runId,
+    taskId: task.id,
+    outcomes: [],
+    dismissedProposalKeys: settledProposalKey ? [settledProposalKey] : [],
+  })
   return document
 }
 
@@ -429,7 +427,9 @@ describe('Canvas V2 Task proposal review integration', () => {
       .not.toBeNull()
     expect(capturedLifecycle?.getSnapshot().projectionReviews).toHaveLength(1)
     expect(required<HTMLElement>('[role="alert"]').textContent).toContain('daemon unavailable')
-    expect(store.getSnapshot().envelope?.document.receipts).toEqual([])
+    expect(store.getSnapshot().envelope?.document.receipts).toEqual([
+      expect.objectContaining({ kind: 'materialization', planId }),
+    ])
     expect(controller.runTaskMock).not.toHaveBeenCalled()
   })
 
@@ -449,7 +449,9 @@ describe('Canvas V2 Task proposal review integration', () => {
     expect(capturedLifecycle?.getSnapshot().projectionReviews).toHaveLength(1)
     expect(required<HTMLElement>('[role="alert"]').textContent)
       .toContain('Canvas revision changed')
-    expect(store.getSnapshot().envelope?.document.receipts).toEqual([])
+    expect(store.getSnapshot().envelope?.document.receipts).toEqual([
+      expect.objectContaining({ kind: 'materialization', planId }),
+    ])
     expect(controller.runTaskMock).not.toHaveBeenCalled()
   })
 
