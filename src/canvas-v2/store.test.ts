@@ -235,6 +235,102 @@ describe('Canvas V2 store', () => {
     expect(client.flushOutbox).not.toHaveBeenCalled()
   })
 
+  it('flushes pending view state before reload and keeps the live camera and selection', async () => {
+    const adapter = new MemoryCanvasV2PersistenceAdapter()
+    const subjectPersistence = persistence(adapter)
+    const storedView: CanvasV2ViewState = {
+      camera: { x: 8, y: 12, zoom: 0.75 },
+      selection: [],
+      collapsedTaskIds: [],
+      collapsedCollectionIds: [],
+      composerDrafts: {},
+    }
+    await subjectPersistence.writeViewState(persistenceScope, storedView)
+    const writeView = vi.spyOn(adapter, 'writeView')
+    const materialized = documentWithTask('Materialized goal')
+    materialized.nodes.push({
+      id: 'node-1',
+      type: 'text',
+      frame: { x: 420, y: 120, w: 320, h: 180, z: 1 },
+      title: 'Materialized output',
+      artifactRefs: [],
+      homeTaskId: 'task-1',
+      origin: { kind: 'user' },
+    })
+    let reads = 0
+    const client: CanvasV2StoreClient = {
+      getCanvas: async () => envelope(reads++ === 0 ? documentWithTask() : materialized, reads),
+      flushOutbox: vi.fn(),
+    }
+    const store = new CanvasV2Store({
+      daemonBaseUrl: persistenceScope.daemonBaseUrl,
+      scope,
+      persistence: subjectPersistence,
+      client,
+    })
+    await store.load()
+
+    const liveView: CanvasV2ViewState = {
+      camera: { x: -320, y: 185, zoom: 1.65 },
+      selection: [{ kind: 'task', id: 'task-1' }],
+      collapsedTaskIds: [],
+      collapsedCollectionIds: [],
+      composerDrafts: { 'task:task-1': 'Keep this draft' },
+    }
+    store.setCamera(liveView.camera)
+    store.setSelection(liveView.selection)
+    store.setComposerDraft('task:task-1', 'Keep this draft')
+
+    await store.reload()
+
+    expect(writeView).toHaveBeenCalledOnce()
+    expect(store.getSnapshot()).toMatchObject({
+      hydration: { status: 'ready' },
+      document: { nodes: [{ id: 'node-1' }] },
+      view: liveView,
+      viewSync: { status: 'saved', error: null },
+    })
+    expect(await subjectPersistence.readViewState(persistenceScope)).toEqual(liveView)
+  })
+
+  it('never replaces the live view with an older stored view when reload persistence fails', async () => {
+    const adapter = new MemoryCanvasV2PersistenceAdapter()
+    const subjectPersistence = persistence(adapter)
+    const storedView: CanvasV2ViewState = {
+      camera: { x: 10, y: 20, zoom: 0.8 },
+      selection: [],
+      collapsedTaskIds: [],
+      collapsedCollectionIds: [],
+      composerDrafts: {},
+    }
+    await subjectPersistence.writeViewState(persistenceScope, storedView)
+    const store = new CanvasV2Store({
+      daemonBaseUrl: persistenceScope.daemonBaseUrl,
+      scope,
+      persistence: subjectPersistence,
+      client: {
+        getCanvas: async () => envelope(documentWithTask(), 2),
+        flushOutbox: vi.fn(),
+      },
+    })
+    await store.load()
+    vi.spyOn(adapter, 'writeView').mockRejectedValue(new Error('IndexedDB unavailable'))
+
+    store.setCamera({ x: -90, y: 240, zoom: 1.25 })
+    store.setSelection([{ kind: 'task', id: 'task-1' }])
+    await store.reload()
+
+    expect(store.getSnapshot()).toMatchObject({
+      hydration: { status: 'ready' },
+      view: {
+        camera: { x: -90, y: 240, zoom: 1.25 },
+        selection: [{ kind: 'task', id: 'task-1' }],
+      },
+      viewSync: { status: 'error', error: 'IndexedDB unavailable' },
+    })
+    expect(await subjectPersistence.readViewState(persistenceScope)).toEqual(storedView)
+  })
+
   it('derives task status and ghost layout from transient runtime without persisting it', async () => {
     const adapter = new MemoryCanvasV2PersistenceAdapter()
     const writeView = vi.spyOn(adapter, 'writeView')

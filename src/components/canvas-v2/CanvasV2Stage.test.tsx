@@ -249,6 +249,7 @@ function oversizedCollectionMacroFixture(): CanvasDocumentV2 {
 async function createSubject(
   view?: Partial<CanvasV2ViewState>,
   canvasDocument = fixtureDocument(),
+  reloadDocument?: CanvasDocumentV2,
 ) {
   vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
     schemaVersion: 2,
@@ -273,18 +274,25 @@ async function createSubject(
   }
   let serverDocument = structuredClone(canvasDocument)
   let serverRevision = 0
+  let canvasReads = 0
   const store = new CanvasV2Store({
     daemonBaseUrl,
     scope,
     persistence,
     client: {
-      getCanvas: async () => ({
-        branch: 'main',
-        revision: 0,
-        updatedAt: '2026-08-05T00:00:00.000Z',
-        lastMutationId: null,
-        document: canvasDocument,
-      }),
+      getCanvas: async () => {
+        const document = canvasReads++ === 0
+          ? canvasDocument
+          : reloadDocument ?? canvasDocument
+        serverDocument = structuredClone(document)
+        return {
+          branch: 'main',
+          revision: serverRevision,
+          updatedAt: '2026-08-05T00:00:00.000Z',
+          lastMutationId: null,
+          document,
+        }
+      },
       flushOutbox: async (_scope, outbox) => {
         const entries = await outbox.list({ daemonBaseUrl, ...scope })
         for (const entry of entries) {
@@ -445,6 +453,50 @@ describe('Canvas V2 interactive stage', () => {
       })
     })
     expect(document.activeElement).toBe(focused)
+  })
+
+  it('keeps camera, selection, and Task focus across materialization shape changes', async () => {
+    const initialDocument = fixtureDocument()
+    const materializedDocument = structuredClone(initialDocument)
+    const task = materializedDocument.tasks.find((entry) => entry.id === 'task-empty')!
+    materializedDocument.nodes.push({
+      id: 'node-materialized',
+      type: 'text',
+      frame: { ...taskOutputFrameV2(task.anchor, 0), z: 5 },
+      title: '新生成的产物',
+      text: 'Run settle 后生成',
+      artifactRefs: [],
+      homeTaskId: task.id,
+      origin: { kind: 'user' },
+    })
+    const { store, host } = await createSubject(undefined, initialDocument, materializedDocument)
+    const before = required<HTMLButtonElement>(host, '[data-focus-key="task:task-empty"]')
+    expect(required(host, '[data-task-id="task-empty"]').getAttribute('data-container-kind'))
+      .toBe('task-card')
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus')
+    act(() => {
+      store.setCamera({ x: -280, y: 165, zoom: 1.55 })
+      store.setSelection([{ kind: 'task', id: 'task-empty' }])
+      before.focus()
+    })
+    expect(document.activeElement).toBe(before)
+
+    await act(async () => {
+      await store.reload()
+    })
+
+    const after = required<HTMLButtonElement>(host, '[data-focus-key="task:task-empty"]')
+    expect(after).not.toBe(before)
+    expect(required(host, '[data-task-id="task-empty"]').getAttribute('data-container-kind'))
+      .toBe('title-strip')
+    expect(document.activeElement).toBe(after)
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true })
+    expect(store.getSnapshot().view).toMatchObject({
+      camera: { x: -280, y: 165, zoom: 1.55 },
+      selection: [{ kind: 'task', id: 'task-empty' }],
+    })
+    expect(required(host, '[data-testid="canvas-v2-world"]').getAttribute('style'))
+      .toContain('translate(-280px, 165px) scale(1.55)')
   })
 
   it('commits one task move, one node move, and one resize only on pointerup', async () => {

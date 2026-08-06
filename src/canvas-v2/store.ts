@@ -197,19 +197,26 @@ export class CanvasV2Store {
   load(): Promise<void> {
     if (this.#state.hydration.status === 'ready') return Promise.resolve()
     if (this.#loadPromise) return this.#loadPromise
-    const operation = this.#load()
+    const operation = this.#load(false)
     this.#loadPromise = operation
     return operation
   }
 
   async reload(): Promise<void> {
     if (this.#flushPromise) await this.#flushPromise
+    if (this.#state.viewSync.status === 'pending'
+      || this.#state.viewSync.status === 'saving'
+      || this.#state.viewSync.status === 'error') {
+      await this.flushViewState()
+    }
     this.#loadPromise = null
     this.#setState((state) => ({
       ...state,
       hydration: { status: 'loading', error: null },
     }))
-    await this.load()
+    const operation = this.#load(true)
+    this.#loadPromise = operation
+    await operation
   }
 
   dispatchCommand(command: CanvasCommandV2): Promise<{ mutationId: string }> {
@@ -426,12 +433,12 @@ export class CanvasV2Store {
     this.#listeners.clear()
   }
 
-  async #load(): Promise<void> {
+  async #load(preserveLiveView: boolean): Promise<void> {
     this.#setState((state) => ({
       ...state,
       hydration: { status: 'loading', error: null },
       commandSync: { ...state.commandSync, error: null, conflict: null },
-      viewSync: { status: 'idle', error: null },
+      ...(preserveLiveView ? {} : { viewSync: { status: 'idle' as const, error: null } }),
     }))
     try {
       const [envelope, storedView, entries] = await Promise.all([
@@ -447,8 +454,10 @@ export class CanvasV2Store {
           hydration: { status: 'ready', error: null },
           envelope,
           document: replay.document,
-          view: storedView ?? defaultCanvasV2ViewState(),
-          viewSync: { status: 'saved', error: null },
+          view: preserveLiveView ? state.view : storedView ?? defaultCanvasV2ViewState(),
+          ...(preserveLiveView
+            ? {}
+            : { viewSync: { status: 'saved' as const, error: null } }),
           commandSync: {
             status: 'conflict',
             pendingCount: entries.length,
@@ -468,8 +477,10 @@ export class CanvasV2Store {
         hydration: { status: 'ready', error: null },
         envelope,
         document: replay.document,
-        view: storedView ?? defaultCanvasV2ViewState(),
-        viewSync: { status: 'saved', error: null },
+        view: preserveLiveView ? state.view : storedView ?? defaultCanvasV2ViewState(),
+        ...(preserveLiveView
+          ? {}
+          : { viewSync: { status: 'saved' as const, error: null } }),
         commandSync: {
           status: entries.length > 0 ? 'pending' : 'saved',
           pendingCount: entries.length,

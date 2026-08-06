@@ -9,6 +9,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent,
@@ -143,6 +144,7 @@ export default function CanvasV2Stage() {
   const confirmationCancelRef = useRef<HTMLButtonElement>(null)
   const gestureRef = useRef<Gesture | null>(null)
   const focusableRefs = useRef(new Map<string, HTMLButtonElement>())
+  const focusRestoreKeyRef = useRef<string | null>(null)
   const [preview, setPreview] = useState<GesturePreview>(null)
   const [marquee, setMarquee] = useState<CanvasBoundsV2 | null>(null)
   const [rovingKey, setRovingKey] = useState<string | null>(null)
@@ -267,9 +269,24 @@ export default function CanvasV2Stage() {
     : selectedFocusableKey ?? focusableKeys[0] ?? null
 
   const registerFocusable = useCallback((key: string, element: HTMLButtonElement | null) => {
-    if (element) focusableRefs.current.set(key, element)
-    else focusableRefs.current.delete(key)
+    if (element) {
+      focusableRefs.current.set(key, element)
+      return
+    }
+    const previous = focusableRefs.current.get(key)
+    if (previous && document.activeElement === previous) focusRestoreKeyRef.current = key
+    focusableRefs.current.delete(key)
   }, [])
+
+  useLayoutEffect(() => {
+    const key = focusRestoreKeyRef.current
+    if (!key) return
+    focusRestoreKeyRef.current = null
+    const replacement = focusableRefs.current.get(key)
+    if (replacement?.isConnected && document.activeElement !== replacement) {
+      replacement.focus({ preventScroll: true })
+    }
+  })
 
   const selectTarget = useCallback((
     target: CanvasV2SelectionTarget,
