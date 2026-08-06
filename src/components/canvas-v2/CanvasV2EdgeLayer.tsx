@@ -132,6 +132,10 @@ export default function CanvasV2EdgeLayer({
         : { dx: 0, dy: 0 }
     }
     if (preview.kind === ref.kind && preview.id === ref.id) return preview
+    if (preview.kind === 'task' && ref.kind === 'node') {
+      const node = nodeById.get(ref.id)
+      if (node?.homeTaskId === preview.id) return preview
+    }
     if (preview.kind !== 'collection' || ref.kind === 'collection') return { dx: 0, dy: 0 }
     const node = ref.kind === 'node' ? nodeById.get(ref.id) : undefined
     const homeTaskId = node?.homeTaskId
