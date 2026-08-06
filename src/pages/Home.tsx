@@ -35,11 +35,13 @@ function CanvasModelIncompatible({ reason }: { reason: CanvasV2IncompatibilityRe
   return (
     <main className="flex h-screen w-screen items-center justify-center bg-gg-bg p-6 font-sans">
       <div role="alert" className="flex max-w-md flex-col gap-2 rounded-[16px] border border-gg-line bg-gg-node p-6 text-center">
-        <h1 className="text-[15px] font-semibold text-gg-ink">Canvas V2 能力不匹配</h1>
+        <h1 className="text-[15px] font-semibold text-gg-ink">Canvas 模型不匹配</h1>
         <p className="text-[12px] leading-5 text-gg-muted">
-          {reason === 'unsupported'
-            ? '前端已显式启用 Canvas V2，但当前 daemon 未声明 canvasModelV2 能力。'
-            : '前端已显式启用 Canvas V2，但无法确认 daemon 的 canvasModelV2 能力。'}
+          {reason === 'frontend-v2-daemon-v1'
+            ? '前端已启用 Canvas V2，但 daemon 仍在运行 V1。'
+            : reason === 'frontend-v1-daemon-v2'
+              ? 'daemon 已启用 Canvas V2，但前端仍在运行 V1。'
+              : '无法确认 daemon 的 Canvas 模型。'}
           为避免 V1/V2 schema 混写，画布已停止加载。
         </p>
       </div>

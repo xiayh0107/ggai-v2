@@ -7,6 +7,7 @@ import {
   type CanvasV2CapabilityClient,
   type CanvasV2IncompatibilityReason,
 } from './CanvasModelGateV2'
+import type { CanvasV2DaemonCapabilities } from './daemonClient'
 
 let root: Root | null = null
 let container: HTMLDivElement | null = null
@@ -53,18 +54,40 @@ async function renderGate(
   return container
 }
 
+function capabilities(model: 'v1' | 'v2'): CanvasV2DaemonCapabilities {
+  return {
+    canvasModelV1: model === 'v1',
+    canvasModelV2: model === 'v2',
+    model,
+    schemaVersion: model === 'v2' ? 2 : 1,
+    resetRequired: false,
+  }
+}
+
 describe('Canvas V2 model gate', () => {
-  it('mounts V1 immediately and does not probe when the frontend flag is off', async () => {
-    const getCapabilities = vi.fn(async () => ({ canvasModelV2: true }))
+  it('mounts V1 only after confirming that the daemon is also V1', async () => {
+    const getCapabilities = vi.fn(async () => capabilities('v1'))
     const host = await renderGate(false, { getCapabilities })
 
-    expect(host.querySelector('[data-mode="legacy"]')).not.toBeNull()
-    expect(getCapabilities).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(host.querySelector('[data-mode="legacy"]')).not.toBeNull())
+    expect(getCapabilities).toHaveBeenCalledOnce()
+  })
+
+  it('blocks a V1 frontend from mounting against a V2 daemon', async () => {
+    const host = await renderGate(false, {
+      getCapabilities: async () => capabilities('v2'),
+    })
+
+    await vi.waitFor(() => {
+      expect(host.querySelector('[data-mode="incompatible"]')?.getAttribute('data-reason'))
+        .toBe('frontend-v1-daemon-v2')
+    })
+    expect(host.querySelector('[data-mode="legacy"]')).toBeNull()
   })
 
   it('mounts V2 only after both frontend and daemon capabilities agree', async () => {
     const host = await renderGate(true, {
-      getCapabilities: async () => ({ canvasModelV2: true }),
+      getCapabilities: async () => capabilities('v2'),
     })
 
     await vi.waitFor(() => expect(host.querySelector('[data-mode="v2"]')).not.toBeNull())
@@ -73,12 +96,12 @@ describe('Canvas V2 model gate', () => {
 
   it('blocks instead of falling back to V1 when the daemon lacks V2', async () => {
     const host = await renderGate(true, {
-      getCapabilities: async () => ({ canvasModelV2: false }),
+      getCapabilities: async () => capabilities('v1'),
     })
 
     await vi.waitFor(() => {
       expect(host.querySelector('[data-mode="incompatible"]')?.getAttribute('data-reason'))
-        .toBe('unsupported')
+        .toBe('frontend-v2-daemon-v1')
     })
     expect(host.querySelector('[data-mode="legacy"]')).toBeNull()
     expect(host.querySelector('[data-mode="v2"]')).toBeNull()

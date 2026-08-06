@@ -61,14 +61,37 @@ describe('Canvas V2 daemon client', () => {
       expect(url.pathname).toBe('/health')
       expect(url.search).toBe('')
       expect(init?.method).toBe('GET')
-      return json({ capabilities: { canvasModelV2: true } })
+      return json({
+        capabilities: { canvasModelV1: false, canvasModelV2: true },
+        canvas: { model: 'v2', schemaVersion: 2, resetRequired: false },
+      })
     })
     const client = new CanvasV2DaemonClient({
       baseUrl: persistenceScope.daemonBaseUrl,
       fetch,
     })
 
-    await expect(client.getCapabilities()).resolves.toEqual({ canvasModelV2: true })
+    await expect(client.getCapabilities()).resolves.toEqual({
+      canvasModelV1: false,
+      canvasModelV2: true,
+      model: 'v2',
+      schemaVersion: 2,
+      resetRequired: false,
+    })
+  })
+
+  it('rejects contradictory health model declarations instead of guessing', async () => {
+    const client = new CanvasV2DaemonClient({
+      baseUrl: persistenceScope.daemonBaseUrl,
+      fetch: async () => json({
+        capabilities: { canvasModelV1: true, canvasModelV2: true },
+        canvas: { model: 'v2', schemaVersion: 1, resetRequired: false },
+      }),
+    })
+
+    await expect(client.getCapabilities()).rejects.toThrow(
+      'Daemon canvas model capabilities are inconsistent',
+    )
   })
 
   it('GETs and validates a branch V2 envelope', async () => {

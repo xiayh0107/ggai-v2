@@ -79,7 +79,11 @@ export interface CanvasV2DaemonClientOptions {
 }
 
 export interface CanvasV2DaemonCapabilities {
+  canvasModelV1: boolean
   canvasModelV2: boolean
+  model: 'v1' | 'v2'
+  schemaVersion: 1 | 2
+  resetRequired: boolean
 }
 
 export class CanvasV2ClientError extends Error {
@@ -146,10 +150,28 @@ export class CanvasV2DaemonClient {
     })
     if (!response.ok) throw await decodeHttpError(response, 'GET /health')
     const value = await readJson(response, 'GET /health response')
-    if (!isRecord(value) || !isRecord(value.capabilities)) {
+    if (!isRecord(value) || !isRecord(value.capabilities) || !isRecord(value.canvas)) {
       throw new CanvasV2ProtocolError('Daemon capabilities are invalid')
     }
-    return { canvasModelV2: value.capabilities.canvasModelV2 === true }
+    const canvasModelV1 = value.capabilities.canvasModelV1
+    const canvasModelV2 = value.capabilities.canvasModelV2
+    const model = value.canvas.model
+    const schemaVersion = value.canvas.schemaVersion
+    const resetRequired = value.canvas.resetRequired
+    if (
+      typeof canvasModelV1 !== 'boolean'
+      || typeof canvasModelV2 !== 'boolean'
+      || canvasModelV1 === canvasModelV2
+      || (model !== 'v1' && model !== 'v2')
+      || (schemaVersion !== 1 && schemaVersion !== 2)
+      || typeof resetRequired !== 'boolean'
+      || canvasModelV1 !== (model === 'v1')
+      || canvasModelV2 !== (model === 'v2')
+      || schemaVersion !== (model === 'v2' ? 2 : 1)
+    ) {
+      throw new CanvasV2ProtocolError('Daemon canvas model capabilities are inconsistent')
+    }
+    return { canvasModelV1, canvasModelV2, model, schemaVersion, resetRequired }
   }
 
   async getCanvas(scope: CanvasV2CanvasScope): Promise<CanvasV2Envelope> {
