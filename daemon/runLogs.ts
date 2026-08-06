@@ -108,13 +108,21 @@ export class RunLogStore {
   }
 
   async list(
-    filter: { nodeId?: string; taskId?: string; canvasBranch?: string; limit?: number } = {},
+    filter: {
+      nodeId?: string
+      taskId?: string
+      taskOwned?: boolean
+      canvasBranch?: string
+      limit?: number
+    } = {},
   ): Promise<RunSummary[]> {
     const summaries = await this.#readAllSummaries()
     const limit = Math.max(1, Math.min(filter.limit ?? 200, 2_000))
     return summaries
       .filter((entry) => !filter.nodeId || entry.nodeId === filter.nodeId)
       .filter((entry) => !filter.taskId || entry.taskId === filter.taskId)
+      .filter((entry) => filter.taskOwned === undefined
+        || (entry.taskId !== undefined) === filter.taskOwned)
       .filter((entry) => !filter.canvasBranch || entry.canvasBranch === filter.canvasBranch)
       .sort((left, right) => right.startedAt - left.startedAt)
       .slice(0, limit)

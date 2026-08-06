@@ -1,22 +1,13 @@
 import { createReadStream } from 'node:fs'
-import { lstat, realpath, stat } from 'node:fs/promises'
+import { stat } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
-import path from 'node:path'
 import { CanvasCommandError, type CanvasCommandV2 } from '../src/canvas-v2/commands.js'
 import type { CanvasDocumentV2 } from '../src/canvas-v2/model.js'
 import {
   compileTaskContextV2,
   taskContextArtifactRefsV2,
 } from '../src/agent/contextV2.js'
-import type { CanvasModelMode } from './canvasModelMode.js'
-import { isArtifactControlPath } from './artifactPaths.js'
-import {
-  CanvasCorruptionError,
-  CanvasMutationReuseError,
-  CanvasRevisionConflictError,
-  CanvasStoreManager,
-} from './canvasStore.js'
 import {
   CanvasMutationReuseV2Error,
   CanvasRevisionConflictV2Error,
@@ -37,7 +28,7 @@ import {
   trustedCanvasCommandFromPlanV2,
 } from './canvasProjectionCoordinatorV2.js'
 import { CanvasGitV2Error } from './canvasGitV2.js'
-import { isPathWithin, PermissionPolicyError, resolveProjectDir } from './permissions.js'
+import { PermissionPolicyError } from './permissions.js'
 import {
   BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2,
   ProjectionPluginCapabilityStoreV2,
@@ -45,34 +36,23 @@ import {
 } from './pluginCapabilitiesV2.js'
 import {
   parseCanvasBranch,
-  parseCreateRunRequest,
-  parseNodeId,
   parsePermissionDecision,
-  parsePutCanvasRequest,
   parseRunId,
   ProtocolError,
   type RunStreamMessage,
 } from './protocol.js'
+import { ProjectLeaseManager } from './projectLease.js'
 import { AgentRegistry } from './registry.js'
 import type { RunArtifactLookupV2 } from './runArtifactStorageV2.js'
 import { RunManager } from './runs.js'
-import { SessionsCorruptionError } from './sessions.js'
 import {
   parseRunIntentV2,
   parseTaskIdV2,
   TaskRunProtocolV2Error,
   type RunIntentV2,
 } from './taskRunProtocolV2.js'
-import {
-  isResolvedTaskRunRequestV2,
-  type ResolvedArtifactAttachmentV2,
-} from './taskRunTypesV2.js'
+import type { ResolvedArtifactAttachmentV2 } from './taskRunTypesV2.js'
 import { TaskSessionsV2CorruptionError } from './taskSessionsV2.js'
-import { WorkspacePreferencesManager } from './preferences.js'
-import {
-  WorkspaceVersionManager,
-  type WorkspaceMergeExpectation,
-} from './workspaceVersioning.js'
 import {
   WorkspaceVersionManagerV2,
   WorkspaceVersioningV2Error,
@@ -95,92 +75,59 @@ export interface DaemonServerOptions {
   allowedOrigins?: string[]
   registry?: AgentRegistry
   runManager?: RunManager
-  canvasStoreManager?: CanvasStoreManager
-  workspaceVersionManager?: WorkspaceVersionManager
   workspaceVersionManagerV2?: WorkspaceVersionManagerV2
-  preferencesManager?: WorkspacePreferencesManager
   canvasCommandStoreV2Manager?: CanvasCommandStoreV2Manager
-  canvasModel?: CanvasModelMode
-  /** Existing cross-model integration suites only; never set from the CLI. */
-  allowCanvasModelMixingForTests?: boolean
+  projectLeaseManager?: ProjectLeaseManager
 }
 
 export interface DaemonServer {
   server: Server
   registry: AgentRegistry
   runs: RunManager
-  canvases: CanvasStoreManager
-  versions: WorkspaceVersionManager
   versionsV2: WorkspaceVersionManagerV2
-  preferences: WorkspacePreferencesManager
   canvasV2: CanvasCommandStoreV2Manager
-  canvasModel: CanvasModelMode
   close(): Promise<void>
 }
 
 export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
-  const canvasModel = options.canvasModel ?? 'v2'
   const registry = options.registry ?? new AgentRegistry()
-  const versions = options.workspaceVersionManager ?? new WorkspaceVersionManager({
+  const projectLeases = options.projectLeaseManager ?? new ProjectLeaseManager({
     projectRoot: options.projectRoot,
-    ...(options.canvasStoreManager ? { canvasStoreManager: options.canvasStoreManager } : {}),
   })
-  const canvases = versions.canvases
   const canvasV2 = options.canvasCommandStoreV2Manager ?? new CanvasCommandStoreV2Manager({
     projectRoot: options.projectRoot,
-    acquireProjectLease: (projectDir) => canvases.acquireProjectLease(projectDir),
+    acquireProjectLease: (projectDir) => projectLeases.acquire(projectDir),
   })
   const versionsV2 = options.workspaceVersionManagerV2 ?? new WorkspaceVersionManagerV2({
     projectRoot: options.projectRoot,
     canvasStoreManager: canvasV2,
   })
-  if (options.workspaceVersionManagerV2
-    && options.canvasCommandStoreV2Manager
-    && versionsV2.canvases !== canvasV2) {
+  if (options.workspaceVersionManagerV2 && versionsV2.canvases !== canvasV2) {
     throw new TypeError('workspaceVersionManagerV2 and canvasCommandStoreV2Manager must share a store')
   }
   const projectionCanvases = workspaceProjectionCommitterV2(versionsV2)
-  const preferences = options.preferencesManager ?? new WorkspacePreferencesManager(options.projectRoot)
   const runs = options.runManager ?? new RunManager({
     projectRoot: options.projectRoot,
     registry,
-    acquireProjectLease: (projectDir) => canvasModel === 'v2'
-      ? canvasV2.acquireProjectLease(projectDir)
-      : versions.canvases.acquireProjectLease(projectDir),
+    acquireProjectLease: (projectDir) => canvasV2.acquireProjectLease(projectDir),
     resolveSourceProjectDir: async ({ projectDir, canvasBranch, taskOwned }) => {
-      if (!taskOwned) return versions.sourceExecutionProjectDir(projectDir, canvasBranch)
-      // V2 validates that the logical branch exists, but intentionally has no
-      // writable legacy source-worktree binding. A null override keeps the
-      // transport in the leased project root with artifact-only writes.
+      if (!taskOwned) {
+        throw new ProtocolError(
+          'legacy snapshot Runs are not supported by the Canvas V2 daemon',
+          'legacy_api_removed',
+          410,
+        )
+      }
       await versionsV2.sourceExecutionProjectDir(projectDir, canvasBranch)
       return null
     },
-    ...(canvasModel === 'v2' || options.allowCanvasModelMixingForTests
-      ? {
-          onProjectionPlanReady: ({ plan, projectDir, canvasBranch }) =>
-            autoMaterializeProjectionPlanV2({
-              canvases: projectionCanvases,
-              projectDir,
-              branch: canvasBranch,
-              plan,
-            }).then(() => undefined),
-        }
-      : {}),
-    onRunFinished: async ({ summary, request, projectDir }) => {
-      if (isResolvedTaskRunRequestV2(request)) return
-      if (summary.status !== 'done' || request.automationMode !== 'auto') return
-      const canvasBranch = request.canvasBranch ?? 'main'
-      const binding = await versions.sourceBranch(projectDir, canvasBranch)
-      if (!binding.ok || !binding.value) return
-      const nodeTitle = request.canvasSnapshot.nodes
-        .find((node) => node.id === request.nodeId)?.title ?? request.nodeId
-      // Automatic mode still cannot approve sensitive or oversized changes.
-      await versions.checkpointSource(projectDir, canvasBranch, {
-        runId: summary.runId,
-        nodeTitle,
-        allowSensitive: false,
-      })
-    },
+    onProjectionPlanReady: ({ plan, projectDir, canvasBranch }) =>
+      autoMaterializeProjectionPlanV2({
+        canvases: projectionCanvases,
+        projectDir,
+        branch: canvasBranch,
+        plan,
+      }).then(() => undefined),
   })
   const allowedOrigins = new Set(options.allowedOrigins ?? [])
   const sockets = new Set<Socket>()
@@ -192,16 +139,11 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
       projectRoot: options.projectRoot,
       registry,
       runs,
-      canvases,
       canvasV2,
-      versions,
       versionsV2,
       projectionCanvases,
-      preferences,
       allowedOrigins,
       lifecycle,
-      canvasModel,
-      allowCanvasModelMixingForTests: options.allowCanvasModelMixingForTests === true,
     })
       .catch((error: unknown) => writeError(response, error))
   })
@@ -214,21 +156,16 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     server,
     registry,
     runs,
-    canvases,
-    versions,
     versionsV2,
-    preferences,
     canvasV2,
-    canvasModel,
     close() {
       closePromise ??= closeDaemonServer(
         server,
         sockets,
         runs,
-        versions,
         versionsV2,
-        preferences,
         canvasV2,
+        projectLeases,
         lifecycle,
       )
       return closePromise
@@ -240,16 +177,11 @@ interface RouteContext {
   projectRoot: string
   registry: AgentRegistry
   runs: RunManager
-  canvases: CanvasStoreManager
   canvasV2: CanvasCommandStoreV2Manager
-  versions: WorkspaceVersionManager
   versionsV2: WorkspaceVersionManagerV2
   projectionCanvases: CanvasProjectionCommitterV2
-  preferences: WorkspacePreferencesManager
   allowedOrigins: Set<string>
   lifecycle: { closing: boolean }
-  canvasModel: CanvasModelMode
-  allowCanvasModelMixingForTests: boolean
 }
 
 async function route(
@@ -285,22 +217,19 @@ async function route(
       status: 'ok',
       version: 1,
       capabilities: {
-        canvasModelV1: context.canvasModel === 'v1',
-        canvasModelV2: context.canvasModel === 'v2',
-        pluginArtifactCapabilitiesV2: context.canvasModel === 'v2',
+        canvasModelV1: false,
+        canvasModelV2: true,
+        pluginArtifactCapabilitiesV2: true,
       },
       canvas: {
-        model: context.canvasModel,
-        schemaVersion: context.canvasModel === 'v2' ? 2 : 1,
+        model: 'v2',
+        schemaVersion: 2,
         resetRequired: false,
       },
       projectRoot: context.projectRoot,
     })
     return
   }
-
-  const routeModel = canvasRouteModel(pathname)
-  if (routeModel) assertCanvasModel(context, routeModel)
 
   if (request.method === 'GET' && pathname === '/canvas/v2') {
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
@@ -435,35 +364,15 @@ async function route(
     return
   }
 
-  if (request.method === 'GET' && pathname === '/canvas') {
-    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
-    const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
-    writeJson(response, 200, (await context.versions.getCanvas(projectDir, branch)).canvas)
-    return
-  }
-
-  if (request.method === 'PUT' && pathname === '/canvas') {
-    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
-    const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
-    const requestBody = parsePutCanvasRequest(await readJson(request))
-    assertServerOpen(context)
-    writeJson(response, 200, (await context.versions.saveCanvas(projectDir, branch, requestBody)).canvas)
-    return
-  }
-
   if (request.method === 'GET' && pathname === '/canvas/status') {
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
-    writeJson(response, 200, context.canvasModel === 'v2'
-      ? await context.versionsV2.status(projectDir)
-      : await context.versions.status(projectDir))
+    writeJson(response, 200, await context.versionsV2.status(projectDir))
     return
   }
 
   if (request.method === 'GET' && pathname === '/canvas/branches') {
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
-    writeJson(response, 200, context.canvasModel === 'v2'
-      ? await context.versionsV2.listBranches(projectDir)
-      : await context.versions.listBranches(projectDir))
+    writeJson(response, 200, await context.versionsV2.listBranches(projectDir))
     return
   }
 
@@ -476,40 +385,21 @@ async function route(
       : parseCanvasBranch(body.fromBranch)
     assertServerOpen(context)
     const lockedBranches = [fromBranch ?? 'main', name]
-    const result = context.canvasModel === 'v2'
-      ? await context.runs.withIdleBranches(
-          projectDir,
-          lockedBranches,
-          () => context.versionsV2.createBranch(projectDir, { name, fromBranch }),
-        )
-      : await context.runs.withIdleBranches(
-          projectDir,
-          lockedBranches,
-          () => context.versions.createBranch(projectDir, { name, fromBranch }),
-        )
+    const result = await context.runs.withIdleBranches(
+      projectDir,
+      lockedBranches,
+      () => context.versionsV2.createBranch(projectDir, { name, fromBranch }),
+    )
     writeJson(response, 200, result)
     return
   }
 
   if (request.method === 'DELETE' && pathname === '/canvas/branches') {
-    if (context.canvasModel === 'v2') {
-      throw new ProtocolError(
-        'Canvas V2 branch deletion is not available; history remains recoverable',
-        'canvas_v2_branch_delete_unsupported',
-        405,
-      )
-    }
-    const body = requestObject(await readJson(request))
-    const projectDir = optionalBodyString(body, 'projectDir', 4_096) ?? '.'
-    const branch = parseCanvasBranch(requiredBodyString(body, 'branch'))
-    assertServerOpen(context)
-    const result = await context.runs.withIdleBranches(
-      projectDir,
-      [branch, 'main'],
-      () => context.versions.deleteBranch(projectDir, branch),
+    throw new ProtocolError(
+      'Canvas V2 branch deletion is not available; history remains recoverable',
+      'canvas_v2_branch_delete_unsupported',
+      405,
     )
-    writeJson(response, 200, result)
-    return
   }
 
   if (request.method === 'GET' && pathname === '/canvas/history') {
@@ -522,9 +412,7 @@ async function route(
       ...(cursor === undefined ? {} : { cursor }),
       ...(limit === undefined ? {} : { limit }),
     }
-    writeJson(response, 200, context.canvasModel === 'v2'
-      ? await context.versionsV2.history(projectDir, options)
-      : await context.versions.history(projectDir, options))
+    writeJson(response, 200, await context.versionsV2.history(projectDir, options))
     return
   }
 
@@ -534,9 +422,7 @@ async function route(
     const branch = parseCanvasBranch(requiredBodyString(body, 'branch'))
     const reason = optionalBodyString(body, 'reason') ?? 'manual'
     assertServerOpen(context)
-    writeJson(response, 200, context.canvasModel === 'v2'
-      ? await context.versionsV2.manualCheckpoint(projectDir, branch, reason)
-      : await context.versions.manualCheckpoint(projectDir, branch, reason))
+    writeJson(response, 200, await context.versionsV2.manualCheckpoint(projectDir, branch, reason))
     return
   }
 
@@ -547,25 +433,15 @@ async function route(
     const newBranch = parseCanvasBranch(requiredBodyString(body, 'newBranch'))
     const checkpoint = requiredBodyString(body, 'checkpoint')
     assertServerOpen(context)
-    const result = context.canvasModel === 'v2'
-      ? await context.runs.withIdleBranches(
-          projectDir,
-          [sourceBranch, newBranch],
-          () => context.versionsV2.restoreAsNewBranch(projectDir, {
-            sourceBranch,
-            newBranch,
-            checkpoint,
-          }),
-        )
-      : await context.runs.withIdleBranches(
-          projectDir,
-          [sourceBranch, newBranch],
-          () => context.versions.restoreAsNewBranch(projectDir, {
-            sourceBranch,
-            newBranch,
-            checkpoint,
-          }),
-        )
+    const result = await context.runs.withIdleBranches(
+      projectDir,
+      [sourceBranch, newBranch],
+      () => context.versionsV2.restoreAsNewBranch(projectDir, {
+        sourceBranch,
+        newBranch,
+        checkpoint,
+      }),
+    )
     writeJson(response, 200, result)
     return
   }
@@ -576,17 +452,11 @@ async function route(
     const sourceBranch = parseCanvasBranch(requiredBodyString(body, 'sourceBranch'))
     const targetBranch = parseCanvasBranch(requiredBodyString(body, 'targetBranch'))
     assertServerOpen(context)
-    const result = context.canvasModel === 'v2'
-      ? await context.runs.withIdleBranches(
-          projectDir,
-          [sourceBranch, targetBranch],
-          () => context.versionsV2.previewMerge(projectDir, { sourceBranch, targetBranch }),
-        )
-      : await context.runs.withIdleBranches(
-          projectDir,
-          [sourceBranch, targetBranch],
-          () => context.versions.previewMerge(projectDir, { sourceBranch, targetBranch }),
-        )
+    const result = await context.runs.withIdleBranches(
+      projectDir,
+      [sourceBranch, targetBranch],
+      () => context.versionsV2.previewMerge(projectDir, { sourceBranch, targetBranch }),
+    )
     writeJson(response, 200, result)
     return
   }
@@ -597,103 +467,23 @@ async function route(
     const sourceBranch = parseCanvasBranch(requiredBodyString(body, 'sourceBranch'))
     const targetBranch = parseCanvasBranch(requiredBodyString(body, 'targetBranch'))
     const confirmed = requiredBodyBoolean(body, 'confirmed')
-    const expected = context.canvasModel === 'v2'
-      ? parseWorkspaceMergeExpectationV2(body.expected)
-      : parseWorkspaceMergeExpectation(body.expected)
-    assertServerOpen(context)
-    const result = context.canvasModel === 'v2'
-      ? await context.runs.withIdleBranches(
-          projectDir,
-          [sourceBranch, targetBranch],
-          () => context.versionsV2.executeMerge(projectDir, {
-            sourceBranch,
-            targetBranch,
-            confirmed,
-            expected: expected as WorkspaceMergeExpectationV2,
-          }),
-        )
-      : await context.runs.withIdleBranches(
-          projectDir,
-          [sourceBranch, targetBranch],
-          () => context.versions.executeMerge(projectDir, {
-            sourceBranch,
-            targetBranch,
-            confirmed,
-            expected: expected as WorkspaceMergeExpectation,
-          }),
-        )
-    writeJson(response, 200, result)
-    return
-  }
-
-  if (request.method === 'GET' && pathname === '/canvas/source') {
-    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
-    writeJson(response, 200, await context.versions.sourceStatus(projectDir))
-    return
-  }
-
-  if (request.method === 'POST' && pathname === '/canvas/source/bind') {
-    const body = requestObject(await readJson(request))
-    const projectDir = optionalBodyString(body, 'projectDir', 4_096) ?? '.'
-    const branch = parseCanvasBranch(optionalBodyString(body, 'branch') ?? 'main')
+    const expected = parseWorkspaceMergeExpectationV2(body.expected)
     assertServerOpen(context)
     const result = await context.runs.withIdleBranches(
       projectDir,
-      [branch],
-      () => context.versions.bindSource(projectDir, branch),
-    )
-    writeJson(response, 200, result)
-    return
-  }
-
-  if (request.method === 'POST' && pathname === '/canvas/source/checkpoints') {
-    const body = requestObject(await readJson(request))
-    const projectDir = optionalBodyString(body, 'projectDir', 4_096) ?? '.'
-    const branch = parseCanvasBranch(requiredBodyString(body, 'branch'))
-    const runId = requiredBodyString(body, 'runId')
-    const nodeTitle = requiredBodyString(body, 'nodeTitle')
-    const allowSensitive = body.allowSensitive === undefined
-      ? undefined
-      : requiredBodyBoolean(body, 'allowSensitive')
-    assertServerOpen(context)
-    const result = await context.runs.withIdleBranches(
-      projectDir,
-      [branch],
-      () => context.versions.checkpointSource(projectDir, branch, {
-        runId,
-        nodeTitle,
-        ...(allowSensitive === undefined ? {} : { allowSensitive }),
+      [sourceBranch, targetBranch],
+      () => context.versionsV2.executeMerge(projectDir, {
+        sourceBranch,
+        targetBranch,
+        confirmed,
+        expected,
       }),
     )
     writeJson(response, 200, result)
     return
   }
 
-  if (request.method === 'GET' && pathname === '/canvas/preferences') {
-    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
-    await context.canvases.acquireProjectLease(projectDir)
-    writeJson(response, 200, await context.preferences.get(projectDir))
-    return
-  }
-
-  if (request.method === 'PUT' && pathname === '/canvas/preferences') {
-    const body = requestObject(await readJson(request))
-    const projectDir = optionalBodyString(body, 'projectDir', 4_096) ?? '.'
-    assertServerOpen(context)
-    await context.canvases.acquireProjectLease(projectDir)
-    writeJson(response, 200, await context.preferences.put(projectDir, {
-      automationMode: body.automationMode,
-    }))
-    return
-  }
-
-  if (request.method === 'GET' && pathname === '/artifacts') {
-    await streamArtifact(response, context.projectRoot, url)
-    return
-  }
-
   if (request.method === 'PUT' && pathname === '/plugin-capabilities/v2') {
-    assertCanvasModel(context, 'v2')
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
     const leasedProjectDir = await context.canvasV2.acquireProjectLease(projectDir)
     let snapshot: ProjectionPluginCapabilitySnapshotV2
@@ -722,92 +512,82 @@ async function route(
 
   if (request.method === 'POST' && pathname === '/runs') {
     const raw = await readJson(request)
-    if (isRunIntentV2Candidate(raw)) {
-      assertCanvasModel(context, 'v2')
-      const intent = parseRunIntentV2ForServer(raw)
-      const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
-      const capabilityDigest = optionalPluginCapabilityDigest(url)
-      const pluginCapabilities = capabilityDigest
-        ? await loadPluginCapabilitiesForRunV2(context, projectDir, capabilityDigest)
-        : structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2)
-      assertServerOpen(context)
-      const envelope = (await context.versionsV2.getCanvas(
-        projectDir,
-        intent.canvasBranch,
-      )).canvas
-      if (envelope.revision !== intent.baseRevision) {
-        throw new CanvasRevisionConflictV2Error(envelope.revision)
-      }
-      if (!envelope.document.tasks.some((task) => task.id === intent.taskId)) {
-        throw new ProtocolError('task does not exist at the requested revision', 'task_not_found', 404)
-      }
-      const resolvedArtifactAttachments = await resolveRunIntentAttachments(
-        intent,
-        envelope.document,
-        context.runs,
-        projectDir,
+    if (!isRunIntentV2Candidate(raw)) {
+      throw new ProtocolError(
+        'legacy snapshot Runs were removed; POST /runs requires RunIntent V2',
+        'legacy_api_removed',
+        410,
       )
-      const run = await context.runs.create({
-        ...intent,
-        projectDir,
-        canvasDocument: structuredClone(envelope.document),
-        resolvedArtifactAttachments,
-        pluginCapabilities,
-        automationMode: 'confirm',
-      }, {
-        validateReserved: async () => {
-          const current = (await context.versionsV2.getCanvas(
-            projectDir,
-            intent.canvasBranch,
-          )).canvas
-          if (current.revision !== intent.baseRevision) {
-            throw new CanvasRevisionConflictV2Error(current.revision)
-          }
-          if (!current.document.tasks.some((task) => task.id === intent.taskId)) {
-            throw new ProtocolError(
-              'task does not exist at the requested revision',
-              'task_not_found',
-              404,
-            )
-          }
-        },
-      })
-      writeJson(response, 202, { runId: run.runId })
-      return
     }
-
-    assertCanvasModel(context, 'v1')
-    const parsed = parseCreateRunRequest(raw)
-    const projectDir = parsed.projectDir ?? '.'
+    const intent = parseRunIntentV2ForServer(raw)
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const capabilityDigest = optionalPluginCapabilityDigest(url)
+    const pluginCapabilities = capabilityDigest
+      ? await loadPluginCapabilitiesForRunV2(context, projectDir, capabilityDigest)
+      : structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2)
     assertServerOpen(context)
-    await context.canvases.acquireProjectLease(projectDir)
-    const preferences = parsed.automationMode === undefined
-      ? await context.preferences.get(projectDir)
-      : null
-    const body = {
-      ...parsed,
-      canvasBranch: parsed.canvasBranch ?? 'main',
-      automationMode: parsed.automationMode ?? preferences?.automationMode ?? 'confirm',
+    const envelope = (await context.versionsV2.getCanvas(
+      projectDir,
+      intent.canvasBranch,
+    )).canvas
+    if (envelope.revision !== intent.baseRevision) {
+      throw new CanvasRevisionConflictV2Error(envelope.revision)
     }
-    const run = await context.runs.create(body)
+    if (!envelope.document.tasks.some((task) => task.id === intent.taskId)) {
+      throw new ProtocolError('task does not exist at the requested revision', 'task_not_found', 404)
+    }
+    const resolvedArtifactAttachments = await resolveRunIntentAttachments(
+      intent,
+      envelope.document,
+      context.runs,
+      projectDir,
+    )
+    const run = await context.runs.create({
+      ...intent,
+      projectDir,
+      canvasDocument: structuredClone(envelope.document),
+      resolvedArtifactAttachments,
+      pluginCapabilities,
+      automationMode: 'confirm',
+    }, {
+      validateReserved: async () => {
+        const current = (await context.versionsV2.getCanvas(
+          projectDir,
+          intent.canvasBranch,
+        )).canvas
+        if (current.revision !== intent.baseRevision) {
+          throw new CanvasRevisionConflictV2Error(current.revision)
+        }
+        if (!current.document.tasks.some((task) => task.id === intent.taskId)) {
+          throw new ProtocolError(
+            'task does not exist at the requested revision',
+            'task_not_found',
+            404,
+          )
+        }
+      },
+    })
     writeJson(response, 202, { runId: run.runId })
     return
   }
 
   if (request.method === 'GET' && pathname === '/runs') {
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
-    const rawNodeId = singleQueryParameter(url, 'nodeId')
-    const nodeId = rawNodeId === undefined ? undefined : parseNodeId(rawNodeId)
+    if (singleQueryParameter(url, 'nodeId') !== undefined) {
+      throw new ProtocolError(
+        'node-scoped Run history was removed; use taskId',
+        'legacy_api_removed',
+        410,
+      )
+    }
     const rawTaskId = singleQueryParameter(url, 'taskId')
     const taskId = rawTaskId === undefined ? undefined : parseTaskIdV2(rawTaskId)
-    if (nodeId !== undefined) assertCanvasModel(context, 'v1')
-    if (taskId !== undefined) assertCanvasModel(context, 'v2')
     const rawBranch = singleQueryParameter(url, 'branch')
     const canvasBranch = rawBranch === undefined ? undefined : parseCanvasBranch(rawBranch)
     const limit = optionalIntegerQuery(url, 'limit', { min: 1, max: 2_000 })
     const runs = await context.runs.listRunHistory(projectDir, {
-      nodeId,
       taskId,
+      taskOwned: true,
       canvasBranch,
       limit,
     })
@@ -872,7 +652,8 @@ async function route(
   const eventMatch = pathname.match(/^\/runs\/([^/]+)\/events$/)
   if (request.method === 'GET' && eventMatch) {
     const runId = runIdFromPath(eventMatch[1])
-    if (!context.runs.get(runId)) throw new ProtocolError('run not found', 'run_not_found', 404)
+    const active = context.runs.get(runId)
+    if (!active?.taskId) throw new ProtocolError('run not found', 'run_not_found', 404)
     streamRunEvents(request, response, context.runs, runId)
     return
   }
@@ -881,6 +662,9 @@ async function route(
   if (request.method === 'POST' && cancelMatch) {
     await readOptionalJson(request)
     const runId = runIdFromPath(cancelMatch[1])
+    if (!context.runs.get(runId)?.taskId) {
+      throw new ProtocolError('run is missing or already finished', 'run_not_active', 409)
+    }
     const accepted = await context.runs.cancel(runId)
     if (!accepted) throw new ProtocolError('run is missing or already finished', 'run_not_active', 409)
     writeJson(response, 200, { runId, status: context.runs.get(runId)?.status ?? 'cancelled' })
@@ -891,6 +675,9 @@ async function route(
   if (request.method === 'GET' && logMatch) {
     const runId = runIdFromPath(logMatch[1])
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    if (!(await context.runs.getPersisted(runId, projectDir))?.taskId) {
+      throw new ProtocolError('run not found', 'run_not_found', 404)
+    }
     const afterEventId = optionalIntegerQuery(url, 'afterEventId', {
       min: 0,
       max: Number.MAX_SAFE_INTEGER,
@@ -903,7 +690,6 @@ async function route(
   }
   if (request.method === 'DELETE' && logMatch) {
     const runId = runIdFromPath(logMatch[1])
-    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
     const active = context.runs.get(runId)
     if (active && !['done', 'error', 'cancelled', 'interrupted'].includes(active.status)) {
       throw new ProtocolError(
@@ -912,17 +698,11 @@ async function route(
         409,
       )
     }
-    if (context.canvasModel === 'v2') {
-      throw new ProtocolError(
-        'Canvas V2 run logs are durable execution records and cannot be deleted independently',
-        'run_log_delete_unsupported',
-        405,
-      )
-    }
-    const deleted = await context.runs.deleteRunLog(runId, projectDir)
-    if (!deleted) throw new ProtocolError('run not found', 'run_not_found', 404)
-    writeJson(response, 200, { runId, deleted: true })
-    return
+    throw new ProtocolError(
+      'Canvas V2 run logs are durable execution records and cannot be deleted independently',
+      'run_log_delete_unsupported',
+      405,
+    )
   }
 
   const runMatch = pathname.match(/^\/runs\/([^/]+)$/)
@@ -930,7 +710,7 @@ async function route(
     const runId = runIdFromPath(runMatch[1])
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
     const run = await context.runs.getPersisted(runId, projectDir)
-    if (!run) throw new ProtocolError('run not found', 'run_not_found', 404)
+    if (!run?.taskId) throw new ProtocolError('run not found', 'run_not_found', 404)
     writeJson(response, 200, run)
     return
   }
@@ -946,17 +726,6 @@ async function route(
       'permission_bridge_unavailable',
       501,
     )
-  }
-
-  if (request.method === 'GET' && pathname === '/sessions') {
-    const nodeId = url.searchParams.get('nodeId') ?? undefined
-    const agentId = url.searchParams.get('agentId') ?? undefined
-    const rawBranch = singleQueryParameter(url, 'branch')
-    const canvasBranch = rawBranch === undefined ? undefined : parseCanvasBranch(rawBranch)
-    const projectDir = url.searchParams.get('projectDir') ?? '.'
-    const sessions = await context.runs.listSessions(projectDir, { canvasBranch, nodeId, agentId })
-    writeJson(response, 200, { sessions })
-    return
   }
 
   throw new ProtocolError('route not found', 'not_found', 404)
@@ -1098,28 +867,6 @@ function requiredBodyBoolean(body: Record<string, unknown>, name: string): boole
   return value
 }
 
-function parseWorkspaceMergeExpectation(value: unknown): WorkspaceMergeExpectation {
-  const expected = requestObject(value)
-  const canvas = requestObject(expected.canvas)
-  const source = expected.source === null
-    ? null
-    : requestObject(expected.source)
-  return {
-    canvas: {
-      sourceCommit: requiredCommit(canvas, 'sourceCommit'),
-      targetCommit: requiredCommit(canvas, 'targetCommit'),
-      sourceRevision: requiredNonNegativeInteger(canvas, 'sourceRevision'),
-      targetRevision: requiredNonNegativeInteger(canvas, 'targetRevision'),
-    },
-    source: source
-      ? {
-          sourceCommit: requiredCommit(source, 'sourceCommit'),
-          targetCommit: requiredCommit(source, 'targetCommit'),
-        }
-      : null,
-  }
-}
-
 function parseWorkspaceMergeExpectationV2(value: unknown): WorkspaceMergeExpectationV2 {
   const expected = requestObject(value)
   const allowed = new Set([
@@ -1172,42 +919,6 @@ function optionalIntegerQuery(
   return parsed
 }
 
-function canvasRouteModel(pathname: string): CanvasModelMode | null {
-  if (
-    pathname === '/canvas/status'
-    || pathname === '/canvas/branches'
-    || pathname === '/canvas/history'
-    || pathname === '/canvas/checkpoints'
-    || pathname === '/canvas/restores'
-    || pathname === '/canvas/merges/preview'
-    || pathname === '/canvas/merges'
-  ) return null
-  if (
-    pathname === '/canvas/v2'
-    || pathname === '/canvas/commands'
-    || pathname === '/canvas/conflicts'
-    || pathname.startsWith('/projection-plans/')
-    || /^\/runs\/[^/]+\/artifacts\/[^/]+(?:\/metadata)?$/u.test(pathname)
-  ) return 'v2'
-  if (
-    pathname === '/canvas'
-    || pathname.startsWith('/canvas/source')
-    || pathname === '/canvas/preferences'
-    || pathname === '/artifacts'
-    || pathname === '/sessions'
-  ) return 'v1'
-  return null
-}
-
-function assertCanvasModel(context: RouteContext, required: CanvasModelMode): void {
-  if (context.allowCanvasModelMixingForTests || context.canvasModel === required) return
-  throw new ProtocolError(
-    `route requires Canvas ${required.toUpperCase()}, but daemon is running ${context.canvasModel.toUpperCase()}`,
-    'canvas_model_mismatch',
-    409,
-  )
-}
-
 function assertServerOpen(context: RouteContext): void {
   if (context.lifecycle.closing) {
     throw new ProtocolError('daemon is shutting down', 'daemon_shutting_down', 503)
@@ -1234,10 +945,9 @@ async function closeDaemonServer(
   server: Server,
   sockets: Set<Socket>,
   runs: RunManager,
-  versions: WorkspaceVersionManager,
   versionsV2: WorkspaceVersionManagerV2,
-  preferences: WorkspacePreferencesManager,
   canvasV2: CanvasCommandStoreV2Manager,
+  projectLeases: ProjectLeaseManager,
   lifecycle: { closing: boolean },
 ): Promise<void> {
   lifecycle.closing = true
@@ -1251,14 +961,13 @@ async function closeDaemonServer(
   })
 
   try {
-    // Runs may perform a final branch-scoped source checkpoint. Keep
-    // versioning open until all terminal hooks have settled, then wait for
-    // ordinary in-flight HTTP routes before closing their managers.
+    // Runs emit their final durable close before versioning and leases close.
     await runs.close()
     await serverClosed
-    await Promise.all([versions.close(), versionsV2.close(), preferences.close()])
+    await versionsV2.close()
   } finally {
     canvasV2.close()
+    await projectLeases.close()
     // Runs have emitted their terminal close frames; do not let a stuck client
     // connection keep process shutdown alive indefinitely.
     for (const socket of sockets) socket.destroy()
@@ -1378,85 +1087,6 @@ function writeJson(response: ServerResponse, status: number, body: unknown): voi
   response.end(payload)
 }
 
-async function streamArtifact(
-  response: ServerResponse,
-  projectRoot: string,
-  url: URL,
-): Promise<void> {
-  const requestedPath = url.searchParams.get('path')
-  if (!requestedPath || requestedPath.includes('\0') || path.isAbsolute(requestedPath)) {
-    throw new ProtocolError('artifact path must be a non-empty relative path')
-  }
-  if (isArtifactControlPath(requestedPath)) {
-    throw new ProtocolError(
-      'artifact control metadata is not available for preview',
-      'artifact_forbidden',
-      403,
-    )
-  }
-  if (/^artifacts\/\.branches\/[0-9a-f]{64}\/[A-Za-z0-9._:@-]+\/files\//u.test(
-    requestedPath,
-  )) {
-    throw new ProtocolError(
-      'run-owned artifacts must be read by runId and artifactId',
-      'artifact_forbidden',
-      403,
-    )
-  }
-
-  const projectDir = await resolveProjectDir(projectRoot, url.searchParams.get('projectDir') ?? '.')
-  const artifactRoot = path.resolve(projectDir, 'artifacts')
-  const candidate = path.resolve(projectDir, requestedPath)
-  if (!isPathWithin(artifactRoot, candidate)) {
-    throw new ProtocolError('artifact path is outside the project artifacts directory', 'artifact_forbidden', 403)
-  }
-
-  let canonicalRoot: string
-  let canonicalFile: string
-  let rootInfo: Awaited<ReturnType<typeof lstat>>
-  try {
-    [rootInfo, canonicalRoot, canonicalFile] = await Promise.all([
-      lstat(artifactRoot),
-      realpath(artifactRoot),
-      realpath(candidate),
-    ])
-  } catch (error) {
-    if (isNodeError(error, 'ENOENT') || isNodeError(error, 'ENOTDIR')) {
-      throw new ProtocolError('artifact not found', 'artifact_not_found', 404)
-    }
-    throw error
-  }
-  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || canonicalRoot !== artifactRoot) {
-    throw new ProtocolError(
-      'project artifacts directory must be a real directory',
-      'artifact_forbidden',
-      403,
-    )
-  }
-  if (!isPathWithin(canonicalRoot, canonicalFile)) {
-    throw new ProtocolError('artifact resolves outside the project artifacts directory', 'artifact_forbidden', 403)
-  }
-
-  const info = await stat(canonicalFile)
-  if (!info.isFile()) throw new ProtocolError('artifact is not a file', 'artifact_not_found', 404)
-  const previewLimit = isTextArtifact(canonicalFile)
-    ? MAX_TEXT_ARTIFACT_BYTES
-    : MAX_ARTIFACT_BYTES
-  if (info.size > previewLimit) {
-    throw new ProtocolError('artifact is too large to preview', 'artifact_too_large', 413)
-  }
-
-  response.writeHead(200, {
-    'Content-Type': artifactContentType(canonicalFile),
-    'Content-Length': info.size,
-    'Cache-Control': 'no-store',
-    'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'",
-  })
-  const stream = createReadStream(canonicalFile)
-  stream.once('error', () => response.destroy())
-  stream.pipe(response)
-}
-
 async function streamRunArtifactV2(
   response: ServerResponse,
   artifact: RunArtifactLookupV2,
@@ -1496,36 +1126,6 @@ function isTextMediaType(mediaType: string): boolean {
   return mediaType.startsWith('text/')
     || mediaType === 'application/json'
     || mediaType === 'application/xml'
-}
-
-function isTextArtifact(filename: string): boolean {
-  return new Set([
-    '.json', '.csv', '.md', '.txt', '.log', '.ts', '.tsx', '.js', '.jsx', '.py', '.tex',
-  ]).has(path.extname(filename).toLowerCase())
-}
-
-function artifactContentType(filename: string): string {
-  switch (path.extname(filename).toLowerCase()) {
-    case '.png': return 'image/png'
-    case '.jpg':
-    case '.jpeg': return 'image/jpeg'
-    case '.webp': return 'image/webp'
-    case '.gif': return 'image/gif'
-    case '.svg': return 'image/svg+xml'
-    case '.pdf': return 'application/pdf'
-    case '.json': return 'application/json; charset=utf-8'
-    case '.csv': return 'text/csv; charset=utf-8'
-    case '.md': return 'text/markdown; charset=utf-8'
-    case '.txt':
-    case '.log':
-    case '.ts':
-    case '.tsx':
-    case '.js':
-    case '.jsx':
-    case '.py':
-    case '.tex': return 'text/plain; charset=utf-8'
-    default: return 'application/octet-stream'
-  }
 }
 
 function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
@@ -1638,16 +1238,6 @@ function writeError(response: ServerResponse, error: unknown): void {
     writeJson(response, 403, { error: { code: error.code.toLowerCase(), message: error.message } })
     return
   }
-  if (error instanceof SessionsCorruptionError) {
-    writeJson(response, 409, {
-      error: {
-        code: 'sessions_corrupt',
-        message: error.message,
-        recovery: error.recovery,
-      },
-    })
-    return
-  }
   if (error instanceof TaskSessionsV2CorruptionError) {
     writeJson(response, 409, {
       error: {
@@ -1715,32 +1305,6 @@ function writeError(response: ServerResponse, error: unknown): void {
         code: 'canvas_v2_corrupt',
         message: error.message,
         filePath: error.filePath,
-      },
-    })
-    return
-  }
-  if (error instanceof CanvasRevisionConflictError) {
-    writeJson(response, 409, {
-      error: {
-        code: 'canvas_revision_conflict',
-        message: error.message,
-        currentRevision: error.currentRevision,
-      },
-    })
-    return
-  }
-  if (error instanceof CanvasMutationReuseError) {
-    writeJson(response, 409, {
-      error: { code: 'canvas_mutation_reused', message: error.message },
-    })
-    return
-  }
-  if (error instanceof CanvasCorruptionError) {
-    writeJson(response, 409, {
-      error: {
-        code: 'canvas_corrupt',
-        message: error.message,
-        recovery: error.recovery,
       },
     })
     return

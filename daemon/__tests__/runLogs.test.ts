@@ -56,6 +56,30 @@ test('run history can be scoped to its logical canvas branch', async () => {
   }
 })
 
+test('task-owned history filtering happens before pagination', async () => {
+  const subject = await fixture()
+  try {
+    await subject.store.start({ ...summary('run-legacy', 'done'), startedAt: 300 })
+    await subject.store.start({
+      ...summary('run-task-v2', 'done'),
+      taskId: 'task-v2',
+      nodeId: 'task-v2',
+      startedAt: 200,
+    })
+
+    assert.deepEqual(
+      (await subject.store.list({ taskOwned: true, limit: 1 })).map((entry) => entry.runId),
+      ['run-task-v2'],
+    )
+    assert.deepEqual(
+      (await subject.store.list({ taskOwned: false, limit: 1 })).map((entry) => entry.runId),
+      ['run-legacy'],
+    )
+  } finally {
+    await subject.close()
+  }
+})
+
 test('legacy summaries without a canvas branch normalize to main', async () => {
   const subject = await fixture()
   try {

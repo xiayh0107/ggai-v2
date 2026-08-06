@@ -8,7 +8,7 @@ import { createDaemonServer } from '../server.js'
 
 test('Canvas V2 HTTP routes coordinate commands, history, restore, and semantic merge', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-server-versioning-v2-'))
-  const daemon = createDaemonServer({ projectRoot: root, canvasModel: 'v2' })
+  const daemon = createDaemonServer({ projectRoot: root })
   await new Promise<void>((resolve, reject) => {
     daemon.server.once('error', reject)
     daemon.server.listen(0, '127.0.0.1', resolve)
@@ -127,10 +127,10 @@ test('Canvas V2 HTTP routes coordinate commands, history, restore, and semantic 
     assert.ok((history.value?.entries.length ?? 0) >= 2)
 
     const sourceRoute = await fetch(`${baseUrl}/canvas/source?projectDir=.`)
-    assert.equal(sourceRoute.status, 409)
+    assert.equal(sourceRoute.status, 404)
     assert.equal(
       (await sourceRoute.json() as { error: { code: string } }).error.code,
-      'canvas_model_mismatch',
+      'not_found',
     )
 
     const deletion = await fetch(`${baseUrl}/canvas/branches`, {
@@ -147,7 +147,7 @@ test('Canvas V2 HTTP routes coordinate commands, history, restore, and semantic 
 
 test('Canvas V2 HTTP conflict recovery replays a durable journal into an isolated branch', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-server-conflict-v2-'))
-  const daemon = createDaemonServer({ projectRoot: root, canvasModel: 'v2' })
+  const daemon = createDaemonServer({ projectRoot: root })
   await new Promise<void>((resolve, reject) => {
     daemon.server.once('error', reject)
     daemon.server.listen(0, '127.0.0.1', resolve)

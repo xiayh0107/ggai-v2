@@ -4,15 +4,12 @@ import type { AddressInfo } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import type { CanvasModelMode } from '../canvasModelMode.js'
+
 import { createDaemonServer } from '../server.js'
 
-async function withDaemon(
-  mode: CanvasModelMode,
-  run: (baseUrl: string) => Promise<void>,
-): Promise<void> {
-  const root = await mkdtemp(path.join(os.tmpdir(), `ggai-model-${mode}-`))
-  const daemon = createDaemonServer({ projectRoot: root, canvasModel: mode })
+async function withDaemon(run: (baseUrl: string) => Promise<void>): Promise<void> {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-model-v2-'))
+  const daemon = createDaemonServer({ projectRoot: root })
   try {
     await new Promise<void>((resolve, reject) => {
       daemon.server.once('error', reject)
@@ -26,19 +23,8 @@ async function withDaemon(
   }
 }
 
-test('programmatic daemon construction defaults to Canvas V2', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-model-default-'))
-  const daemon = createDaemonServer({ projectRoot: root })
-  try {
-    assert.equal(daemon.canvasModel, 'v2')
-  } finally {
-    await daemon.close()
-    await rm(root, { recursive: true, force: true })
-  }
-})
-
-test('V1 mode advertises its actual schema and rejects every V2 write path', async () => {
-  await withDaemon('v1', async (baseUrl) => {
+test('daemon health and version routes have one fixed Canvas V2 contract', async () => {
+  await withDaemon(async (baseUrl) => {
     const health = await (await fetch(`${baseUrl}/health`)).json() as {
       capabilities: {
         canvasModelV1: boolean
@@ -48,97 +34,97 @@ test('V1 mode advertises its actual schema and rejects every V2 write path', asy
       canvas: { model: string; schemaVersion: number; resetRequired: boolean }
     }
     assert.deepEqual(health.capabilities, {
-      canvasModelV1: true,
-      canvasModelV2: false,
-      pluginArtifactCapabilitiesV2: false,
-    })
-    assert.deepEqual(health.canvas, { model: 'v1', schemaVersion: 1, resetRequired: false })
-
-    const canvas = await fetch(`${baseUrl}/canvas/v2`)
-    assert.equal(canvas.status, 409)
-    assert.equal((await canvas.json() as { error: { code: string } }).error.code, 'canvas_model_mismatch')
-
-    const conflicts = await fetch(`${baseUrl}/canvas/conflicts`, { method: 'POST' })
-    assert.equal(conflicts.status, 409)
-    assert.equal(
-      (await conflicts.json() as { error: { code: string } }).error.code,
-      'canvas_model_mismatch',
-    )
-
-    const artifactMetadata = await fetch(
-      `${baseUrl}/runs/run-v2-rejected/artifacts/artifact-v2-rejected/metadata`,
-    )
-    assert.equal(artifactMetadata.status, 409)
-    assert.equal(
-      (await artifactMetadata.json() as { error: { code: string } }).error.code,
-      'canvas_model_mismatch',
-    )
-
-    const run = await fetch(`${baseUrl}/runs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        schemaVersion: 2,
-        runId: 'run-v2-rejected',
-        taskId: 'task-v2-rejected',
-        agentId: 'codex',
-        canvasBranch: 'main',
-        baseRevision: 0,
-        prompt: 'must not run',
-        attachments: [],
-        materializationPolicy: 'auto',
-      }),
-    })
-    assert.equal(run.status, 409)
-    assert.equal((await run.json() as { error: { code: string } }).error.code, 'canvas_model_mismatch')
-  })
-})
-
-test('V2 mode rejects legacy canvas, path artifact, and snapshot Run APIs', async () => {
-  await withDaemon('v2', async (baseUrl) => {
-    const health = await (await fetch(`${baseUrl}/health`)).json() as {
-      capabilities: {
-        canvasModelV1: boolean
-        canvasModelV2: boolean
-        pluginArtifactCapabilitiesV2: boolean
-      }
-      canvas: { model: string; schemaVersion: number }
-    }
-    assert.deepEqual(health.capabilities, {
       canvasModelV1: false,
       canvasModelV2: true,
       pluginArtifactCapabilitiesV2: true,
     })
-    assert.equal(health.canvas.model, 'v2')
-    assert.equal(health.canvas.schemaVersion, 2)
+    assert.deepEqual(health.canvas, {
+      model: 'v2',
+      schemaVersion: 2,
+      resetRequired: false,
+    })
 
-    for (const route of ['/canvas', '/artifacts?path=artifacts/a.txt']) {
-      const response = await fetch(`${baseUrl}${route}`)
-      assert.equal(response.status, 409, route)
-      assert.equal(
-        (await response.json() as { error: { code: string } }).error.code,
-        'canvas_model_mismatch',
-      )
-    }
+    const canvas = await fetch(`${baseUrl}/canvas/v2?branch=main`)
+    assert.equal(canvas.status, 200)
+    assert.equal((await canvas.json() as { document: { schemaVersion: number } })
+      .document.schemaVersion, 2)
 
     const history = await fetch(`${baseUrl}/canvas/history?branch=main`)
     assert.equal(history.status, 200)
     assert.equal((await history.json() as { ok: boolean }).ok, true)
+  })
+})
 
+test('legacy Canvas, artifact, source, preference, and session routes stay absent', async () => {
+  await withDaemon(async (baseUrl) => {
+    const requests: Array<[string, RequestInit | undefined]> = [
+      ['/canvas', undefined],
+      ['/canvas', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      }],
+      ['/canvas/source', undefined],
+      ['/canvas/source/bind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      }],
+      ['/canvas/source/checkpoints', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      }],
+      ['/canvas/preferences', undefined],
+      ['/canvas/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      }],
+      ['/artifacts?path=artifacts/a.txt', undefined],
+      ['/sessions?nodeId=node-legacy', undefined],
+    ]
+    for (const [route, init] of requests) {
+      const response = await fetch(`${baseUrl}${route}`, init)
+      assert.equal(response.status, 404, `${init?.method ?? 'GET'} ${route}`)
+      assert.equal(
+        (await response.json() as { error: { code: string } }).error.code,
+        'not_found',
+      )
+    }
+  })
+})
+
+test('legacy snapshot Runs and node-scoped Run history are explicitly gone', async () => {
+  await withDaemon(async (baseUrl) => {
     const legacyRun = await fetch(`${baseUrl}/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
+      body: JSON.stringify({
+        nodeId: 'node-legacy',
+        agentId: 'codex',
+        prompt: 'must not run',
+        canvasSnapshot: { nodes: [], edges: [], plugins: [] },
+      }),
     })
-    assert.equal(legacyRun.status, 409)
+    assert.equal(legacyRun.status, 410)
     assert.equal(
       (await legacyRun.json() as { error: { code: string } }).error.code,
-      'canvas_model_mismatch',
+      'legacy_api_removed',
     )
 
-    const sharedHistory = await fetch(`${baseUrl}/runs?limit=1`)
-    assert.equal(sharedHistory.status, 200)
     const legacyFilteredHistory = await fetch(`${baseUrl}/runs?nodeId=node-legacy`)
-    assert.equal(legacyFilteredHistory.status, 409)
+    assert.equal(legacyFilteredHistory.status, 410)
+    assert.equal(
+      (await legacyFilteredHistory.json() as { error: { code: string } }).error.code,
+      'legacy_api_removed',
+    )
+
+    const runLogDeletion = await fetch(`${baseUrl}/runs/old-run/log`, { method: 'DELETE' })
+    assert.equal(runLogDeletion.status, 405)
+    assert.equal(
+      (await runLogDeletion.json() as { error: { code: string } }).error.code,
+      'run_log_delete_unsupported',
+    )
   })
 })

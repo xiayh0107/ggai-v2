@@ -199,7 +199,7 @@ test('daemon blocks destructive Task and collection commands while a member Run 
     registry: registry(control.transport),
     watchArtifacts: async () => ({ close: async () => undefined }),
   })
-  const daemon = createDaemonServer({ projectRoot: root, runManager: runs, canvasModel: 'v2' })
+  const daemon = createDaemonServer({ projectRoot: root, runManager: runs })
   await new Promise<void>((resolve, reject) => {
     daemon.server.once('error', reject)
     daemon.server.listen(0, '127.0.0.1', resolve)
@@ -267,7 +267,7 @@ test('durable Task deletions dismiss only their pending plans after the Canvas c
     registry: registry(transport),
     watchArtifacts: async () => ({ close: async () => undefined }),
   })
-  const daemon = createDaemonServer({ projectRoot: root, runManager: runs, canvasModel: 'v2' })
+  const daemon = createDaemonServer({ projectRoot: root, runManager: runs })
   await new Promise<void>((resolve, reject) => {
     daemon.server.once('error', reject)
     daemon.server.listen(0, '127.0.0.1', resolve)
@@ -385,7 +385,7 @@ test('restart reconciliation closes a plan orphaned after its durable Task delet
     registry: registry(transport),
     watchArtifacts: async () => ({ close: async () => undefined }),
   })
-  const first = createDaemonServer({ projectRoot: root, runManager: runs, canvasModel: 'v2' })
+  const first = createDaemonServer({ projectRoot: root, runManager: runs })
   let reopened: DaemonServer | null = null
 
   try {
@@ -417,7 +417,7 @@ test('restart reconciliation closes a plan orphaned after its durable Task delet
     assert.ok(await runs.getPendingProjectionPlan(planId))
     await first.close()
 
-    reopened = createDaemonServer({ projectRoot: root, canvasModel: 'v2' })
+    reopened = createDaemonServer({ projectRoot: root })
     await new Promise<void>((resolve, reject) => {
       reopened?.server.once('error', reject)
       reopened?.server.listen(0, '127.0.0.1', resolve)

@@ -473,7 +473,13 @@ export class RunManager {
 
   async listRunHistory(
     projectDirRequest = '.',
-    filter: { nodeId?: string; taskId?: string; canvasBranch?: string; limit?: number } = {},
+    filter: {
+      nodeId?: string
+      taskId?: string
+      taskOwned?: boolean
+      canvasBranch?: string
+      limit?: number
+    } = {},
   ): Promise<RunSummary[]> {
     const { store } = await this.#persistentRunStore(projectDirRequest)
     return store.list(filter)

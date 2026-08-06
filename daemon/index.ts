@@ -21,7 +21,7 @@ async function main(): Promise<void> {
     codexCommand: config.codexCommand,
     acpxCommand: config.acpxCommand,
   })
-  const daemon = createDaemonServer({ ...config, canvasModel: 'v2', registry })
+  const daemon = createDaemonServer({ ...config, registry })
 
   daemon.server.listen(config.port, config.host, () => {
     console.log(`GGAI daemon listening on http://${config.host}:${config.port}`)
