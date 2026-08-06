@@ -40,6 +40,7 @@ function sessionName(nodeId: string, agentId: string): string {
 
 export class AcpxTransport implements AgentProcessTransport {
   readonly kind = 'acpx' as const
+  readonly supportsInteractivePermissions = false
   readonly #command: string
   readonly #approvalFlag: '--approve-all' | '--approve-reads' | '--deny-all'
   readonly #pool = new ChildProcessPool()

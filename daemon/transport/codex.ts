@@ -15,6 +15,7 @@ export interface CodexTransportOptions {
 
 export class CodexTransport implements AgentProcessTransport {
   readonly kind = 'codex' as const
+  readonly supportsInteractivePermissions = false
   readonly #command: string
   readonly #sandbox: 'read-only' | 'workspace-write'
   readonly #pool = new ChildProcessPool()

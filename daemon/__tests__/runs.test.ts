@@ -184,6 +184,50 @@ test('branch leases cover pending resolution and deduplicate the same run id', a
   }
 })
 
+test('non-interactive transports never expose unresolvable permission prompts', async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'ggai-runs-permission-capability-'))
+  const root = await realpath(temporaryRoot)
+  const transport: AgentProcessTransport = {
+    kind: 'codex',
+    supportsInteractivePermissions: false,
+    async run(options) {
+      options.onEvent({
+        type: 'permission-request',
+        id: 'permission-unresolvable',
+        action: 'write',
+        detail: 'write generated output',
+      })
+      options.onEvent({ type: 'done', stopReason: 'error' })
+      return { sessionId: null }
+    },
+    async cancel() {
+      return false
+    },
+  }
+  const manager = new RunManager({ projectRoot: root, registry: registry(transport) })
+
+  try {
+    await manager.create(request('run-permission-capability', 'node-permission-capability'))
+    await waitFor(() => manager.get('run-permission-capability')?.status === 'error')
+
+    const subscription = manager.subscribe('run-permission-capability', () => undefined)
+    assert.ok(subscription)
+    const events = subscription.history
+      .filter((message) => message.event === 'agent-event')
+      .map((message) => message.data)
+
+    assert.equal(events.some((event) => event.type === 'permission-request'), false)
+    assert.ok(events.some((event) =>
+      event.type === 'error'
+      && event.message.includes('transport is non-interactive')))
+    assert.equal(manager.resolvePermission('permission-unresolvable'), null)
+    assert.notEqual(manager.get('run-permission-capability')?.status, 'awaiting-permission')
+  } finally {
+    await manager.close()
+    await rm(temporaryRoot, { recursive: true, force: true })
+  }
+})
+
 test('a multi-branch mutation reservation blocks new runs before source resolution', async () => {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'ggai-runs-mutation-lease-'))
   const root = await realpath(temporaryRoot)

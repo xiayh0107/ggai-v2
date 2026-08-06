@@ -23,6 +23,12 @@ export interface TransportRunResult {
 
 export interface AgentProcessTransport {
   readonly kind: AgentTransportKind
+  /**
+   * True only when this transport can pause a live run and accept a daemon
+   * permission decision. Omitted/false transports must never expose an
+   * actionable permission request to clients.
+   */
+  readonly supportsInteractivePermissions?: boolean
   run(options: TransportRunOptions): Promise<TransportRunResult>
   cancel(runId: string): Promise<boolean>
 }

@@ -910,8 +910,18 @@ export class RunManager {
       run.lastFileEvents.set(relative, now)
       event = { type: 'file-write', path: relative, nodeId: runTargetId(run.request) }
     } else if (event.type === 'permission-request') {
-      run.pendingPermissionIds.add(event.id)
-      run.summary.status = 'awaiting-permission'
+      if (run.transport.supportsInteractivePermissions !== true) {
+        const message = [
+          `Agent requested permission for ${event.action},`,
+          `but the ${run.transport.kind} transport is non-interactive.`,
+          'The request was not exposed as an actionable prompt.',
+        ].join(' ')
+        run.summary.error = message
+        event = { type: 'error', message }
+      } else {
+        run.pendingPermissionIds.add(event.id)
+        run.summary.status = 'awaiting-permission'
+      }
     } else if (event.type === 'done') {
       if (run.doneEventSent) return
       if (run.cancelRequested) event = { type: 'done', stopReason: 'cancelled' }
