@@ -8,7 +8,7 @@ import {
   type CanvasNodeV2,
   type CanvasTaskV2,
 } from './model'
-import { taskOutputFrameV2 } from './layout'
+import { TASK_CHROME_LAYOUT_V2, taskOutputFrameV2 } from './layout'
 
 export { TASK_OUTPUT_LAYOUT_V2, taskOutputFrameV2 } from './layout'
 
@@ -178,32 +178,78 @@ export function selectTaskEdgesV2(
   return document.edges.filter((edge) => edgeTouchesTask(edge, taskId, nodeIds))
 }
 
+/**
+ * Node-centric chrome: the Task title strip attaches directly above the
+ * top-most (then left-most) output Node instead of floating at the anchor.
+ */
+export const TASK_CHROME_GAP_V2 = 8
+
+export function taskPrimaryOutputFrameV2(
+  nodes: readonly CanvasNodeV2[],
+  ghosts: readonly CanvasGhostLayoutV2[] = [],
+): CanvasBoundsV2 | null {
+  const frames: CanvasBoundsV2[] = [
+    ...nodes.map(({ frame }) => frame),
+    ...ghosts.map(({ frame }) => frame),
+  ]
+  if (frames.length === 0) return null
+  return frames.reduce((primary, frame) =>
+    frame.y < primary.y || (frame.y === primary.y && frame.x < primary.x)
+      ? frame
+      : primary)
+}
+
+export function taskChromeFrameV2(
+  task: CanvasTaskV2,
+  nodes: readonly CanvasNodeV2[],
+  ghosts: readonly CanvasGhostLayoutV2[] = [],
+  presentation: CanvasTaskPresentationV2 = 'expanded',
+): CanvasBoundsV2 {
+  if (presentation === 'collapsed') {
+    return {
+      x: task.anchor.x,
+      y: task.anchor.y,
+      w: TASK_CHROME_LAYOUT_V2.collapsedWidth,
+      h: TASK_CHROME_LAYOUT_V2.collapsedHeight,
+    }
+  }
+  const primary = taskPrimaryOutputFrameV2(nodes, ghosts)
+  if (!primary) {
+    return {
+      x: task.anchor.x,
+      y: task.anchor.y,
+      w: TASK_CHROME_LAYOUT_V2.cardWidth,
+      h: presentation === 'compact'
+        ? TASK_CHROME_LAYOUT_V2.compactHeight
+        : TASK_CHROME_LAYOUT_V2.cardHeight,
+    }
+  }
+  return {
+    x: primary.x,
+    y: primary.y - TASK_CHROME_LAYOUT_V2.titleStripHeight - TASK_CHROME_GAP_V2,
+    w: primary.w,
+    h: TASK_CHROME_LAYOUT_V2.titleStripHeight,
+  }
+}
+
 export function selectTaskBoundsV2(
   task: CanvasTaskV2,
   nodes: readonly CanvasNodeV2[],
   ghosts: readonly CanvasGhostLayoutV2[] = [],
 ): CanvasBoundsV2 {
-  const base: CanvasBoundsV2 = {
-    x: task.anchor.x,
-    y: task.anchor.y,
-    w: 360,
-    h: 80,
-  }
+  const chrome = taskChromeFrameV2(task, nodes, ghosts)
   const children: CanvasBoundsV2[] = [
     ...nodes.map(({ frame }) => frame),
     ...ghosts.map(({ frame }) => frame),
   ]
-  if (children.length === 0) return base
-  const content = boundsOf(children)
-  const x = Math.min(base.x, content.x - 24)
-  const y = Math.min(base.y, content.y - 24)
-  const right = Math.max(base.x + base.w, content.x + content.w + 24)
-  const bottom = Math.max(base.y + base.h, content.y + content.h + 24)
+  if (children.length === 0) return chrome
+  const content = boundsOf([chrome, ...children])
+  const padding = 12
   return {
-    x,
-    y,
-    w: right - x,
-    h: bottom - y,
+    x: content.x - padding,
+    y: content.y - padding,
+    w: content.w + padding * 2,
+    h: content.h + padding * 2,
   }
 }
 

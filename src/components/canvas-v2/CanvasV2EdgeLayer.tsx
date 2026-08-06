@@ -19,6 +19,8 @@ import {
 
 export type CanvasV2EdgeEndpoint = CanvasEntityRef | { kind: 'collection'; id: string }
 
+const EDGE_LABEL_MIN_LENGTH_V2 = 140
+
 export type CanvasV2EdgePreview =
   | { kind: 'task' | 'node' | 'collection'; id: string; dx: number; dy: number }
   | { kind: 'resize'; id: string; frame: CanvasNodeV2['frame'] }
@@ -35,7 +37,6 @@ export default function CanvasV2EdgeLayer({
   taskViewsById,
   collectionViewsById,
   collapsedCollectionIds,
-  hoveredVisualKey,
   preview,
   nodeFrames,
   onDeleteEdges,
@@ -44,7 +45,6 @@ export default function CanvasV2EdgeLayer({
   taskViewsById: ReadonlyMap<string, CanvasTaskViewV2>
   collectionViewsById: ReadonlyMap<string, CanvasV2EdgeCollectionView>
   collapsedCollectionIds: ReadonlySet<string>
-  hoveredVisualKey: string | null
   preview: CanvasV2EdgePreview
   nodeFrames: ReadonlyMap<string, CanvasBoundsV2>
   onDeleteEdges: (edgeIds: string[]) => void
@@ -57,15 +57,14 @@ export default function CanvasV2EdgeLayer({
     const collectionId = ref.kind === 'task'
       ? taskById.get(ref.id)?.collectionId
       : node?.collectionId ?? (homeTaskId ? taskById.get(homeTaskId)?.collectionId : undefined)
-    if (collectionId
-      && collapsedCollectionIds.has(collectionId)
-      && hoveredVisualKey !== `collection:${collectionId}`) {
+    // Hidden members keep their edges aggregated to the collapsed container
+    // boundary; never draw floating edges toward invisible Nodes.
+    if (collectionId && collapsedCollectionIds.has(collectionId)) {
       return { kind: 'collection', id: collectionId }
     }
     if (homeTaskId) {
       const taskView = taskViewsById.get(homeTaskId)
-      if (taskView?.presentation === 'collapsed'
-        && hoveredVisualKey !== `task:${homeTaskId}`) {
+      if (taskView?.presentation === 'collapsed') {
         return { kind: 'task', id: homeTaskId }
       }
     }
@@ -149,12 +148,19 @@ export default function CanvasV2EdgeLayer({
         const fromRect = rectFor(bundle.from)
         const toRect = rectFor(bundle.to)
         if (!fromRect || !toRect) return null
-        const { from, to, path } = edgeCurvePathV2(fromRect, toRect)
-        if (Math.hypot(from.x - to.x, from.y - to.y) < 2) return null
+        const { from, to, path, reversed } = edgeCurvePathV2(fromRect, toRect)
+        const length = Math.hypot(from.x - to.x, from.y - to.y)
+        if (length < 2) return null
         const pathId = `canvas-v2-edge-${index}`
         const label = `${relationLabelV2(bundle.relation)}，上下文${contextRoleLabelV2(bundle.contextRole)}${
           bundle.edgeIds.length > 1 ? `，聚合 ${bundle.edgeIds.length} 条连接` : ''
         }`
+        const labelTransform = reversed
+          ? `rotate(180 ${(from.x + to.x) / 2} ${(from.y + to.y) / 2})`
+          : undefined
+        // Short edges (e.g. a Task strip to its own output) keep their
+        // semantics in the tooltip and aria-label instead of cramped text.
+        const showLabel = length >= EDGE_LABEL_MIN_LENGTH_V2
         return (
           <g
             key={`${pathId}:${bundle.edgeIds.join(':')}`}
@@ -186,12 +192,18 @@ export default function CanvasV2EdgeLayer({
               strokeDasharray={bundle.contextRole === 'none' ? '4 4' : undefined}
               vectorEffect="non-scaling-stroke"
             />
-            <text className="fill-[#526176] text-[9px]" dy="-5">
-              <textPath href={`#${pathId}`} startOffset="50%" textAnchor="middle">
-                {relationLabelV2(bundle.relation)} · {contextRoleLabelV2(bundle.contextRole)}
-                {bundle.edgeIds.length > 1 ? ` ×${bundle.edgeIds.length}` : ''}
-              </textPath>
-            </text>
+            {showLabel && (
+              <text
+                className="fill-[#526176] text-[9px]"
+                dy="-5"
+                transform={labelTransform}
+              >
+                <textPath href={`#${pathId}`} startOffset="50%" textAnchor="middle">
+                  {relationLabelV2(bundle.relation)} · {contextRoleLabelV2(bundle.contextRole)}
+                  {bundle.edgeIds.length > 1 ? ` ×${bundle.edgeIds.length}` : ''}
+                </textPath>
+              </text>
+            )}
           </g>
         )
       })}

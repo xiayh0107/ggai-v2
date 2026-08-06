@@ -101,6 +101,9 @@ export default function CanvasV2NodeCard({
             label={`${node.title || plugin.label}节点菜单`}
             items={[
               { id: 'duplicate', label: '复制节点' },
+              ...(node.homeTaskId
+                ? [{ id: 'detach-task', label: '移出任务' }]
+                : []),
               ...(node.collectionId
                 ? [{ id: 'remove-collection', label: '移出集合' }]
                 : []),

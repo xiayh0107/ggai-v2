@@ -10,10 +10,11 @@ import {
 import type { KeyboardEvent, PointerEvent } from 'react'
 import { TASK_CHROME_LAYOUT_V2 } from '@/canvas-v2/layout'
 import type { CanvasNodeV2, CanvasTaskV2 } from '@/canvas-v2/model'
-import type {
-  CanvasGhostLayoutV2,
-  CanvasTaskStatusV2,
-  CanvasTaskViewV2,
+import {
+  taskChromeFrameV2,
+  type CanvasGhostLayoutV2,
+  type CanvasTaskStatusV2,
+  type CanvasTaskViewV2,
 } from '@/canvas-v2/selectors'
 import { getPlugin } from '@/plugins/types'
 import CanvasV2EdgePort from './CanvasV2EdgePort'
@@ -41,7 +42,6 @@ export interface CanvasV2TaskGroupProps {
   activeConnectionKey?: string | null
   onTaskMenuAction?: (task: CanvasTaskV2, action: string) => void
   onNodeMenuAction?: (node: CanvasNodeV2, action: string) => void
-  onHoverChange?: (hovered: boolean) => void
   onEntityFocus: (key: string) => void
   onEntityKeyDown: (key: string, event: KeyboardEvent<HTMLButtonElement>) => void
   registerFocusable: (key: string, element: HTMLButtonElement | null) => void
@@ -66,7 +66,6 @@ export default function CanvasV2TaskGroup({
   activeConnectionKey,
   onTaskMenuAction,
   onNodeMenuAction,
-  onHoverChange,
   onEntityFocus,
   onEntityKeyDown,
   registerFocusable,
@@ -78,6 +77,7 @@ export default function CanvasV2TaskGroup({
   const outputRegionId = `canvas-v2-task-${task.id}-outputs`
   const taskKey = `task:${task.id}`
   const runPanelPosition = taskRunPanelPosition(view)
+  const chromeFrame = taskChromeFrameV2(view.task, view.nodes, view.ghosts, view.presentation)
   const taskHeader = (
     <TaskHeader
       task={task}
@@ -110,8 +110,6 @@ export default function CanvasV2TaskGroup({
       data-selected={selectedTask ? 'true' : 'false'}
       className="pointer-events-none absolute left-0 top-0"
       style={offset ? { transform: `translate(${offset.dx}px, ${offset.dy}px)` } : undefined}
-      onPointerEnter={() => onHoverChange?.(true)}
-      onPointerLeave={() => onHoverChange?.(false)}
     >
       {collapsed ? (
         <div
@@ -169,17 +167,17 @@ export default function CanvasV2TaskGroup({
             </div>
           )}
         </div>
-      ) : view.containerKind === 'title-strip' ? (
+      ) : (
         <div
           data-task-border={task.id}
-          className={`pointer-events-auto absolute flex items-center rounded-[16px] border bg-gg-node px-3 shadow-sm motion-reduce:transition-none ${
+          className={`pointer-events-auto absolute flex items-center gap-2 rounded-[16px] border bg-gg-node px-3 shadow-sm motion-reduce:transition-none ${
             selectedTask ? 'border-[1.5px] border-gg-select shadow-float' : 'border-gg-line'
           }`}
           style={{
-            left: task.anchor.x,
-            top: task.anchor.y,
-            width: TASK_CHROME_LAYOUT_V2.titleStripWidth,
-            height: TASK_CHROME_LAYOUT_V2.titleStripHeight,
+            left: chromeFrame.x,
+            top: chromeFrame.y,
+            width: chromeFrame.w,
+            height: chromeFrame.h,
           }}
           onPointerDown={(event) => {
             if ((event.target as HTMLElement).closest('button, a, [data-no-drag]')) return
@@ -187,29 +185,16 @@ export default function CanvasV2TaskGroup({
           }}
         >
           <div className="min-w-0 flex-1">{taskHeader}</div>
-        </div>
-      ) : (
-        <div
-          data-task-border={task.id}
-          className={`pointer-events-auto absolute rounded-[18px] border bg-white/45 shadow-sm motion-reduce:transition-none ${
-            selectedTask ? 'border-[1.5px] border-gg-select' : 'border-gg-line'
-          }`}
-          style={{
-            left: view.bounds.x,
-            top: view.bounds.y,
-            width: view.bounds.w,
-            height: view.bounds.h,
-          }}
-          onPointerDown={(event) => {
-            if ((event.target as HTMLElement).closest('button, a, [data-no-drag]')) return
-            onTaskDragStart(event, task)
-          }}
-        >
-          <div
-            className="absolute left-3 top-3 max-w-[420px] rounded-[11px] border border-gg-line bg-gg-node px-2.5 py-2 shadow-sm"
-          >
-            {taskHeader}
-          </div>
+          {view.containerKind === 'output-frame' && (
+            <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[10px] text-gg-muted">
+              {outputCount} 个产物
+              {view.artifactCount > 0 && (
+                <span className="flex items-center gap-1">
+                  <FileOutput size={11} aria-hidden="true" /> {view.artifactCount}
+                </span>
+              )}
+            </span>
+          )}
         </div>
       )}
 
@@ -256,17 +241,10 @@ export default function CanvasV2TaskGroup({
 }
 
 function taskRunPanelPosition(view: CanvasTaskViewV2): { x: number; y: number } {
-  const { task } = view
-  const chromeBottom = view.containerKind === 'task-card'
-    ? task.anchor.y + (view.presentation === 'compact'
-      ? TASK_CHROME_LAYOUT_V2.compactHeight
-      : TASK_CHROME_LAYOUT_V2.cardHeight)
-    : view.containerKind === 'title-strip'
-      ? task.anchor.y + TASK_CHROME_LAYOUT_V2.titleStripHeight
-      : view.bounds.y + view.bounds.h
+  const chrome = taskChromeFrameV2(view.task, view.nodes, view.ghosts, view.presentation)
   return {
-    x: view.containerKind === 'output-frame' ? view.bounds.x : task.anchor.x,
-    y: Math.max(chromeBottom, view.bounds.y + view.bounds.h) + 12,
+    x: chrome.x,
+    y: Math.max(chrome.y + chrome.h, view.bounds.y + view.bounds.h) + 12,
   }
 }
 

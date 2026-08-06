@@ -22,7 +22,6 @@ export default function CanvasV2CollectionFrame({
   onToggle,
   onPortActivate,
   onMenuAction,
-  onHoverChange,
   registerFocusable,
 }: {
   collection: CanvasCollectionV2
@@ -40,7 +39,6 @@ export default function CanvasV2CollectionFrame({
   onToggle: () => void
   onPortActivate: () => void
   onMenuAction: (action: string) => void
-  onHoverChange: (hovered: boolean) => void
   registerFocusable: (element: HTMLButtonElement | null) => void
 }) {
   const frame = collapsed ? {
@@ -65,8 +63,6 @@ export default function CanvasV2CollectionFrame({
       data-selected={selected ? 'true' : 'false'}
       className="pointer-events-none absolute left-0 top-0"
       style={offset ? { transform: `translate(${offset.dx}px, ${offset.dy}px)` } : undefined}
-      onPointerEnter={() => onHoverChange(true)}
-      onPointerLeave={() => onHoverChange(false)}
     >
       <div
         data-collection-border={collection.id}

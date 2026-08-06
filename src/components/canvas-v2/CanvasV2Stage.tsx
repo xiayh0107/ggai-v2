@@ -12,7 +12,9 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import {
@@ -41,6 +43,7 @@ import {
   type CanvasEdgeRelationV2,
   type CanvasEntityRef,
   type CanvasNodeV2,
+  type CanvasPointV2,
   type CanvasTaskV2,
 } from '@/canvas-v2/model'
 import type { CanvasV2SelectionTarget } from '@/canvas-v2/persistence'
@@ -53,6 +56,11 @@ import {
 } from '@/canvas-v2/selectors'
 import { useCanvasV2State, useCanvasV2Store } from '@/canvas-v2/hooks'
 import { useThrottledAnnouncement } from '@/canvas-v2/useThrottledAnnouncement'
+import {
+  getPlugin,
+  listCreatablePlugins,
+  subscribePlugins,
+} from '@/plugins/types'
 import CanvasV2CollectionFrame from './CanvasV2CollectionFrame'
 import CanvasV2ContextComposer from './CanvasV2ContextComposer'
 import CanvasV2EdgeLayer, {
@@ -135,6 +143,14 @@ interface UndoOfferV2 {
   pendingCommand?: CanvasCommandV2
 }
 
+interface CreateNodeMenuStateV2 {
+  sx: number
+  sy: number
+  world: CanvasPointV2
+  /** Toolbar-created nodes cascade so repeated creation never stacks exactly. */
+  cascade: boolean
+}
+
 export default function CanvasV2Stage() {
   const store = useCanvasV2Store()
   const state = useCanvasV2State()
@@ -154,13 +170,32 @@ export default function CanvasV2Stage() {
   const [confirmation, setConfirmation] = useState<ConfirmationV2 | null>(null)
   const [undoOffer, setUndoOffer] = useState<UndoOfferV2 | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  const [hoveredVisualKey, setHoveredVisualKey] = useState<string | null>(null)
+  const [createMenu, setCreateMenu] = useState<CreateNodeMenuStateV2 | null>(null)
   const [assignmentCollectionId, setAssignmentCollectionId] = useState('')
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     stateRef.current = state
   }, [state])
+
+  useSyncExternalStore(subscribePlugins, () => 0)
+
+  useEffect(() => {
+    if (!createMenu) return
+    const onDown = (event: PointerEvent) => {
+      const menu = stageRef.current?.querySelector('[data-create-node-menu]')
+      if (menu && !menu.contains(event.target as Node)) setCreateMenu(null)
+    }
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setCreateMenu(null)
+    }
+    window.addEventListener('pointerdown', onDown)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('pointerdown', onDown)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [createMenu])
 
   useEffect(() => {
     const taskIds = new Set(state.document.tasks.map((task) => task.id))
@@ -776,6 +811,15 @@ export default function CanvasV2Stage() {
         newNodeId,
         offset: { x: 48, y: 48 },
       }, '已复制节点', [{ type: 'DeleteNode', nodeId: newNodeId }])
+    } else if (action === 'detach-task' && node.homeTaskId) {
+      dispatchWithUndo({
+        type: 'DetachNodeFromTask',
+        nodeId: node.id,
+      }, '节点已移出任务', [{
+        type: 'AssignNodeToTask',
+        nodeId: node.id,
+        taskId: node.homeTaskId,
+      }])
     } else if (action === 'remove-collection' && node.collectionId) {
       dispatchWithUndo({
         type: 'RemoveFromCollection',
@@ -911,6 +955,70 @@ export default function CanvasV2Stage() {
     }, camera, viewport)
   }
 
+  const clampMenuPosition = (sx: number, sy: number) => {
+    const viewport = viewportRect()
+    return {
+      sx: Math.max(8, Math.min(sx, viewport.width - 216)),
+      sy: Math.max(8, Math.min(sy, viewport.height - 420)),
+    }
+  }
+  const openCreateMenuAtButton = (anchor: HTMLElement) => {
+    const stageRect = stageRef.current?.getBoundingClientRect()
+    const rect = anchor.getBoundingClientRect()
+    if (!stageRect) return
+    const { sx, sy } = clampMenuPosition(
+      rect.left - stageRect.left,
+      rect.bottom - stageRect.top + 6,
+    )
+    setCreateMenu((current) => current
+      ? null
+      : { sx, sy, world: contextComposerAnchor(), cascade: true })
+  }
+  const onStageDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement
+    if (target.closest('[data-v2-entity], [data-task-border], [data-collection-border], button, a, [data-no-drag]')) return
+    const stageRect = stageRef.current?.getBoundingClientRect()
+    if (!stageRect) return
+    const world = screenToWorldV2(event, stateRef.current.view.camera, viewportRect())
+    const { sx, sy } = clampMenuPosition(
+      event.clientX - stageRect.left,
+      event.clientY - stageRect.top,
+    )
+    setCreateMenu({ sx, sy, world, cascade: false })
+  }
+  const createNodeOfType = (pluginId: string) => {
+    const menu = createMenu
+    setCreateMenu(null)
+    const plugin = getPlugin(pluginId)
+    const world = menu?.world ?? contextComposerAnchor()
+    const cascade = menu?.cascade ? (stageDocument.nodes.length % 8) * 24 : 0
+    const maxZ = stageDocument.nodes.reduce((z, node) => Math.max(z, node.frame.z), 0)
+    const id = clientCanvasIdV2('node')
+    const node: CanvasNodeV2 = {
+      id,
+      type: plugin.id,
+      frame: {
+        x: Math.round(world.x - plugin.defaultWidth / 2) + cascade,
+        y: Math.round(world.y - 40) + cascade,
+        w: plugin.defaultWidth,
+        h: 256,
+        z: maxZ + 1,
+      },
+      title: plugin.label,
+      payload: plugin.initialPayload(),
+      artifactRefs: [],
+      origin: { kind: 'user' },
+    }
+    void store.dispatchCommand({ type: 'CreateNode', node }).then(() => {
+      store.setSelection([{ kind: 'node', id }])
+      setRovingKey(`node:${id}`)
+      showUndoOffer({
+        label: `已创建${plugin.label}节点`,
+        undoCommands: [{ type: 'DeleteNode', nodeId: id }],
+      })
+    }).catch((error: unknown) => setNotice(errorMessageV2(error)))
+  }
+
   return (
     <div
       ref={stageRef}
@@ -925,6 +1033,7 @@ export default function CanvasV2Stage() {
         backgroundPosition: `${state.view.camera.x}px ${state.view.camera.y}px`,
       }}
       onPointerDown={onStagePointerDown}
+      onDoubleClick={onStageDoubleClick}
     >
       <div
         data-testid="canvas-v2-world"
@@ -957,9 +1066,6 @@ export default function CanvasV2Stage() {
               id: view.collection.id,
             })}
             onMenuAction={(action) => onCollectionMenuAction(view.collection, action)}
-            onHoverChange={(hovered) => setHoveredVisualKey(hovered
-              ? `collection:${view.collection.id}`
-              : null)}
             registerFocusable={(element) => registerFocusable(
               `collection:${view.collection.id}`,
               element,
@@ -971,7 +1077,6 @@ export default function CanvasV2Stage() {
           taskViewsById={taskViewsById}
           collectionViewsById={collectionViewsById}
           collapsedCollectionIds={collapsedCollectionIds}
-          hoveredVisualKey={hoveredVisualKey}
           preview={preview}
           nodeFrames={nodeFrames}
           onDeleteEdges={(edgeIds) => {
@@ -1012,9 +1117,6 @@ export default function CanvasV2Stage() {
             activeConnectionKey={edgeDraft ? visualEntityKeyV2(edgeDraft) : null}
             onTaskMenuAction={onTaskMenuAction}
             onNodeMenuAction={onNodeMenuAction}
-            onHoverChange={(hovered) => setHoveredVisualKey(hovered
-              ? `task:${view.task.id}`
-              : null)}
             onEntityFocus={setRovingKey}
             onEntityKeyDown={onEntityKeyDown}
             registerFocusable={registerFocusable}
@@ -1051,14 +1153,55 @@ export default function CanvasV2Stage() {
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="rounded-[16px] border border-dashed border-gg-line bg-white/85 px-5 py-4 text-center">
             <ScanSearch size={20} className="mx-auto text-gg-muted" />
-            <p className="mt-2 text-[12px] font-medium text-gg-ink">当前分支还没有任务</p>
+            <p className="mt-2 text-[12px] font-medium text-gg-ink">当前分支还没有内容</p>
+            <p className="mt-1 text-[10.5px] text-gg-muted">双击空白创建节点，或在下方描述一个任务</p>
           </div>
+        </div>
+      )}
+
+      {createMenu && (
+        <div
+          data-create-node-menu
+          data-no-drag
+          role="menu"
+          aria-label="创建节点"
+          className="absolute z-50 w-[200px] rounded-[14px] border border-gg-line bg-gg-node p-1.5 shadow-float"
+          style={{ left: createMenu.sx, top: createMenu.sy }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <p className="px-2.5 pb-1.5 pt-2 text-[11px] font-medium text-gg-muted">创建节点</p>
+          {listCreatablePlugins().map((plugin) => {
+            const Icon = plugin.icon
+            return (
+              <button
+                key={plugin.id}
+                type="button"
+                role="menuitem"
+                onClick={() => createNodeOfType(plugin.id)}
+                className="flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-[7px] text-left text-[12.5px] text-gg-ink outline-none transition-colors hover:bg-gg-subtle focus-visible:ring-2 focus-visible:ring-gg-primary/35"
+              >
+                <Icon size={14} className="text-gg-muted" strokeWidth={1.8} aria-hidden="true" />
+                {plugin.label}
+              </button>
+            )
+          })}
         </div>
       )}
 
       <CanvasV2ContextComposer getAnchor={contextComposerAnchor} />
 
       <div className="absolute left-4 top-4 flex max-w-[calc(100%-2rem)] flex-wrap items-center gap-2">
+        <button
+          type="button"
+          data-testid="create-node-menu-button"
+          aria-haspopup="menu"
+          aria-expanded={createMenu !== null}
+          onClick={(event) => openCreateMenuAtButton(event.currentTarget)}
+          className="flex h-9 items-center gap-2 rounded-[10px] border border-gg-line bg-white px-3 text-[11px] font-medium text-gg-ink shadow-sm outline-none hover:bg-gg-subtle focus-visible:ring-2 focus-visible:ring-gg-primary/35"
+        >
+          <Plus size={14} aria-hidden="true" />
+          新建节点
+        </button>
         <button
           type="button"
           data-testid="save-selection-collection"

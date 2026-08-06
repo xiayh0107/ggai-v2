@@ -205,17 +205,20 @@ daemon 将 raw outcome、ArtifactManifest 与序列化插件 artifact claim 求�
 
 ### 创建与派生
 
+- 工具栏「新建节点」按钮或双击空白处打开创建菜单，按插件类型直接创建空内容 Node；创建后可立即在该 Node 上提交目标。
 - 空白画布提交目标直接创建零输出 Task，Agent 决定 output 类型。
 - 空内容 Node 提交目标时创建 Task，并可把该 Node 作为指定插件的 primary output slot。
 - 已有内容 Node 提交目标时创建派生 Task，并建立 `Node --source/modified--> Task`；原 Node 不变。
 - 多选顶层 Node/Task 或已保存 Collection 上提交目标时创建新 Task，并从每个顶层输入建立普通 source Edge。
+- Task 内部 Node 可通过节点菜单「移出任务」释放为顶层 Node（可撤销）。
 - Agent proposal 确认后创建零输出 draft Task 与依赖 Edge，不启动 Run。
 
 ### Task 容器
 
-- 零输出显示完整 Task 卡片；一个输出显示弱化的 Task 标题条；两个以上显示完整外框。
+- 零输出显示完整 Task 卡片；有输出时 Node 是视觉核心：Task 标题条弱化并直接附着在最上方输出 Node 的顶边，多输出时附产物计数，不再绘制包裹全部成员的巨大外框。
 - 折叠态显示 goal 摘要、artifact 数、缩略图与聚合状态；成员坐标保留但隐藏。
 - 首次物化采用确定性网格，primary 优先、supporting 次之，只布局新增 Node，不重排已移动成员。
+- 派生 Task 锚定在来源内容下方，第一个输出 Node 不与原 Node 重叠。
 - 裂解后不 fit view、不转移焦点；`prefers-reduced-motion` 禁用扇出动画。
 - 点 Node 选择内容，点 Task 标题或边框选择 Task；Shift 点击与框选永远只是临时多选。
 
@@ -223,7 +226,7 @@ daemon 将 raw outcome、ArtifactManifest 与序列化插件 artifact claim 求�
 
 - “保存为集合”显式持久化当前顶层多选；不自动保存框选。
 - Task 端口创建一条正式 Task Edge；Collection 端口是 UI macro，展开为成员的多条普通 Edge，Collection 本身不是 Edge 端点。
-- collapsed Task/Collection 的外部 Edge 聚合到容器边界；展开或 hover 显示分叉。
+- collapsed Task/Collection 的外部 Edge 始终聚合到容器边界；hover 不再向隐藏成员分叉，避免指向不可见 Node 的漂浮连线。反向（右到左、下到上）Edge 的文字标签自动转正，过短的 Edge 只在 tooltip 与 aria-label 中保留语义。
 - tool、search、warning 与 thinking 只属于 Run log，不创建语义 Edge。
 
 ### 删除、复制与恢复

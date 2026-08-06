@@ -35,4 +35,23 @@ describe('edgeCurvePathV2', () => {
     expect(result.axis).toBe('horizontal')
     expect(result.path).toBe('M 300 225 C 230 225, 170 25, 100 25')
   })
+
+  it('flags reversed edges so labels can stay upright', () => {
+    const forward = edgeCurvePathV2(
+      { x: 0, y: 0, w: 100, h: 50 },
+      { x: 300, y: 20, w: 100, h: 50 },
+    )
+    const rightToLeft = edgeCurvePathV2(
+      { x: 300, y: 20, w: 100, h: 50 },
+      { x: 0, y: 0, w: 100, h: 50 },
+    )
+    const bottomToTop = edgeCurvePathV2(
+      { x: 0, y: 300, w: 400, h: 50 },
+      { x: 20, y: 0, w: 40, h: 50 },
+    )
+
+    expect(forward.reversed).toBe(false)
+    expect(rightToLeft.reversed).toBe(true)
+    expect(bottomToTop.reversed).toBe(true)
+  })
 })

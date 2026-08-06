@@ -682,7 +682,7 @@ describe('Canvas V2 interactive stage', () => {
       .toBe('collection-1')
   })
 
-  it('renders a collection once, bundles collapsed external edges, fans out on hover, and moves once', async () => {
+  it('renders a collection once, keeps collapsed edges bundled on hover, and moves once', async () => {
     const { store, host } = await createSubject({
       collapsedCollectionIds: ['collection-1'],
     }, collectionFixture())
@@ -707,8 +707,10 @@ describe('Canvas V2 interactive stage', () => {
     })
     dispatch.mockClear()
 
+    // Hovering a collapsed collection must not fan edges out toward hidden members.
     await act(async () => dispatchPointer(collection, 'pointerover'))
-    expect(host.querySelectorAll('[data-edge-bundle-count="1"]')).toHaveLength(3)
+    expect(host.querySelectorAll('[data-edge-bundle-count="1"]')).toHaveLength(0)
+    expect(host.querySelectorAll('[data-edge-bundle-count="3"]')).toHaveLength(1)
     await act(async () => dispatchPointer(collection, 'pointerout'))
 
     const expand = required<HTMLButtonElement>(collection, '[aria-label="展开集合研究集合"]')
@@ -729,6 +731,75 @@ describe('Canvas V2 interactive stage', () => {
       collectionIds: ['collection-1'],
       dx: 60,
       dy: 25,
+    })
+  })
+
+  it('creates a typed node from the creation menu and detaches task nodes', async () => {
+    const { store, host } = await createSubject()
+    const dispatch = vi.spyOn(store, 'dispatchCommand')
+    const nodeCountBefore = store.getSnapshot().document.nodes.length
+
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      '[data-testid="create-node-menu-button"]',
+    ).click())
+    const menu = required<HTMLElement>(host, '[data-create-node-menu]')
+    const items = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    expect(items.length).toBeGreaterThan(0)
+    const firstLabel = items[0]!.textContent ?? ''
+    await act(async () => items[0]!.click())
+
+    await vi.waitFor(() => {
+      expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'CreateNode',
+        node: expect.objectContaining({
+          artifactRefs: [],
+          origin: { kind: 'user' },
+          title: firstLabel,
+        }),
+      }))
+    })
+    await vi.waitFor(() => {
+      expect(store.getSnapshot().document.nodes.length).toBe(nodeCountBefore + 1)
+    })
+    const created = store.getSnapshot().document.nodes.at(-1)!
+    expect(store.getSnapshot().view.selection).toEqual([{ kind: 'node', id: created.id }])
+    expect(host.querySelector('[data-create-node-menu]')).toBeNull()
+
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      '[data-testid="canvas-v2-undo"] button',
+    ).click())
+    await vi.waitFor(() => {
+      expect(store.getSnapshot().document.nodes.length).toBe(nodeCountBefore)
+    })
+
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      '[aria-label="说明文字节点菜单"]',
+    ).click())
+    const detach = [...required<HTMLElement>(host, '[role="menu"]')
+      .querySelectorAll('button')]
+      .find((button) => button.textContent === '移出任务')
+    if (!detach) throw new Error('Missing detach node action')
+    await act(async () => detach.click())
+    await vi.waitFor(() => {
+      expect(dispatch).toHaveBeenCalledWith({
+        type: 'DetachNodeFromTask',
+        nodeId: 'node-single',
+      })
+    })
+    await vi.waitFor(() => {
+      expect(store.getSnapshot().document.nodes.find((node) => node.id === 'node-single')
+        ?.homeTaskId).toBeUndefined()
+    })
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      '[data-testid="canvas-v2-undo"] button',
+    ).click())
+    await vi.waitFor(() => {
+      expect(store.getSnapshot().document.nodes.find((node) => node.id === 'node-single')
+        ?.homeTaskId).toBe('task-single')
     })
   })
 

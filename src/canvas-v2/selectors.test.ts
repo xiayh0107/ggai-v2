@@ -11,7 +11,9 @@ import {
   selectCollectionMembersV2,
   selectContextEdgesV2,
   selectProposalReviewV2,
+  selectTaskBoundsV2,
   selectTaskViewV2,
+  taskChromeFrameV2,
   taskOutputFrameV2,
   type CanvasTaskRuntimeV2,
 } from './selectors'
@@ -122,7 +124,7 @@ describe('Canvas V2 task selectors', () => {
       progress: 0,
       frame: { x: 148, y: 216, w: 400, h: 256 },
     }])
-    expect(view?.bounds).toEqual({ x: 100, y: 120, w: 472, h: 376 })
+    expect(view?.bounds).toEqual({ x: 136, y: 132, w: 424, h: 352 })
     expect(view?.accessibility.label).toContain('1 个产物节点')
     expect(view?.accessibility.liveMessage).toBe('Task task-1：生成中')
     expect(document).toEqual(before)
@@ -165,6 +167,39 @@ describe('Canvas V2 task selectors', () => {
       deriveTaskContainerKindV2(1),
       deriveTaskContainerKindV2(2),
     ]).toEqual(['task-card', 'title-strip', 'output-frame'])
+  })
+
+  it('attaches the task chrome above the primary output node', () => {
+    const subject = task('task-1', 20, 30)
+    const nodes = [
+      node('later', 500, 300),
+      node('primary', 148, 216),
+    ]
+
+    expect(taskChromeFrameV2(subject, nodes)).toEqual({
+      x: 148,
+      y: 216 - 64 - 8,
+      w: 400,
+      h: 64,
+    })
+    expect(taskChromeFrameV2(subject, [])).toEqual({
+      x: 20,
+      y: 30,
+      w: 360,
+      h: 156,
+    })
+    expect(taskChromeFrameV2(subject, nodes, [], 'collapsed')).toEqual({
+      x: 20,
+      y: 30,
+      w: 360,
+      h: 72,
+    })
+    expect(selectTaskBoundsV2(subject, nodes)).toEqual({
+      x: 136,
+      y: 132,
+      w: 776,
+      h: 436,
+    })
   })
 })
 

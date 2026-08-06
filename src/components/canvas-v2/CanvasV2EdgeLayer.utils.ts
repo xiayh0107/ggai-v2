@@ -1,4 +1,4 @@
-import { COLLECTION_CHROME_LAYOUT_V2, TASK_CHROME_LAYOUT_V2 } from '@/canvas-v2/layout'
+import { COLLECTION_CHROME_LAYOUT_V2 } from '@/canvas-v2/layout'
 import {
   entityKeyV2,
   type CanvasCollectionV2,
@@ -6,7 +6,11 @@ import {
   type CanvasEdgeRelationV2,
   type CanvasEdgeV2,
 } from '@/canvas-v2/model'
-import type { CanvasBoundsV2, CanvasTaskViewV2 } from '@/canvas-v2/selectors'
+import {
+  taskChromeFrameV2,
+  type CanvasBoundsV2,
+  type CanvasTaskViewV2,
+} from '@/canvas-v2/selectors'
 import type { CanvasV2EdgeEndpoint } from './CanvasV2EdgeLayer'
 
 export const EDGE_RELATIONS_V2: CanvasEdgeRelationV2[] = [
@@ -52,31 +56,12 @@ export function collapsedCollectionBoundsV2(
 }
 
 export function taskInteractionBoundsV2(view: CanvasTaskViewV2): CanvasBoundsV2 {
-  if (view.presentation === 'collapsed') {
-    return {
-      x: view.task.anchor.x,
-      y: view.task.anchor.y,
-      w: TASK_CHROME_LAYOUT_V2.collapsedWidth,
-      h: TASK_CHROME_LAYOUT_V2.collapsedHeight,
-    }
+  if (view.containerKind === 'task-card' || view.presentation === 'collapsed') {
+    return taskChromeFrameV2(view.task, view.nodes, view.ghosts, view.presentation)
   }
-  if (view.containerKind === 'output-frame') return view.bounds
-  if (view.containerKind === 'title-strip') {
-    return {
-      x: view.task.anchor.x,
-      y: view.task.anchor.y,
-      w: TASK_CHROME_LAYOUT_V2.titleStripWidth,
-      h: TASK_CHROME_LAYOUT_V2.titleStripHeight,
-    }
-  }
-  return {
-    x: view.task.anchor.x,
-    y: view.task.anchor.y,
-    w: TASK_CHROME_LAYOUT_V2.cardWidth,
-    h: view.presentation === 'compact'
-      ? TASK_CHROME_LAYOUT_V2.compactHeight
-      : TASK_CHROME_LAYOUT_V2.cardHeight,
-  }
+  // Node-centric: the interactive Task region is the title strip attached
+  // above its primary output Node, not a giant frame around every output.
+  return taskChromeFrameV2(view.task, view.nodes, view.ghosts)
 }
 
 export function visualEntityKeyV2(ref: CanvasV2EdgeEndpoint): string {
@@ -118,7 +103,8 @@ export function edgeCurvePathV2(fromBounds: CanvasBoundsV2, toBounds: CanvasBoun
   const path = axis === 'horizontal'
     ? `M ${from.x} ${from.y} C ${from.x + curve * direction} ${from.y}, ${to.x - curve * direction} ${to.y}, ${to.x} ${to.y}`
     : `M ${from.x} ${from.y} C ${from.x} ${from.y + curve * direction}, ${to.x} ${to.y - curve * direction}, ${to.x} ${to.y}`
-  return { from, to, axis, path }
+  const reversed = axis === 'horizontal' ? to.x < from.x : to.y < from.y
+  return { from, to, axis, path, reversed }
 }
 
 function edgeBoundaryPointsV2(from: CanvasBoundsV2, to: CanvasBoundsV2) {
