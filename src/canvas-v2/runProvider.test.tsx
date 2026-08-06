@@ -67,7 +67,10 @@ function canvasDocument(receiptPlanId?: string): CanvasDocumentV2 {
   return document
 }
 
-function makeStore(document = canvasDocument()): CanvasV2Store {
+function makeStore(
+  document = canvasDocument(),
+  flushMode: 'legacy' | 'conflict' = 'legacy',
+): CanvasV2Store {
   return new CanvasV2Store({
     daemonBaseUrl: 'http://127.0.0.1:7380',
     scope: { projectDir: '/workspace/project', branch: 'main' },
@@ -82,7 +85,24 @@ function makeStore(document = canvasDocument()): CanvasV2Store {
         lastMutationId: null,
         document,
       }),
-      flushOutbox: async () => ({ status: 'flushed', acknowledged: 0, envelope: null }),
+      flushOutbox: async (_scope, outbox) => {
+        if (flushMode === 'conflict') {
+          const entries = await outbox.list({
+            daemonBaseUrl: 'http://127.0.0.1:7380',
+            projectDir: '/workspace/project',
+            branch: 'main',
+          })
+          return {
+            status: 'conflict',
+            reason: 'revision',
+            mutationId: entries[0]?.mutationId ?? 'missing-mutation',
+            currentRevision: 5,
+            code: 'revision_conflict',
+            message: 'Canvas revision changed before acknowledgement',
+          }
+        }
+        return { status: 'flushed', acknowledged: 0, envelope: null }
+      },
     },
   })
 }
@@ -147,10 +167,10 @@ function pendingHandle(taskId: string, runId: string): CanvasV2TaskRunHandle {
   }
 }
 
-function projectionPlan() {
+function projectionPlan(identity = 'a') {
   return {
     schemaVersion: 2 as const,
-    planId: `plan_${'a'.repeat(64)}`,
+    planId: `plan_${identity.repeat(64)}`,
     runId: 'run-recovered',
     taskId: 'task-1',
     status: 'complete' as const,
@@ -273,6 +293,34 @@ describe('Canvas V2 Task Run provider', () => {
     expect(controller.runTaskMock).not.toHaveBeenCalled()
   })
 
+  it('replaces an older in-memory review when the same Task finishes a newer Run', async () => {
+    const controller = new FakeController()
+    await renderHarness({ controller })
+    const first = projectionPlan('a')
+    const latest = {
+      ...projectionPlan('e'),
+      runId: 'run-latest',
+    }
+
+    act(() => {
+      controller.callbacks?.onProjectionPlan({
+        taskId: 'task-1',
+        runId: first.runId,
+        plan: first,
+        suggestedActions: [],
+      })
+      controller.callbacks?.onProjectionPlan({
+        taskId: 'task-1',
+        runId: latest.runId,
+        plan: latest,
+        suggestedActions: [],
+      })
+    })
+
+    expect(container?.querySelector('output')?.dataset.reviews).toBe('1')
+    expect(container?.querySelector('output')?.dataset.plan).toBe(latest.planId)
+  })
+
   it('tracks permission requests and clears them only after daemon resolution succeeds', async () => {
     const daemon = daemonClient()
     const { controller } = await renderHarness({ daemon })
@@ -379,6 +427,37 @@ describe('Canvas V2 Task Run provider', () => {
       expect(exposedLifecycle?.clearSettledProjectionReview(plan.planId)).toBe(true)
     })
     expect(container?.querySelector('output')?.dataset.reviews).toBe('0')
+  })
+
+  it('does not clear a review from an optimistic receipt before daemon acknowledgement', async () => {
+    const plan = projectionPlan()
+    const controller = new FakeController()
+    controller.recoverAllMock.mockImplementationOnce(async () => {
+      controller.callbacks?.onProjectionPlan({
+        taskId: 'task-1',
+        runId: 'run-recovered',
+        plan,
+        suggestedActions: [],
+      })
+      return []
+    })
+    const { store } = await renderHarness({
+      controller,
+      store: makeStore(canvasDocument(), 'conflict'),
+    })
+    await act(async () => {
+      await vi.waitFor(() => expect(container?.querySelector('output')?.dataset.reviews).toBe('1'))
+      await store.dispatchCommand({ type: 'DismissPlan', plan })
+    })
+
+    expect(store.getSnapshot().document.receipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'plan-dismissal', planId: plan.planId }),
+    ]))
+    expect(store.getSnapshot().envelope?.document.receipts).toEqual([])
+    act(() => {
+      expect(exposedLifecycle?.clearSettledProjectionReview(plan.planId)).toBe(false)
+    })
+    expect(container?.querySelector('output')?.dataset.reviews).toBe('1')
   })
 
   it('exposes bounded controller logs without copying them into Provider state', async () => {

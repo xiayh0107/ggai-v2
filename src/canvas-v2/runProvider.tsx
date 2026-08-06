@@ -212,9 +212,9 @@ export class CanvasV2TaskRunLifecycle {
 
   /** Removes review UI only after a durable Canvas receipt settled that plan. */
   clearSettledProjectionReview(planId: string): boolean {
-    const settled = this.#store.getSnapshot().document.receipts.some((receipt) =>
+    const settled = this.#store.getSnapshot().envelope?.document.receipts.some((receipt) =>
       receipt.planId === planId
-      && (receipt.kind === 'proposal-acceptance' || receipt.kind === 'plan-dismissal'))
+      && (receipt.kind === 'proposal-acceptance' || receipt.kind === 'plan-dismissal')) ?? false
     if (!settled) return false
     const projectionReviews = this.#snapshot.projectionReviews.filter((review) =>
       review.planId !== planId)
@@ -284,7 +284,8 @@ export class CanvasV2TaskRunLifecycle {
     if (current) return
     this.#setSnapshot({
       ...this.#snapshot,
-      projectionReviews: [...this.#snapshot.projectionReviews, {
+      projectionReviews: [...this.#snapshot.projectionReviews.filter((review) =>
+        review.taskId !== notice.taskId), {
         planId: notice.plan.planId,
         taskId: notice.taskId,
         runId: notice.runId,

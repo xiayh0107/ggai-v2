@@ -19,6 +19,7 @@ import { getPlugin } from '@/plugins/types'
 import CanvasV2EdgePort from './CanvasV2EdgePort'
 import CanvasV2EntityMenu from './CanvasV2EntityMenu'
 import CanvasV2NodeCard from './CanvasV2NodeCard'
+import CanvasV2TaskProposalReview from './CanvasV2TaskProposalReview'
 import CanvasV2TaskRunPanel from './CanvasV2TaskRunPanel'
 
 export interface CanvasV2TaskGroupProps {
@@ -244,7 +245,10 @@ export default function CanvasV2TaskGroup({
           className="pointer-events-auto absolute z-30"
           style={{ left: runPanelPosition.x, top: runPanelPosition.y }}
         >
-          <CanvasV2TaskRunPanel task={task} />
+          <div className="space-y-3">
+            <CanvasV2TaskRunPanel task={task} />
+            <CanvasV2TaskProposalReview task={task} />
+          </div>
         </div>
       )}
     </section>
