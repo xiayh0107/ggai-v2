@@ -893,6 +893,13 @@ async function route(
         409,
       )
     }
+    if (context.canvasModel === 'v2') {
+      throw new ProtocolError(
+        'Canvas V2 run logs are durable execution records and cannot be deleted independently',
+        'run_log_delete_unsupported',
+        405,
+      )
+    }
     const deleted = await context.runs.deleteRunLog(runId, projectDir)
     if (!deleted) throw new ProtocolError('run not found', 'run_not_found', 404)
     writeJson(response, 200, { runId, deleted: true })

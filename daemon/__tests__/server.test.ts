@@ -21,7 +21,10 @@ interface TestDaemon {
   close(): Promise<void>
 }
 
-async function startTestDaemon(allowedOrigins: string[] = []): Promise<TestDaemon> {
+async function startTestDaemon(
+  allowedOrigins: string[] = [],
+  canvasModel: 'v1' | 'v2' = 'v2',
+): Promise<TestDaemon> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-daemon-'))
   const fakeCodex = path.join(root, 'fake-codex.mjs')
   await writeFile(fakeCodex, FAKE_CODEX, 'utf8')
@@ -35,7 +38,7 @@ async function startTestDaemon(allowedOrigins: string[] = []): Promise<TestDaemo
     projectRoot: root,
     registry,
     allowedOrigins,
-    canvasModel: 'v2',
+    canvasModel,
     allowCanvasModelMixingForTests: true,
   })
   await new Promise<void>((resolve, reject) => {
@@ -519,6 +522,8 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
           artifactId: string
           relativePath: string
           mediaType: string
+          size: number
+          contentDigest: string
         }>
       }
       projectionPlan: {
@@ -553,6 +558,46 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
     assert.deepEqual(JSON.parse(pendingPlanText), {
       plan: close.projectionPlan,
       suggestedActions: close.suggestedActions,
+    })
+
+    const rejectedLogDeletion = await fetch(
+      `${fixture.baseUrl}/runs/${intent.runId}/log?projectDir=.`,
+      { method: 'DELETE' },
+    )
+    assert.equal(rejectedLogDeletion.status, 405)
+    assert.deepEqual(await rejectedLogDeletion.json(), {
+      error: {
+        code: 'run_log_delete_unsupported',
+        message: 'Canvas V2 run logs are durable execution records and cannot be deleted independently',
+      },
+    })
+    const retainedLog = await fetch(
+      `${fixture.baseUrl}/runs/${intent.runId}/log?projectDir=.`,
+    )
+    assert.equal(retainedLog.status, 200)
+    const retainedLogPage = await retainedLog.json() as typeof logPage
+    const retainedClose = retainedLogPage?.entries.find((entry) => entry.event === 'close')?.data
+    assert.deepEqual(retainedClose, close)
+    const retainedPlanResponse = await fetch(
+      `${fixture.baseUrl}/projection-plans/${close.projectionPlan.planId}?projectDir=.&branch=main`,
+    )
+    assert.equal(retainedPlanResponse.status, 200)
+    assert.deepEqual(await retainedPlanResponse.json(), {
+      plan: close.projectionPlan,
+      suggestedActions: close.suggestedActions,
+    })
+    const retainedArtifact = close.artifactManifest.entries[0]!
+    const retainedManifestEntryResponse = await fetch(
+      `${fixture.baseUrl}/runs/${intent.runId}/artifacts/${retainedArtifact.artifactId}/metadata`,
+    )
+    assert.equal(retainedManifestEntryResponse.status, 200)
+    assert.deepEqual(await retainedManifestEntryResponse.json(), {
+      schemaVersion: 2,
+      runId: intent.runId,
+      artifactId: retainedArtifact.artifactId,
+      mediaType: retainedArtifact.mediaType,
+      size: retainedArtifact.size,
+      contentDigest: retainedArtifact.contentDigest,
     })
     let materializedCanvas: {
       revision: number
@@ -1561,8 +1606,8 @@ test('a CLI that hangs after done remains cancellable without rewriting its term
   }
 })
 
-test('persistent run history endpoints paginate, filter, fall back, and delete explicitly', async () => {
-  const fixture = await startTestDaemon()
+test('V1 persistent run history endpoints paginate, filter, fall back, and delete explicitly', async () => {
+  const fixture = await startTestDaemon([], 'v1')
   try {
     const store = new RunLogStore(fixture.root)
     const summary: RunSummary = {
