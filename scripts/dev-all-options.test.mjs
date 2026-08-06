@@ -4,7 +4,6 @@ import test from 'node:test'
 import {
   parseViteServerOptions,
   resolveCodexCommand,
-  resolveCanvasModelEnvironment,
   viteBrowserOrigins,
 } from './dev-all-options.mjs'
 
@@ -62,65 +61,6 @@ test('rejects invalid Vite ports before starting either process', () => {
   for (const args of [['--port'], ['--port', 'nope'], ['--port=0'], ['--port=65536']]) {
     assert.throws(() => parseViteServerOptions(args), /Vite --port/u)
   }
-})
-
-test('defaults both development child processes to Canvas V2', () => {
-  assert.deepEqual(resolveCanvasModelEnvironment({}), {
-    model: 'v2',
-    environment: {
-      GGAI_CANVAS_MODEL_V2: '1',
-      VITE_GGAI_CANVAS_MODEL_V2: '1',
-    },
-  })
-  assert.deepEqual(resolveCanvasModelEnvironment({
-    GGAI_CANVAS_MODEL_V2: '  ',
-    VITE_GGAI_CANVAS_MODEL_V2: '',
-  }), {
-    model: 'v2',
-    environment: {
-      GGAI_CANVAS_MODEL_V2: '1',
-      VITE_GGAI_CANVAS_MODEL_V2: '1',
-    },
-  })
-})
-
-test('mirrors an explicit model for diagnostic development launches', () => {
-  assert.deepEqual(resolveCanvasModelEnvironment({
-    GGAI_CANVAS_MODEL_V2: 'true',
-    KEEP_ME: 'yes',
-  }), {
-    model: 'v2',
-    environment: {
-      GGAI_CANVAS_MODEL_V2: '1',
-      VITE_GGAI_CANVAS_MODEL_V2: '1',
-      KEEP_ME: 'yes',
-    },
-  })
-  assert.equal(
-    resolveCanvasModelEnvironment({ VITE_GGAI_CANVAS_MODEL_V2: '1' }).model,
-    'v2',
-  )
-  assert.deepEqual(resolveCanvasModelEnvironment({ GGAI_CANVAS_MODEL_V2: 'false' }), {
-    model: 'v1',
-    environment: {
-      GGAI_CANVAS_MODEL_V2: '0',
-      VITE_GGAI_CANVAS_MODEL_V2: '0',
-    },
-  })
-})
-
-test('rejects invalid or contradictory Canvas model flags before startup', () => {
-  assert.throws(
-    () => resolveCanvasModelEnvironment({ GGAI_CANVAS_MODEL_V2: 'sometimes' }),
-    /GGAI_CANVAS_MODEL_V2 must/u,
-  )
-  assert.throws(
-    () => resolveCanvasModelEnvironment({
-      GGAI_CANVAS_MODEL_V2: '1',
-      VITE_GGAI_CANVAS_MODEL_V2: '0',
-    }),
-    /must select the same Canvas model/u,
-  )
 })
 
 test('an explicit Codex command always wins', () => {

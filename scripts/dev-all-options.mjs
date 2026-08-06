@@ -4,49 +4,6 @@ import path from 'node:path'
 export const DEFAULT_VITE_HOST = 'localhost'
 export const DEFAULT_VITE_PORT = 3000
 
-const ENABLED_CANVAS_MODEL_VALUES = new Set(['1', 'true'])
-const DISABLED_CANVAS_MODEL_VALUES = new Set(['0', 'false'])
-
-function parseCanvasModelFlag(value, name) {
-  if (value === undefined) return null
-  const normalized = String(value).trim().toLowerCase()
-  if (!normalized) return null
-  if (ENABLED_CANVAS_MODEL_VALUES.has(normalized)) return 'v2'
-  if (DISABLED_CANVAS_MODEL_VALUES.has(normalized)) return 'v1'
-  throw new Error(`${name} must be 0, 1, false, or true`)
-}
-
-/**
- * Resolve one Canvas model for both child processes. A single configured flag
- * is mirrored to the other side; contradictory flags fail before either
- * process starts, so local development cannot accidentally mix schemas.
- */
-export function resolveCanvasModelEnvironment(environment = {}) {
-  const daemon = parseCanvasModelFlag(
-    environment.GGAI_CANVAS_MODEL_V2,
-    'GGAI_CANVAS_MODEL_V2',
-  )
-  const frontend = parseCanvasModelFlag(
-    environment.VITE_GGAI_CANVAS_MODEL_V2,
-    'VITE_GGAI_CANVAS_MODEL_V2',
-  )
-  if (daemon && frontend && daemon !== frontend) {
-    throw new Error(
-      'GGAI_CANVAS_MODEL_V2 and VITE_GGAI_CANVAS_MODEL_V2 must select the same Canvas model',
-    )
-  }
-  const model = daemon ?? frontend ?? 'v2'
-  const flag = model === 'v2' ? '1' : '0'
-  return {
-    model,
-    environment: {
-      ...environment,
-      GGAI_CANVAS_MODEL_V2: flag,
-      VITE_GGAI_CANVAS_MODEL_V2: flag,
-    },
-  }
-}
-
 function parsePort(value) {
   if (!/^\d+$/u.test(value ?? '')) {
     throw new Error(`Vite --port must be an integer from 1 to 65535, received ${value || '(empty)'}`)

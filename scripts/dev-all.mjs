@@ -16,7 +16,6 @@ import { spawn } from 'node:child_process'
 import process from 'node:process'
 import chokidar from 'chokidar'
 import {
-  resolveCanvasModelEnvironment,
   resolveCodexCommand,
   viteBrowserOrigins,
 } from './dev-all-options.mjs'
@@ -29,13 +28,8 @@ const codexCommand = resolveCodexCommand({
   pathValue: process.env.PATH,
 })
 let allowedOrigins
-let canvasModel
-let childEnvironment
 try {
   allowedOrigins = viteBrowserOrigins(viteArgs)
-  const resolvedCanvasModel = resolveCanvasModelEnvironment(process.env)
-  canvasModel = resolvedCanvasModel.model
-  childEnvironment = resolvedCanvasModel.environment
 } catch (error) {
   process.stderr.write(`[dev] 参数错误：${error instanceof Error ? error.message : String(error)}\n`)
   process.exit(1)
@@ -90,10 +84,9 @@ function startDaemon() {
     'dist-daemon/daemon/index.js',
     '--project-root', process.cwd(),
     '--codex-command', codexCommand,
-    '--canvas-model', canvasModel,
   ]
   for (const origin of allowedOrigins) daemonArgs.push('--allow-origin', origin)
-  daemonChild = spawn('node', daemonArgs, { cwd: process.cwd(), env: childEnvironment })
+  daemonChild = spawn('node', daemonArgs, { cwd: process.cwd(), env: process.env })
   pipePrefix(daemonChild, '[daemon]')
   daemonChild.on('exit', (code, signal) => {
     if (shuttingDown || restarting) return
@@ -153,7 +146,7 @@ async function restartDaemon() {
 function startVite() {
   // 直接拉起 vite 入口而不是 npm shim，保证 Ctrl+C 时信号能干净地结束进程树
   viteChild = spawn('node', ['node_modules/vite/bin/vite.js', ...viteArgs], {
-    cwd: process.cwd(), env: childEnvironment,
+    cwd: process.cwd(), env: process.env,
   })
   pipePrefix(viteChild, '[vite]  ')
   viteChild.on('exit', (code, signal) => {
@@ -193,7 +186,6 @@ process.on('SIGTERM', () => shutdown(0, 'SIGTERM'))
 process.stdout.write('[dev] 构建 daemon…\n')
 if (await buildDaemon()) {
   process.stdout.write(`[dev] codex: ${codexCommand}\n`)
-  process.stdout.write(`[dev] canvas model: ${canvasModel}\n`)
   process.stdout.write(`[dev] browser origins: ${allowedOrigins.join(', ')}\n`)
   startDaemon()
   startVite()
