@@ -253,13 +253,36 @@ async function route(
       }))
       return
     }
-    writeJson(response, 200, await context.canvasV2.commit(
+    const command = parsed.command as OrdinaryCanvasCommandV2
+    const commit = () => context.canvasV2.commit(
       projectDir,
       parsed.branch,
       parsed.baseRevision,
       parsed.mutationId,
-      parsed.command as OrdinaryCanvasCommandV2,
-    ))
+      command,
+    )
+    if (!isTaskDestructiveCanvasCommandV2(command)) {
+      writeJson(response, 200, await commit())
+      return
+    }
+
+    const envelope = await context.canvasV2.get(projectDir, parsed.branch)
+    if (envelope.revision !== parsed.baseRevision) {
+      // Preserve command-store replay and conflict semantics. A command that
+      // cannot mutate this revision does not need a Task mutation lease.
+      writeJson(response, 200, await commit())
+      return
+    }
+    const taskIds = destructiveTaskIdsV2(command, envelope.document)
+    const result = taskIds.length === 0
+      ? await commit()
+      : await context.runs.withIdleTasks(
+          projectDir,
+          parsed.branch,
+          taskIds,
+          commit,
+        )
+    writeJson(response, 200, result)
     return
   }
 
@@ -501,6 +524,20 @@ async function route(
         canvasDocument: structuredClone(envelope.document),
         resolvedArtifactAttachments,
         automationMode: 'confirm',
+      }, {
+        validateReserved: async () => {
+          const current = await context.canvasV2.get(projectDir, intent.canvasBranch)
+          if (current.revision !== intent.baseRevision) {
+            throw new CanvasRevisionConflictV2Error(current.revision)
+          }
+          if (!current.document.tasks.some((task) => task.id === intent.taskId)) {
+            throw new ProtocolError(
+              'task does not exist at the requested revision',
+              'task_not_found',
+              404,
+            )
+          }
+        },
       })
       writeJson(response, 202, { runId: run.runId })
       return
@@ -1291,4 +1328,28 @@ function isTrustedPlanWireCommand(
   return command.type === 'MaterializeProjectionPlan'
     || command.type === 'AcceptTaskProposals'
     || command.type === 'DismissPlan'
+}
+
+function isTaskDestructiveCanvasCommandV2(
+  command: OrdinaryCanvasCommandV2,
+): command is Extract<OrdinaryCanvasCommandV2, {
+  type: 'DeleteTask' | 'DeleteTaskAndViews' | 'DeleteCollectionAndContents'
+}> {
+  return command.type === 'DeleteTask'
+    || command.type === 'DeleteTaskAndViews'
+    || command.type === 'DeleteCollectionAndContents'
+}
+
+function destructiveTaskIdsV2(
+  command: Extract<OrdinaryCanvasCommandV2, {
+    type: 'DeleteTask' | 'DeleteTaskAndViews' | 'DeleteCollectionAndContents'
+  }>,
+  document: CanvasDocumentV2,
+): string[] {
+  if (command.type === 'DeleteTask' || command.type === 'DeleteTaskAndViews') {
+    return [command.taskId]
+  }
+  return document.tasks
+    .filter((task) => task.collectionId === command.collectionId)
+    .map((task) => task.id)
 }

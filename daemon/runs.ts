@@ -44,6 +44,7 @@ import {
   runTargetId,
   type RunExecutionRequest,
 } from './taskRunTypesV2.js'
+import { parseTaskIdV2 } from './taskRunProtocolV2.js'
 import type { AgentProcessTransport } from './transport/types.js'
 import { watchArtifacts, type ArtifactWatcher } from './watcher.js'
 import { BUILTIN_PROJECTION_PLUGIN_CONTRACTS_V2 } from './projectionPluginsV2.js'
@@ -139,6 +140,15 @@ export interface RunProjectionPlanRecordV2 extends ProjectionSettlementV2 {
   state: ProjectionPlanLifecycleV2
 }
 
+export interface RunCreationOptions {
+  /**
+   * Revalidates request-scoped durable state after the Task Run lease is held.
+   * This closes the gap between an HTTP handler reading a Canvas revision and
+   * the Run becoming visible to destructive Task mutations.
+   */
+  validateReserved?: () => Promise<void>
+}
+
 interface PendingRunCreation {
   projectDir: string
   canvasBranch: string
@@ -152,6 +162,11 @@ interface TerminalArtifactSnapshot {
   files: string[]
   complete: boolean
   manifest?: ArtifactManifestV1
+}
+
+interface RunReservation {
+  branchKey: string
+  taskKey?: string
 }
 
 export class RunManager {
@@ -173,6 +188,8 @@ export class RunManager {
   readonly #pendingCreates = new Map<string, PendingRunCreation>()
   readonly #branchRunLeases = new Map<string, Set<string>>()
   readonly #branchMutationLeases = new Set<string>()
+  readonly #taskRunLeases = new Map<string, Set<string>>()
+  readonly #taskMutationLeases = new Set<string>()
   #closing = false
 
   constructor(options: RunManagerOptions) {
@@ -185,7 +202,10 @@ export class RunManager {
     this.#watchArtifacts = options.watchArtifacts ?? watchArtifacts
   }
 
-  async create(request: RunExecutionRequest): Promise<RunSummary> {
+  async create(
+    request: RunExecutionRequest,
+    options: RunCreationOptions = {},
+  ): Promise<RunSummary> {
     this.#assertOpen()
     // Pin the revision payload before any asynchronous lease/path work so a
     // caller cannot mutate the context while the run is being accepted.
@@ -220,7 +240,7 @@ export class RunManager {
       throw new ProtocolError('run id already exists', 'run_already_exists', 409)
     }
 
-    const leaseKey = this.#reserveRunBranch(projectDir, canvasBranch, runId)
+    const runReservation = this.#reserveRun(request, projectDir, canvasBranch, runId)
     const creation = this.#createReserved({
       request,
       transport,
@@ -228,7 +248,8 @@ export class RunManager {
       projectDir,
       canvasBranch,
       runId,
-      leaseKey,
+      reservation: runReservation,
+      validateReserved: options.validateReserved,
     })
     const reservation: PendingRunCreation = {
       projectDir,
@@ -253,7 +274,8 @@ export class RunManager {
     projectDir: string
     canvasBranch: string
     runId: string
-    leaseKey: string
+    reservation: RunReservation
+    validateReserved?: () => Promise<void>
   }): Promise<RunSummary> {
     const {
       request,
@@ -262,10 +284,13 @@ export class RunManager {
       projectDir,
       canvasBranch,
       runId,
-      leaseKey,
+      reservation,
+      validateReserved,
     } = input
     let leaseTransferred = false
     try {
+      await validateReserved?.()
+      this.#assertOpen()
       const sourceCandidate = this.#resolveSourceProjectDir
         ? await this.#resolveSourceProjectDir({ projectDir, canvasBranch })
         : null
@@ -399,14 +424,14 @@ export class RunManager {
       }
       const task = this.#execute(run).finally(() => {
         this.#tasks.delete(runId)
-        this.#releaseRunBranch(leaseKey, runId)
+        this.#releaseRunReservation(reservation, runId)
         this.#trimFinishedRuns()
       })
       this.#tasks.set(runId, task)
       leaseTransferred = true
       return { ...summary }
     } finally {
-      if (!leaseTransferred) this.#releaseRunBranch(leaseKey, runId)
+      if (!leaseTransferred) this.#releaseRunReservation(reservation, runId)
     }
   }
 
@@ -636,6 +661,51 @@ export class RunManager {
       return await operation()
     } finally {
       for (const key of keys) this.#branchMutationLeases.delete(key)
+    }
+  }
+
+  /**
+   * Atomically reserves the named Tasks for a destructive Canvas mutation.
+   * A pending or active Run owns the same key from the moment its creation is
+   * reserved until all terminal settlement hooks finish, so neither side can
+   * pass a check and then race the other.
+   */
+  async withIdleTasks<T>(
+    projectDirRequest: string,
+    canvasBranchRequest: string,
+    taskIds: readonly string[],
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    this.#assertOpen()
+    const projectDir = await this.#leaseProject(projectDirRequest)
+    this.#assertOpen()
+    const canvasBranch = parseCanvasBranch(canvasBranchRequest)
+    const normalizedTaskIds = [...new Set(taskIds.map((taskId) => parseTaskIdV2(taskId)))]
+      .sort((left, right) => left.localeCompare(right))
+    if (normalizedTaskIds.length === 0) {
+      throw new TypeError('at least one Task is required for a Task mutation lease')
+    }
+    const keys = normalizedTaskIds.map((taskId) =>
+      taskLeaseKey(projectDir, canvasBranch, taskId))
+    const busyIndex = keys.findIndex((key) =>
+      this.#taskMutationLeases.has(key) || (this.#taskRunLeases.get(key)?.size ?? 0) > 0)
+    if (busyIndex >= 0) {
+      const taskId = normalizedTaskIds[busyIndex]!
+      if ((this.#taskRunLeases.get(keys[busyIndex]!)?.size ?? 0) > 0) {
+        throw new ProtocolError(
+          `task has an active or pending run: ${taskId}`,
+          'task_run_active',
+          409,
+        )
+      }
+      throw new ProtocolError(`task is busy: ${taskId}`, 'task_busy', 409)
+    }
+    for (const key of keys) this.#taskMutationLeases.add(key)
+    try {
+      this.#assertOpen()
+      return await operation()
+    } finally {
+      for (const key of keys) this.#taskMutationLeases.delete(key)
     }
   }
 
@@ -1131,6 +1201,26 @@ export class RunManager {
     return resolveProjectDir(this.#projectRoot, leased)
   }
 
+  #reserveRun(
+    request: RunExecutionRequest,
+    projectDir: string,
+    canvasBranch: string,
+    runId: string,
+  ): RunReservation {
+    const branchKey = this.#reserveRunBranch(projectDir, canvasBranch, runId)
+    try {
+      return {
+        branchKey,
+        ...(isResolvedTaskRunRequestV2(request)
+          ? { taskKey: this.#reserveRunTask(projectDir, canvasBranch, request.taskId, runId) }
+          : {}),
+      }
+    } catch (error) {
+      this.#releaseRunBranch(branchKey, runId)
+      throw error
+    }
+  }
+
   #reserveRunBranch(projectDir: string, canvasBranch: string, runId: string): string {
     const key = branchLeaseKey(projectDir, canvasBranch)
     if (this.#branchMutationLeases.has(key)) {
@@ -1147,6 +1237,39 @@ export class RunManager {
     }
     owners.add(runId)
     return key
+  }
+
+  #reserveRunTask(
+    projectDir: string,
+    canvasBranch: string,
+    taskId: string,
+    runId: string,
+  ): string {
+    const key = taskLeaseKey(projectDir, canvasBranch, taskId)
+    if (this.#taskMutationLeases.has(key)) {
+      throw new ProtocolError(`task is busy: ${taskId}`, 'task_busy', 409)
+    }
+    const currentOwners = this.#taskRunLeases.get(key)
+    if ((currentOwners?.size ?? 0) > 0) {
+      throw new ProtocolError(
+        `this task already has an active or pending run: ${taskId}`,
+        'task_run_active',
+        409,
+      )
+    }
+    const owners = currentOwners ?? new Set<string>()
+    owners.add(runId)
+    this.#taskRunLeases.set(key, owners)
+    return key
+  }
+
+  #releaseRunReservation(reservation: RunReservation, runId: string): void {
+    this.#releaseRunBranch(reservation.branchKey, runId)
+    if (!reservation.taskKey) return
+    const owners = this.#taskRunLeases.get(reservation.taskKey)
+    if (!owners) return
+    owners.delete(runId)
+    if (owners.size === 0) this.#taskRunLeases.delete(reservation.taskKey)
   }
 
   #releaseRunBranch(key: string, runId: string): void {
@@ -1454,6 +1577,10 @@ function errorMessage(error: unknown): string {
 
 function branchLeaseKey(projectDir: string, canvasBranch: string): string {
   return JSON.stringify([projectDir, canvasBranch])
+}
+
+function taskLeaseKey(projectDir: string, canvasBranch: string, taskId: string): string {
+  return JSON.stringify([projectDir, canvasBranch, taskId])
 }
 
 function sameRunIdentity(
