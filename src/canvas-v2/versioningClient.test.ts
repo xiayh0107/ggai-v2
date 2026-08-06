@@ -9,6 +9,7 @@ const projectDir = '/workspace/project'
 const commitA = 'a'.repeat(40)
 const commitB = 'b'.repeat(40)
 const commitC = 'c'.repeat(40)
+const commitSha256 = 'd'.repeat(64)
 const ready = { state: 'ready', initialized: true, gitAvailable: true } as const
 
 function response(value: unknown, status = 200): Response {
@@ -169,6 +170,26 @@ describe('Canvas V2 versioning client', () => {
     )).resolves.toMatchObject({
       ok: true,
       value: { entries: [{ commit: commitA }], nextCursor: commitC },
+    })
+  })
+
+  it('accepts full SHA-256 commit identifiers from V2 repositories', async () => {
+    const versioning = client(async () => response(success({
+      entries: [{
+        commit: commitSha256,
+        parents: [],
+        committedAt: '2026-08-05T10:00:00.000Z',
+        subject: 'sha256 checkpoint',
+      }],
+      nextCursor: commitSha256,
+    })))
+
+    await expect(versioning.history(
+      { projectDir },
+      { branch: 'main', cursor: commitSha256 },
+    )).resolves.toMatchObject({
+      ok: true,
+      value: { entries: [{ commit: commitSha256 }], nextCursor: commitSha256 },
     })
   })
 

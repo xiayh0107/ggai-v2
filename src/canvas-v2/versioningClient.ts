@@ -1,7 +1,7 @@
 import { parseCanvasDocumentV2, type CanvasDocumentV2 } from './model'
 
 const BRANCH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u
-const COMMIT_PATTERN = /^[0-9a-f]{40}$/u
+const COMMIT_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u
 
 export type CanvasV2VersioningStatus =
   | { state: 'uninitialized'; initialized: false; gitAvailable: true }

@@ -1,10 +1,32 @@
-import { Boxes, Loader2, RotateCcw } from 'lucide-react'
+import { Boxes, History, Loader2, RotateCcw } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { DAEMON_URL } from '@/agent/config'
 import { useCanvasV2State, useCanvasV2Store } from '@/canvas-v2/hooks'
+import {
+  useCanvasV2BranchNavigation,
+  type CanvasV2BranchNavigationCommit,
+} from '@/canvas-v2/versioningNavigation'
+import { CanvasV2VersioningClient } from '@/canvas-v2/versioningClient'
 import CanvasV2Stage from './CanvasV2Stage'
+import CanvasV2VersioningPanel from './CanvasV2VersioningPanel'
 
-export default function CanvasV2Shell() {
+export interface CanvasV2ShellProps {
+  versioningClient?: CanvasV2VersioningClient
+  branchNavigationCommit?: CanvasV2BranchNavigationCommit
+}
+
+export default function CanvasV2Shell({
+  versioningClient: injectedVersioningClient,
+  branchNavigationCommit,
+}: CanvasV2ShellProps = {}) {
   const store = useCanvasV2Store()
   const state = useCanvasV2State()
+  const [versioningOpen, setVersioningOpen] = useState(false)
+  const versioningClient = useMemo(
+    () => injectedVersioningClient ?? new CanvasV2VersioningClient({ baseUrl: DAEMON_URL }),
+    [injectedVersioningClient],
+  )
+  const navigateBranch = useCanvasV2BranchNavigation(branchNavigationCommit)
 
   if (state.hydration.status === 'idle' || state.hydration.status === 'loading') {
     return (
@@ -51,11 +73,29 @@ export default function CanvasV2Shell() {
           {state.commandSync.pendingCount > 0 && (
             <span>待同步 {state.commandSync.pendingCount}</span>
           )}
+          <button
+            type="button"
+            onClick={() => setVersioningOpen(true)}
+            className="flex h-8 items-center gap-1.5 rounded-[10px] border border-gg-line bg-white px-3 text-[11px] font-medium text-gg-ink transition-colors hover:border-gg-primary"
+            aria-haspopup="dialog"
+          >
+            <History size={13} /> {state.scope.branch} · 版本历史
+          </button>
         </div>
       </header>
       <div className="absolute inset-x-0 bottom-0 top-[52px]">
         <CanvasV2Stage />
       </div>
+      {versioningOpen && (
+        <CanvasV2VersioningPanel
+          client={versioningClient}
+          projectDir={state.scope.projectDir}
+          branch={state.scope.branch}
+          store={store}
+          onNavigateBranch={navigateBranch}
+          onClose={() => setVersioningOpen(false)}
+        />
+      )}
     </main>
   )
 }
