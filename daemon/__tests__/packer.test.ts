@@ -176,6 +176,8 @@ test('Task V2 packs bounded full-edge outputs with daemon-verified artifact path
       type: 'image',
       frame: { x: 20, y: 20, w: 320, h: 240, z: 1 },
       title: 'Prior plot',
+      text: 'User-selected plot notes',
+      payload: { palette: 'viridis' },
       artifactRefs: [{ runId: 'run-prior', artifactId }],
       homeTaskId: 'task-prior',
       origin: { kind: 'user' },
@@ -226,6 +228,15 @@ test('Task V2 packs bounded full-edge outputs with daemon-verified artifact path
       size: 42,
       contentDigest: digest,
     }],
+    resolvedNodeAttachments: [{
+      id: 'node-prior-output',
+      title: 'Prior plot',
+      type: 'image',
+      text: 'User-selected plot notes',
+      payload: { palette: 'viridis' },
+      artifactRefs: [{ runId: 'run-prior', artifactId }],
+      truncation: { text: false, payload: false },
+    }],
     pluginCapabilities: BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2,
     automationMode: 'confirm',
   }
@@ -238,6 +249,16 @@ test('Task V2 packs bounded full-edge outputs with daemon-verified artifact path
       'utf8',
     )) as {
       inputs: Array<{ outputs?: Array<{ artifactRefs: unknown[] }> }>
+      explicitNodeAttachments: {
+        canvasRevision: number
+        nodes: Array<{
+          id: string
+          text?: string
+          payload?: Record<string, unknown>
+          artifactRefs: unknown[]
+          truncation: { text: boolean; payload: boolean }
+        }>
+      }
       verifiedArtifactAttachments: Array<{ projectRelativePath: string; contentDigest: string }>
       pluginCapabilities: { digest: string; plugins: Array<{ id: string }> }
     }
@@ -246,6 +267,18 @@ test('Task V2 packs bounded full-edge outputs with daemon-verified artifact path
       runId: 'run-prior',
       artifactId,
     }])
+    assert.deepEqual(json.explicitNodeAttachments, {
+      canvasRevision: 7,
+      nodes: [{
+        id: 'node-prior-output',
+        title: 'Prior plot',
+        type: 'image',
+        text: 'User-selected plot notes',
+        payload: { palette: 'viridis' },
+        artifactRefs: [{ runId: 'run-prior', artifactId }],
+        truncation: { text: false, payload: false },
+      }],
+    })
     assert.deepEqual(json.verifiedArtifactAttachments, [{
       runId: 'run-prior',
       artifactId,
@@ -260,6 +293,9 @@ test('Task V2 packs bounded full-edge outputs with daemon-verified artifact path
     )
     assert.ok(json.pluginCapabilities.plugins.some(({ id }) => id === 'file'))
     assert.match(rendered, /Fixed artifact plugin capabilities for this run/u)
+    assert.match(rendered, /Explicit node attachments for this run/u)
+    assert.match(rendered, /persisted Canvas revision 7/u)
+    assert.match(rendered, /User-selected plot notes/u)
     assert.match(rendered, new RegExp(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2.digest, 'u'))
     assert.match(rendered, /Verified read-only artifact attachments/u)
     assert.match(rendered, new RegExp(artifactId, 'u'))

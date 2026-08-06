@@ -85,6 +85,7 @@ function taskRequest(
     projectDir: '.',
     canvasDocument,
     resolvedArtifactAttachments: [],
+    resolvedNodeAttachments: [],
     automationMode: 'confirm',
   }
 }

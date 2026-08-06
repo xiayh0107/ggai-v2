@@ -3,7 +3,10 @@ import { stat } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
 import { CanvasCommandError, type CanvasCommandV2 } from '../src/canvas-v2/commands.js'
-import type { CanvasDocumentV2 } from '../src/canvas-v2/model.js'
+import type {
+  CanvasDocumentV2,
+  CanvasNodeV2,
+} from '../src/canvas-v2/model.js'
 import {
   compileTaskContextV2,
   taskContextArtifactRefsV2,
@@ -51,7 +54,14 @@ import {
   TaskRunProtocolV2Error,
   type RunIntentV2,
 } from './taskRunProtocolV2.js'
-import type { ResolvedArtifactAttachmentV2 } from './taskRunTypesV2.js'
+import {
+  MAX_RESOLVED_NODE_ATTACHMENT_ARTIFACT_REFS_V2,
+  MAX_RESOLVED_NODE_ATTACHMENT_CONTENT_BYTES_V2,
+  MAX_RESOLVED_NODE_ATTACHMENT_PAYLOAD_BYTES_V2,
+  MAX_RESOLVED_NODE_ATTACHMENT_TEXT_BYTES_V2,
+  type ResolvedArtifactAttachmentV2,
+  type ResolvedNodeAttachmentV2,
+} from './taskRunTypesV2.js'
 import { TaskSessionsV2CorruptionError } from './taskSessionsV2.js'
 import {
   WorkspaceVersionManagerV2,
@@ -536,7 +546,7 @@ async function route(
     if (!envelope.document.tasks.some((task) => task.id === intent.taskId)) {
       throw new ProtocolError('task does not exist at the requested revision', 'task_not_found', 404)
     }
-    const resolvedArtifactAttachments = await resolveRunIntentAttachments(
+    const resolvedAttachments = await resolveRunIntentAttachments(
       intent,
       envelope.document,
       context.runs,
@@ -546,7 +556,8 @@ async function route(
       ...intent,
       projectDir,
       canvasDocument: structuredClone(envelope.document),
-      resolvedArtifactAttachments,
+      resolvedArtifactAttachments: resolvedAttachments.artifacts,
+      resolvedNodeAttachments: resolvedAttachments.nodes,
       pluginCapabilities,
       automationMode: 'confirm',
     }, {
@@ -1155,28 +1166,67 @@ async function resolveRunIntentAttachments(
   document: CanvasDocumentV2,
   runs: RunManager,
   projectDir: string,
-): Promise<ResolvedArtifactAttachmentV2[]> {
-  const nodeIds = new Set(document.nodes.map((node) => node.id))
-  const references: Array<{
+): Promise<{
+  artifacts: ResolvedArtifactAttachmentV2[]
+  nodes: ResolvedNodeAttachmentV2[]
+}> {
+  type ArtifactAuthority = 'intent' | 'node-attachment' | 'context-edge'
+  interface PendingArtifactReference {
     runId: string
     artifactId: string
-    authority: 'intent' | 'context-edge'
-  }> = []
+    authorities: Set<ArtifactAuthority>
+  }
+
+  const nodesById = new Map(document.nodes.map((node) => [node.id, node]))
+  const references = new Map<string, PendingArtifactReference>()
   const artifacts: ResolvedArtifactAttachmentV2[] = []
+  const nodes: ResolvedNodeAttachmentV2[] = []
+  const contentBudget = { remaining: MAX_RESOLVED_NODE_ATTACHMENT_CONTENT_BYTES_V2 }
+  let nodeArtifactRefCount = 0
+
+  const appendReference = (
+    runId: string,
+    artifactId: string,
+    authority: ArtifactAuthority,
+  ) => {
+    const key = `${runId}\0${artifactId}`
+    const existing = references.get(key)
+    if (existing) {
+      existing.authorities.add(authority)
+      return
+    }
+    references.set(key, {
+      runId,
+      artifactId,
+      authorities: new Set([authority]),
+    })
+  }
+
   for (const attachment of intent.attachments) {
-    if (attachment.kind === 'node' && !nodeIds.has(attachment.nodeId)) {
+    if (attachment.kind === 'artifact') {
+      appendReference(attachment.runId, attachment.artifactId, 'intent')
+      continue
+    }
+
+    const node = nodesById.get(attachment.nodeId)
+    if (!node) {
       throw new ProtocolError(
         `attachment node does not exist at the requested revision: ${attachment.nodeId}`,
         'attachment_not_found',
         404,
       )
     }
-    if (attachment.kind === 'artifact') {
-      references.push({
-        runId: attachment.runId,
-        artifactId: attachment.artifactId,
-        authority: 'intent',
-      })
+    nodeArtifactRefCount += node.artifactRefs.length
+    if (nodeArtifactRefCount > MAX_RESOLVED_NODE_ATTACHMENT_ARTIFACT_REFS_V2) {
+      throw new ProtocolError(
+        'explicit node attachments reference too many artifacts',
+        'node_attachment_too_large',
+        413,
+      )
+    }
+    nodes.push(snapshotExplicitNodeAttachmentV2(node, contentBudget))
+    for (const reference of node.artifactRefs) {
+      appendReference(reference.runId, reference.artifactId, 'node-attachment')
     }
   }
 
@@ -1184,26 +1234,51 @@ async function resolveRunIntentAttachments(
   // Compile semantic inputs only from the exact document revision loaded above;
   // summary/none edges contribute no artifact identities.
   const contextPack = compileTaskContextV2({ document, taskId: intent.taskId })
-  references.push(...taskContextArtifactRefsV2(contextPack).map((reference) => ({
-    ...reference,
-    authority: 'context-edge' as const,
-  })))
+  for (const reference of taskContextArtifactRefsV2(contextPack)) {
+    appendReference(reference.runId, reference.artifactId, 'context-edge')
+  }
 
-  const seen = new Set<string>()
-  for (const reference of references) {
-    const key = `${reference.runId}\0${reference.artifactId}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    const artifact = await runs.lookupRunArtifact(
-      reference.runId,
-      reference.artifactId,
-      projectDir,
-    ).catch(() => null)
-    if (!artifact) {
-      if (reference.authority === 'context-edge') {
+  for (const reference of references.values()) {
+    let artifact: RunArtifactLookupV2 | null
+    try {
+      artifact = await runs.lookupRunArtifact(
+        reference.runId,
+        reference.artifactId,
+        projectDir,
+      )
+    } catch {
+      if (reference.authorities.has('context-edge')) {
         throw new ProtocolError(
           `full context edge references an unavailable artifact: ${reference.artifactId}`,
           'context_artifact_unavailable',
+          409,
+        )
+      }
+      if (reference.authorities.has('node-attachment')) {
+        throw new ProtocolError(
+          `explicit node attachment artifact failed integrity verification: ${reference.artifactId}`,
+          'node_attachment_artifact_unavailable',
+          409,
+        )
+      }
+      throw new ProtocolError(
+        `artifact failed its closed-manifest integrity check: ${reference.artifactId}`,
+        'artifact_integrity_error',
+        409,
+      )
+    }
+    if (!artifact) {
+      if (reference.authorities.has('context-edge')) {
+        throw new ProtocolError(
+          `full context edge references an unavailable artifact: ${reference.artifactId}`,
+          'context_artifact_unavailable',
+          409,
+        )
+      }
+      if (reference.authorities.has('node-attachment')) {
+        throw new ProtocolError(
+          `explicit node attachment references an unavailable artifact: ${reference.artifactId}`,
+          'node_attachment_artifact_unavailable',
           409,
         )
       }
@@ -1222,7 +1297,91 @@ async function resolveRunIntentAttachments(
       contentDigest: artifact.contentDigest,
     })
   }
-  return artifacts
+  return { artifacts, nodes }
+}
+
+function snapshotExplicitNodeAttachmentV2(
+  node: CanvasNodeV2,
+  contentBudget: { remaining: number },
+): ResolvedNodeAttachmentV2 {
+  const text = node.text === undefined
+    ? undefined
+    : boundedNodeAttachmentTextV2(node.text, Math.min(
+        contentBudget.remaining,
+        MAX_RESOLVED_NODE_ATTACHMENT_TEXT_BYTES_V2,
+      ))
+  if (text) contentBudget.remaining -= text.bytes
+
+  const payload = node.payload === undefined
+    ? undefined
+    : boundedNodeAttachmentPayloadV2(node.payload, Math.min(
+        contentBudget.remaining,
+        MAX_RESOLVED_NODE_ATTACHMENT_PAYLOAD_BYTES_V2,
+      ))
+  if (payload) contentBudget.remaining -= payload.bytes
+
+  return {
+    id: node.id,
+    title: node.title,
+    type: node.type,
+    ...(text?.value === undefined ? {} : { text: text.value }),
+    ...(payload?.value === undefined ? {} : { payload: payload.value }),
+    artifactRefs: structuredClone(node.artifactRefs),
+    truncation: {
+      text: text?.truncated ?? false,
+      payload: payload?.truncated ?? false,
+    },
+  }
+}
+
+function boundedNodeAttachmentTextV2(
+  value: string,
+  maxBytes: number,
+): { value?: string; bytes: number; truncated: boolean } {
+  if (maxBytes < 2) return { bytes: 0, truncated: true }
+  const serialized = JSON.stringify(value)
+  const serializedBytes = Buffer.byteLength(serialized)
+  if (serializedBytes <= maxBytes) {
+    return { value, bytes: serializedBytes, truncated: false }
+  }
+
+  const chunks: string[] = []
+  let bytes = 2
+  for (const character of value) {
+    const encoded = JSON.stringify(character).slice(1, -1)
+    const characterBytes = Buffer.byteLength(encoded)
+    if (bytes + characterBytes > maxBytes) break
+    chunks.push(character)
+    bytes += characterBytes
+  }
+  return { value: chunks.join(''), bytes, truncated: true }
+}
+
+function boundedNodeAttachmentPayloadV2(
+  value: Record<string, unknown>,
+  maxBytes: number,
+): { value?: Record<string, unknown>; bytes: number; truncated: boolean } {
+  if (maxBytes < 2) return { bytes: 0, truncated: true }
+  const serialized = JSON.stringify(value)
+  const serializedBytes = Buffer.byteLength(serialized)
+  if (serializedBytes <= maxBytes) {
+    return { value: structuredClone(value), bytes: serializedBytes, truncated: false }
+  }
+
+  const selected: Record<string, unknown> = {}
+  let bytes = 2
+  let selectedCount = 0
+  for (const key of Object.keys(value).sort((left, right) => left.localeCompare(right))) {
+    const propertyBytes = Buffer.byteLength(JSON.stringify(key))
+      + 1
+      + Buffer.byteLength(JSON.stringify(value[key]))
+      + (selectedCount > 0 ? 1 : 0)
+    if (bytes + propertyBytes > maxBytes) continue
+    selected[key] = structuredClone(value[key])
+    bytes += propertyBytes
+    selectedCount += 1
+  }
+  return { value: selected, bytes, truncated: true }
 }
 
 function writeError(response: ServerResponse, error: unknown): void {

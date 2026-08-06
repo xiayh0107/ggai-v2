@@ -780,6 +780,19 @@ test('RunIntent V2 resolves readable artifacts from pinned full edges only', asy
     close: TaskClose
     pack: string
     canvas: CanvasEnvelope
+  }> => runTaskWithAttachments(taskId, runId, [])
+  const runTaskWithAttachments = async (
+    taskId: string,
+    runId: string,
+    attachments: Array<
+      | { kind: 'node'; nodeId: string }
+      | { kind: 'artifact'; runId: string; artifactId: string }
+    >,
+    afterAccepted?: () => Promise<void>,
+  ): Promise<{
+    close: TaskClose
+    pack: string
+    canvas: CanvasEnvelope
   }> => {
     const current = await canvas()
     const response = await fetch(`${fixture.baseUrl}/runs?projectDir=.`, {
@@ -793,11 +806,12 @@ test('RunIntent V2 resolves readable artifacts from pinned full edges only', asy
         canvasBranch: 'main',
         baseRevision: current.revision,
         prompt: `execute ${taskId}`,
-        attachments: [],
+        attachments,
         materializationPolicy: 'auto',
       }),
     })
     assert.equal(response.status, 202, await response.text())
+    await afterAccepted?.()
 
     let close: TaskClose | undefined
     await waitFor(async () => {
@@ -867,6 +881,159 @@ test('RunIntent V2 resolves readable artifacts from pinned full edges only', asy
       && node.artifactRefs.some((artifact) => artifact.artifactId === sourceArtifact.artifactId))
     assert.ok(sourceNode)
 
+    await commit('update-explicit-node-attachment-content', {
+      type: 'UpdateNodeContent',
+      nodeId: sourceNode.id,
+      patch: {
+        title: 'Explicit Node input',
+        text: `PINNED_EXPLICIT_NODE_CONTENT\n${'x'.repeat(150_000)}NODE_TEXT_TAIL`,
+        payload: {
+          aKeep: 'PINNED_NODE_PAYLOAD',
+          zOversized: `${'y'.repeat(150_000)}NODE_PAYLOAD_TAIL`,
+        },
+      },
+    })
+    const copiedNodeId = 'node-explicit-shared-artifact-copy'
+    await commit('duplicate-explicit-node-shared-artifact', {
+      type: 'DuplicateNode',
+      sourceNodeId: sourceNode.id,
+      newNodeId: copiedNodeId,
+      offset: { x: 40, y: 40 },
+      title: 'Copied explicit Node input',
+    })
+    await commit('create-explicit-node-attachment-task', {
+      type: 'CreateTask',
+      task: {
+        id: 'task-explicit-node-attachment',
+        title: 'Explicit Node attachment',
+        goal: 'Use the explicitly selected Node snapshot',
+        anchor: { x: 400, y: 20 },
+        origin: { kind: 'user' },
+      },
+    })
+
+    const beforeExplicitRun = await canvas()
+    const missingNode = await fetch(`${fixture.baseUrl}/runs?projectDir=.`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        schemaVersion: 2,
+        runId: 'run-explicit-node-missing',
+        taskId: 'task-explicit-node-attachment',
+        agentId: 'codex',
+        canvasBranch: 'main',
+        baseRevision: beforeExplicitRun.revision,
+        prompt: 'must reject a missing Node',
+        attachments: [{ kind: 'node', nodeId: 'node-does-not-exist' }],
+        materializationPolicy: 'auto',
+      }),
+    })
+    assert.equal(missingNode.status, 404)
+    assert.equal((await missingNode.json() as { error: { code: string } }).error.code,
+      'attachment_not_found')
+    assert.equal(fixture.daemon.runs.get('run-explicit-node-missing'), null)
+
+    const forgedNodePath = await fetch(`${fixture.baseUrl}/runs?projectDir=.`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        schemaVersion: 2,
+        runId: 'run-explicit-node-forged-path',
+        taskId: 'task-explicit-node-attachment',
+        agentId: 'codex',
+        canvasBranch: 'main',
+        baseRevision: beforeExplicitRun.revision,
+        prompt: 'must reject browser-provided paths',
+        attachments: [{
+          kind: 'node',
+          nodeId: sourceNode.id,
+          path: '/etc/passwd',
+        }],
+        materializationPolicy: 'auto',
+      }),
+    })
+    assert.equal(forgedNodePath.status, 400)
+    assert.equal((await forgedNodePath.json() as { error: { code: string } }).error.code,
+      'invalid_run_intent_v2')
+
+    const explicit = await runTaskWithAttachments(
+      'task-explicit-node-attachment',
+      'run-explicit-node-attachment',
+      [{ kind: 'node', nodeId: sourceNode.id }, {
+        kind: 'node',
+        nodeId: copiedNodeId,
+      }, {
+        kind: 'artifact',
+        runId: 'run-context-source',
+        artifactId: sourceArtifact.artifactId,
+      }],
+      async () => {
+        await commit('mutate-node-after-run-acceptance', {
+          type: 'UpdateNodeContent',
+          nodeId: sourceNode.id,
+          patch: {
+            text: 'MUTATED_AFTER_RUN_ACCEPTANCE',
+            payload: { aKeep: 'MUTATED_AFTER_RUN_ACCEPTANCE' },
+          },
+        })
+      },
+    )
+    assert.match(explicit.pack, /Explicit node attachments for this run/u)
+    assert.match(explicit.pack, /PINNED_EXPLICIT_NODE_CONTENT/u)
+    assert.match(explicit.pack, /PINNED_NODE_PAYLOAD/u)
+    assert.doesNotMatch(explicit.pack, /MUTATED_AFTER_RUN_ACCEPTANCE/u)
+    assert.doesNotMatch(explicit.pack, /NODE_TEXT_TAIL|NODE_PAYLOAD_TAIL/u)
+    const explicitPackJson = JSON.parse(await readFile(path.join(
+      fixture.root,
+      '.gg',
+      'context',
+      'runs',
+      'run-explicit-node-attachment',
+      'pack.json',
+    ), 'utf8')) as {
+      explicitNodeAttachments: {
+        canvasRevision: number
+        nodes: Array<{
+          id: string
+          artifactRefs: Array<{ runId: string; artifactId: string }>
+          truncation: { text: boolean; payload: boolean }
+        }>
+      }
+      verifiedArtifactAttachments: Array<{ runId: string; artifactId: string }>
+    }
+    assert.equal(explicitPackJson.explicitNodeAttachments.canvasRevision, beforeExplicitRun.revision)
+    assert.deepEqual(explicitPackJson.explicitNodeAttachments.nodes[0]?.artifactRefs, [{
+      runId: 'run-context-source',
+      artifactId: sourceArtifact.artifactId,
+    }])
+    assert.deepEqual(
+      explicitPackJson.explicitNodeAttachments.nodes.map((node) => node.id),
+      [sourceNode.id, copiedNodeId],
+    )
+    assert.deepEqual(explicitPackJson.explicitNodeAttachments.nodes[1]?.artifactRefs, [{
+      runId: 'run-context-source',
+      artifactId: sourceArtifact.artifactId,
+    }])
+    assert.deepEqual(explicitPackJson.explicitNodeAttachments.nodes[0]?.truncation, {
+      text: true,
+      payload: true,
+    })
+    assert.equal(explicitPackJson.verifiedArtifactAttachments.filter((artifact) =>
+      artifact.runId === 'run-context-source'
+      && artifact.artifactId === sourceArtifact.artifactId).length, 1)
+    const explicitOutput = explicit.close.artifactManifest.entries[0]
+    assert.ok(explicitOutput)
+    const explicitOutputLookup = await fixture.daemon.runs.lookupRunArtifact(
+      'run-explicit-node-attachment',
+      explicitOutput.artifactId,
+      '.',
+    )
+    assert.ok(explicitOutputLookup)
+    assert.equal(
+      await readFile(explicitOutputLookup.absolutePath, 'utf8'),
+      'received explicit node attachment\n',
+    )
+
     await createDerivedTask(
       'task-context-node-full',
       { kind: 'node', id: sourceNode.id },
@@ -905,6 +1072,95 @@ test('RunIntent V2 resolves readable artifacts from pinned full edges only', asy
     )
     assert.ok(sourceLookup)
     await rm(sourceLookup.absolutePath)
+
+    await commit('create-bad-explicit-node-attachment-task', {
+      type: 'CreateTask',
+      task: {
+        id: 'task-bad-explicit-node-attachment',
+        title: 'Bad explicit Node attachment',
+        goal: 'Must fail closed for an unavailable Node artifact',
+        anchor: { x: 800, y: 20 },
+        origin: { kind: 'user' },
+      },
+    })
+    const beforeBadNodeAttachment = await canvas()
+    const badNodeArtifact = await fetch(`${fixture.baseUrl}/runs?projectDir=.`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        schemaVersion: 2,
+        runId: 'run-bad-explicit-node-attachment',
+        taskId: 'task-bad-explicit-node-attachment',
+        agentId: 'codex',
+        canvasBranch: 'main',
+        baseRevision: beforeBadNodeAttachment.revision,
+        prompt: 'must not run without every Node artifact',
+        attachments: [{ kind: 'node', nodeId: sourceNode.id }],
+        materializationPolicy: 'auto',
+      }),
+    })
+    assert.equal(badNodeArtifact.status, 409)
+    assert.equal((await badNodeArtifact.json() as { error: { code: string } }).error.code,
+      'node_attachment_artifact_unavailable')
+    assert.equal(fixture.daemon.runs.get('run-bad-explicit-node-attachment'), null)
+
+    const beforeForeignNode = await canvas()
+    const foreignArtifactId = `artifact_${'e'.repeat(64)}`
+    const foreignPlanId = `plan_${'e'.repeat(64)}`
+    const foreignNodeCanvas = await fixture.daemon.canvasV2.commit(
+      '.',
+      'main',
+      beforeForeignNode.revision,
+      'trusted-foreign-artifact-test-fixture',
+      {
+        type: 'MaterializeProjectionPlan',
+        plan: {
+          schemaVersion: 2,
+          taskId: 'task-bad-explicit-node-attachment',
+          planId: foreignPlanId,
+          runId: 'run-without-a-closed-manifest',
+          status: 'complete',
+          manifestDigest: 'e'.repeat(64),
+          outputs: [{
+            key: 'foreign-artifact',
+            pluginId: 'file',
+            role: 'primary',
+            title: 'Foreign artifact identity',
+            artifactRefs: [{
+              runId: 'run-without-a-closed-manifest',
+              artifactId: foreignArtifactId,
+            }],
+            derivedFrom: [],
+            materialize: true,
+          }],
+          taskProposals: [],
+          warnings: [],
+          digest: 'f'.repeat(64),
+        },
+      },
+    )
+    const foreignNode = foreignNodeCanvas.document.nodes.find((node) =>
+      node.artifactRefs.some((artifact) => artifact.artifactId === foreignArtifactId))
+    assert.ok(foreignNode)
+    const foreignNodeArtifact = await fetch(`${fixture.baseUrl}/runs?projectDir=.`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        schemaVersion: 2,
+        runId: 'run-foreign-explicit-node-attachment',
+        taskId: 'task-bad-explicit-node-attachment',
+        agentId: 'codex',
+        canvasBranch: 'main',
+        baseRevision: foreignNodeCanvas.revision,
+        prompt: 'must not trust a foreign Run identity from Canvas content',
+        attachments: [{ kind: 'node', nodeId: foreignNode.id }],
+        materializationPolicy: 'auto',
+      }),
+    })
+    assert.equal(foreignNodeArtifact.status, 409)
+    assert.equal((await foreignNodeArtifact.json() as { error: { code: string } }).error.code,
+      'node_attachment_artifact_unavailable')
+    assert.equal(fixture.daemon.runs.get('run-foreign-explicit-node-attachment'), null)
 
     await createDerivedTask(
       'task-context-missing-summary',
@@ -1036,11 +1292,13 @@ if (pack.includes('WRITE_THEN_WAIT')) {
     console.log(JSON.stringify({ type: 'item.completed', item: { type: 'file_change', changes: [{ path: foreignRelative }] } }))
   }
   await mkdir(path.dirname(outputPath), { recursive: true })
-  const artifactContents = pack.includes('ARTIFACT_CONTENT_A')
-    ? 'artifact A\\n'
-    : pack.includes('ARTIFACT_CONTENT_B')
-      ? 'artifact B\\n'
-      : 'created by fake codex\\n'
+  const artifactContents = pack.includes('PINNED_EXPLICIT_NODE_CONTENT')
+    ? 'received explicit node attachment\\n'
+    : pack.includes('ARTIFACT_CONTENT_A')
+      ? 'artifact A\\n'
+      : pack.includes('ARTIFACT_CONTENT_B')
+        ? 'artifact B\\n'
+        : 'created by fake codex\\n'
   await writeFile(outputPath, artifactContents)
   console.log(JSON.stringify({ type: 'item.completed', item: { type: 'file_change', changes: [{ path: relative }] } }))
   console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Finished.' } }))

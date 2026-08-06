@@ -86,6 +86,7 @@ function request(
     projectDir: '.',
     canvasDocument,
     resolvedArtifactAttachments: [],
+    resolvedNodeAttachments: [],
     automationMode: 'confirm',
   }
 }
