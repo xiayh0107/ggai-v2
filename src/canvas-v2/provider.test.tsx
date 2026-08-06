@@ -76,7 +76,7 @@ describe('Canvas V2 React provider', () => {
       )
     })
 
-    await viWaitForOutput(container, 'ready', 'idle', '0')
+    await viWaitForOutput(container, 'ready', 'draft', '0')
     act(() => {
       store.setTaskRuntime({
         taskId: 'task-1',
