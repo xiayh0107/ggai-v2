@@ -1,5 +1,6 @@
+import { constants } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { lstat, readFile } from 'node:fs/promises'
+import { lstat, open, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import {
   applyCanvasCommandV2,
@@ -26,6 +27,7 @@ export interface CanvasEnvelopeV2 {
 
 export interface CanvasCommandStoreV2Options {
   filePath: string
+  revisionDirectory?: string
   now?: () => number
 }
 
@@ -74,6 +76,7 @@ export class CanvasSnapshotV2Error extends Error {
 export class CanvasCommandStoreV2 {
   readonly branch: string
   readonly filePath: string
+  readonly revisionDirectory: string
 
   readonly #now: () => number
   #envelope: StoredCanvasEnvelopeV2 | null = null
@@ -82,6 +85,9 @@ export class CanvasCommandStoreV2 {
   constructor(branch: string, options: CanvasCommandStoreV2Options) {
     this.branch = parseCanvasBranch(branch)
     this.filePath = path.resolve(options.filePath)
+    this.revisionDirectory = path.resolve(
+      options.revisionDirectory ?? path.join(path.dirname(this.filePath), 'revisions'),
+    )
     this.#now = options.now ?? Date.now
   }
 
@@ -89,6 +95,19 @@ export class CanvasCommandStoreV2 {
     return this.#runExclusive(async () => {
       await this.#ensureLoaded()
       return cloneEnvelope(this.#current())
+    })
+  }
+
+  /** Reads an immutable semantic revision used only for explicit conflict recovery. */
+  async readRevision(revision: number): Promise<CanvasDocumentV2 | null> {
+    validateRevision(revision)
+    return this.#runExclusive(async () => {
+      await this.#ensureLoaded()
+      const current = this.#current()
+      if (revision > current.revision) return null
+      if (revision === current.revision) return structuredClone(current.document)
+      const record = await this.#readRevisionRecord(revision)
+      return record ? structuredClone(record.document) : null
     })
   }
 
@@ -144,7 +163,7 @@ export class CanvasCommandStoreV2 {
           committedRevision: current.revision + 1,
         }],
       }
-      await atomicWriteText(this.filePath, serializeEnvelope(next))
+      await this.#persistSemanticEnvelope(current, next)
       this.#envelope = next
       return cloneEnvelope(next)
     })
@@ -201,7 +220,7 @@ export class CanvasCommandStoreV2 {
           committedRevision: current.revision + 1,
         }],
       }
-      await atomicWriteText(this.filePath, serializeEnvelope(next))
+      await this.#persistSemanticEnvelope(current, next)
       this.#envelope = next
       return cloneEnvelope(next)
     })
@@ -251,7 +270,7 @@ export class CanvasCommandStoreV2 {
         document: parsed,
         mutationReceipts: [],
       }
-      await atomicWriteText(this.filePath, serializeEnvelope(materialized))
+      await this.#persistSemanticEnvelope(current, materialized)
       this.#envelope = materialized
       return cloneEnvelope(materialized)
     })
@@ -281,7 +300,7 @@ export class CanvasCommandStoreV2 {
         document: parsed,
         mutationReceipts: current.mutationReceipts,
       }
-      await atomicWriteText(this.filePath, serializeEnvelope(applied))
+      await this.#persistSemanticEnvelope(current, applied)
       this.#envelope = applied
       return cloneEnvelope(applied)
     })
@@ -309,6 +328,63 @@ export class CanvasCommandStoreV2 {
     }
   }
 
+  async #persistSemanticEnvelope(
+    current: StoredCanvasEnvelopeV2,
+    next: StoredCanvasEnvelopeV2,
+  ): Promise<void> {
+    if (next.revision !== current.revision + 1) {
+      throw new TypeError('Canvas V2 semantic revisions must advance by exactly one')
+    }
+    await this.#ensureRevisionRecord(current.revision, current.document)
+    await atomicWriteText(
+      this.#revisionPath(next.revision),
+      serializeRevisionRecord(this.branch, next.revision, next.document),
+    )
+    await atomicWriteText(this.filePath, serializeEnvelope(next))
+  }
+
+  async #ensureRevisionRecord(revision: number, document: CanvasDocumentV2): Promise<void> {
+    const existing = await this.#readRevisionRecord(revision)
+    if (existing) {
+      if (canvasDocumentDigestV2(existing.document) !== canvasDocumentDigestV2(document)) {
+        throw new CanvasSnapshotV2Error(
+          this.#revisionPath(revision),
+          new TypeError('Canvas V2 revision archive disagrees with the durable snapshot'),
+        )
+      }
+      return
+    }
+    await atomicWriteText(
+      this.#revisionPath(revision),
+      serializeRevisionRecord(this.branch, revision, document),
+    )
+  }
+
+  async #readRevisionRecord(revision: number): Promise<CanvasRevisionRecordV1 | null> {
+    const filePath = this.#revisionPath(revision)
+    let handle: Awaited<ReturnType<typeof open>> | undefined
+    try {
+      const info = await lstat(filePath)
+      if (!info.isFile() || info.isSymbolicLink()) {
+        throw new TypeError('Canvas V2 revision path is not a regular file')
+      }
+      handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW)
+      const source = await handle.readFile('utf8')
+      return parseRevisionRecord(source, this.branch, revision)
+    } catch (error) {
+      if (isNodeError(error, 'ENOENT')) return null
+      if (error instanceof CanvasSnapshotV2Error) throw error
+      throw new CanvasSnapshotV2Error(filePath, error)
+    } finally {
+      await handle?.close().catch(() => undefined)
+    }
+  }
+
+  #revisionPath(revision: number): string {
+    validateRevision(revision)
+    return path.join(this.revisionDirectory, `${revision}.json`)
+  }
+
   #current(): StoredCanvasEnvelopeV2 {
     if (!this.#envelope) throw new Error('Canvas V2 command store was not loaded')
     return this.#envelope
@@ -322,6 +398,14 @@ export class CanvasCommandStoreV2 {
     )
     return result
   }
+}
+
+interface CanvasRevisionRecordV1 {
+  version: 1
+  branch: string
+  revision: number
+  documentDigest: string
+  document: CanvasDocumentV2
 }
 
 function emptyEnvelope(branch: string): StoredCanvasEnvelopeV2 {
@@ -444,6 +528,58 @@ function parseMutationReceipts(value: unknown, currentRevision: number): CanvasM
 
 function canvasCommandDigestV2(command: CanvasCommandV2): string {
   return createHash('sha256').update(canonicalValue(command)).digest('hex')
+}
+
+function canvasDocumentDigestV2(document: CanvasDocumentV2): string {
+  return createHash('sha256').update(canonicalValue(document)).digest('hex')
+}
+
+function serializeRevisionRecord(
+  branch: string,
+  revision: number,
+  document: CanvasDocumentV2,
+): string {
+  const record: CanvasRevisionRecordV1 = {
+    version: 1,
+    branch,
+    revision,
+    documentDigest: canvasDocumentDigestV2(document),
+    document,
+  }
+  return `${JSON.stringify(record, null, 2)}\n`
+}
+
+function parseRevisionRecord(
+  source: string,
+  expectedBranch: string,
+  expectedRevision: number,
+): CanvasRevisionRecordV1 {
+  const value: unknown = JSON.parse(source)
+  if (!isExactRecord(value, [
+    'version',
+    'branch',
+    'revision',
+    'documentDigest',
+    'document',
+  ])
+    || value.version !== 1
+    || value.branch !== expectedBranch
+    || value.revision !== expectedRevision
+    || typeof value.documentDigest !== 'string'
+    || !/^[0-9a-f]{64}$/u.test(value.documentDigest)) {
+    throw new TypeError('Canvas V2 revision record has an invalid envelope')
+  }
+  const document = parseCanvasDocumentV2(value.document)
+  if (canvasDocumentDigestV2(document) !== value.documentDigest) {
+    throw new TypeError('Canvas V2 revision record digest does not match its document')
+  }
+  return {
+    version: 1,
+    branch: expectedBranch,
+    revision: expectedRevision,
+    documentDigest: value.documentDigest,
+    document,
+  }
 }
 
 function canonicalValue(value: unknown): string {

@@ -176,6 +176,33 @@ test('persists an atomically-written envelope and reloads it defensively', async
   assert.equal((await readFile(filePath, 'utf8')).endsWith('\n'), true)
 })
 
+test('archives every semantic revision for command-only conflict recovery', async () => {
+  const filePath = await temporarySnapshot()
+  const store = new CanvasCommandStoreV2('main', { filePath })
+  assert.deepEqual(await store.readRevision(0), emptyCanvasDocumentV2())
+  await store.commit(0, 'mutation-1', createTask('task-1'))
+  await store.commit(1, 'mutation-2', {
+    type: 'UpdateTaskGoal',
+    taskId: 'task-1',
+    goal: 'Revision two',
+  })
+
+  assert.deepEqual((await store.readRevision(0))?.tasks, [])
+  assert.equal((await store.readRevision(1))?.tasks[0]?.goal, 'Complete task-1')
+  assert.equal((await store.readRevision(2))?.tasks[0]?.goal, 'Revision two')
+  assert.equal(await store.readRevision(3), null)
+
+  const reopened = new CanvasCommandStoreV2('main', { filePath })
+  assert.equal((await reopened.readRevision(1))?.tasks[0]?.goal, 'Complete task-1')
+  const revisionOne = path.join(path.dirname(filePath), 'revisions', '1.json')
+  const corrupted = JSON.parse(await readFile(revisionOne, 'utf8')) as {
+    document: { tasks: Array<{ goal: string }> }
+  }
+  corrupted.document.tasks[0]!.goal = 'Tampered without updating the digest'
+  await writeFile(revisionOne, JSON.stringify(corrupted), 'utf8')
+  await assert.rejects(reopened.readRevision(1), CanvasSnapshotV2Error)
+})
+
 test('fails explicitly without overwriting an invalid stored snapshot', async () => {
   const filePath = await temporarySnapshot()
   await mkdir(path.dirname(filePath), { recursive: true })

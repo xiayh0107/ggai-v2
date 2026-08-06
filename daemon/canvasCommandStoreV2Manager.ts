@@ -36,6 +36,14 @@ export class CanvasCommandStoreV2Manager {
     return (await this.#resolve(projectDir, branch)).get()
   }
 
+  async readRevision(
+    projectDir: string,
+    branch: string,
+    revision: number,
+  ): Promise<CanvasEnvelopeV2['document'] | null> {
+    return (await this.#resolve(projectDir, branch)).readRevision(revision)
+  }
+
   async hasSnapshot(projectDir: string, branch: string): Promise<boolean> {
     return (await this.#resolve(projectDir, branch)).hasSnapshot()
   }
@@ -121,20 +129,28 @@ export class CanvasCommandStoreV2Manager {
       projectRoot: this.#projectRoot,
       projectDir: canonicalProjectDir,
     })
-    const filePath = path.resolve(
+    const branchDirectory = path.resolve(
       scope.projectDir,
       '.gg',
       'runtime',
       'canvas-v2',
       canvasBranchStorageId(branch),
-      'snapshot.json',
     )
-    await assertManagedCanvasV2Path(scope.ggDir, filePath)
+    const filePath = path.join(branchDirectory, 'snapshot.json')
+    const revisionDirectory = path.join(branchDirectory, 'revisions')
+    await Promise.all([
+      assertManagedCanvasV2Path(scope.ggDir, filePath),
+      assertManagedCanvasV2Path(scope.ggDir, revisionDirectory),
+    ])
 
     const key = `${scope.projectDir}\0${branch}`
     let store = this.#stores.get(key)
     if (!store) {
-      store = new CanvasCommandStoreV2(branch, { filePath, now: this.#now })
+      store = new CanvasCommandStoreV2(branch, {
+        filePath,
+        revisionDirectory,
+        now: this.#now,
+      })
       this.#stores.set(key, store)
     }
     return store
