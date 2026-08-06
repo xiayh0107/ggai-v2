@@ -714,6 +714,68 @@ describe('Canvas V2 interactive stage', () => {
     ).toContain('需要先取消'))
   })
 
+  it('traps confirmation focus, closes with Escape, and restores a safe focus target', async () => {
+    const { host } = await createSubject()
+    const stage = required<HTMLElement>(host, '[data-testid="canvas-v2-stage"]')
+    const trigger = required<HTMLButtonElement>(host, '[aria-label="独立资料节点菜单"]')
+    expect(stage.getAttribute('role')).toBe('region')
+    expect(stage.querySelector('[role="application"]')).toBeNull()
+    act(() => trigger.focus())
+    await act(async () => trigger.click())
+    const deleteItem = [...required<HTMLElement>(host, '[role="menu"]')
+      .querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((button) => button.textContent?.includes('删除节点'))
+    if (!deleteItem) throw new Error('Missing delete node menu item')
+    await act(async () => deleteItem.click())
+
+    const dialog = required<HTMLElement>(host, '[role="alertdialog"]')
+    const [cancel, confirm] = [...dialog.querySelectorAll<HTMLButtonElement>('button')]
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    expect(dialog.getAttribute('aria-labelledby')).toBe('canvas-v2-confirm-title')
+    expect(dialog.getAttribute('aria-describedby')).toBe('canvas-v2-confirm-detail')
+    expect(document.activeElement).toBe(cancel)
+
+    await act(async () => cancel?.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Tab',
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    })))
+    expect(document.activeElement).toBe(confirm)
+    await act(async () => confirm?.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    })))
+    expect(document.activeElement).toBe(cancel)
+
+    await act(async () => cancel?.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    })))
+    expect(host.querySelector('[role="alertdialog"]')).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+
+    await act(async () => trigger.click())
+    const deleteAgain = [...required<HTMLElement>(host, '[role="menu"]')
+      .querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((button) => button.textContent?.includes('删除节点'))
+    if (!deleteAgain) throw new Error('Missing repeated delete node menu item')
+    await act(async () => deleteAgain.click())
+    const confirmAgain = [...required<HTMLElement>(host, '[role="alertdialog"]')
+      .querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent?.includes('删除节点'))
+    if (!confirmAgain) throw new Error('Missing repeated delete confirmation')
+    await act(async () => confirmAgain.click())
+
+    expect(host.querySelector('[data-node-id="node-top"]')).toBeNull()
+    expect(document.activeElement).toBe(stage)
+    const undoStatus = required<HTMLElement>(host, '[data-testid="canvas-v2-undo"]')
+    expect(undoStatus.getAttribute('role')).toBe('status')
+    expect(undoStatus.textContent).toContain('已从画布移除')
+  })
+
   it('restores the visual projection when a deferred destructive command is rejected', async () => {
     vi.useFakeTimers()
     const { store, host } = await createSubject()

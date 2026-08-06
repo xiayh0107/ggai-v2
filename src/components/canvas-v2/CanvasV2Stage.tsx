@@ -135,6 +135,8 @@ export default function CanvasV2Stage() {
   const state = useCanvasV2State()
   const stateRef = useRef(state)
   const stageRef = useRef<HTMLDivElement>(null)
+  const confirmationDialogRef = useRef<HTMLDivElement>(null)
+  const confirmationCancelRef = useRef<HTMLButtonElement>(null)
   const gestureRef = useRef<Gesture | null>(null)
   const focusableRefs = useRef(new Map<string, HTMLButtonElement>())
   const [preview, setPreview] = useState<GesturePreview>(null)
@@ -169,6 +171,19 @@ export default function CanvasV2Stage() {
   useEffect(() => () => {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current)
   }, [])
+
+  useEffect(() => {
+    if (!confirmation) return
+    const returnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null
+    const stage = stageRef.current
+    confirmationCancelRef.current?.focus()
+    return () => {
+      if (returnFocus?.isConnected) returnFocus.focus()
+      else stage?.focus()
+    }
+  }, [confirmation])
 
   let stageDocument = state.document
   if (undoOffer?.pendingCommand) {
@@ -870,7 +885,7 @@ export default function CanvasV2Stage() {
   return (
     <div
       ref={stageRef}
-      role="application"
+      role="region"
       aria-label="Canvas V2 画布"
       tabIndex={0}
       data-testid="canvas-v2-stage"
@@ -1134,10 +1149,20 @@ export default function CanvasV2Stage() {
       {confirmation && (
         <div className="absolute inset-0 z-[100] flex items-center justify-center bg-[#101828]/20 p-6">
           <div
+            ref={confirmationDialogRef}
             role="alertdialog"
             aria-modal="true"
             aria-labelledby="canvas-v2-confirm-title"
             aria-describedby="canvas-v2-confirm-detail"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                event.stopPropagation()
+                setConfirmation(null)
+              } else if (event.key === 'Tab') {
+                trapDialogFocusV2(event, confirmationDialogRef.current)
+              }
+            }}
             className="w-full max-w-sm rounded-[16px] border border-gg-line bg-white p-5 shadow-float"
           >
             <h2 id="canvas-v2-confirm-title" className="text-[14px] font-semibold text-gg-ink">
@@ -1148,8 +1173,8 @@ export default function CanvasV2Stage() {
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <button
+                ref={confirmationCancelRef}
                 type="button"
-                autoFocus
                 onClick={() => setConfirmation(null)}
                 className="rounded-[9px] border border-gg-line px-3 py-2 text-[11px] text-gg-ink outline-none hover:bg-gg-subtle focus-visible:ring-2 focus-visible:ring-gg-primary/35"
               >
@@ -1186,6 +1211,31 @@ function targetFromKey(key: string): CanvasV2SelectionTarget | null {
   const id = key.slice(separator + 1)
   if (!id || (kind !== 'task' && kind !== 'node' && kind !== 'collection')) return null
   return { kind, id }
+}
+
+function trapDialogFocusV2(
+  event: KeyboardEvent<HTMLDivElement>,
+  dialog: HTMLDivElement | null,
+): void {
+  if (!dialog) return
+  const focusable = [...dialog.querySelectorAll<HTMLElement>(
+    'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+  )]
+  if (focusable.length === 0) {
+    event.preventDefault()
+    dialog.focus()
+    return
+  }
+  const first = focusable[0]!
+  const last = focusable.at(-1)!
+  const active = document.activeElement
+  if (event.shiftKey && (active === first || !dialog.contains(active))) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+    event.preventDefault()
+    first.focus()
+  }
 }
 
 function taskPreviewOffsetV2(
