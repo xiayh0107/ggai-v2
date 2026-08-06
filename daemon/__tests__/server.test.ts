@@ -152,6 +152,70 @@ test('Canvas V2 command API persists reducer commands with CAS', async () => {
   }
 })
 
+test('Canvas V2 HTTP retries remain exactly once after an intervening mutation', async () => {
+  const fixture = await startTestDaemon()
+  const post = (body: unknown) => fetch(`${fixture.baseUrl}/canvas/commands`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  try {
+    const create = await post({
+      branch: 'main',
+      baseRevision: 0,
+      mutationId: 'exact-create',
+      command: {
+        type: 'CreateTask',
+        task: {
+          id: 'task-exact',
+          title: 'Exactly once',
+          goal: 'Do not repeat movement',
+          anchor: { x: 100, y: 120 },
+          origin: { kind: 'user' },
+        },
+      },
+    })
+    assert.equal(create.status, 200, await create.text())
+    const moveBody = {
+      branch: 'main',
+      baseRevision: 1,
+      mutationId: 'exact-move',
+      command: {
+        type: 'MoveEntities',
+        entities: [{ kind: 'task', id: 'task-exact' }],
+        dx: 25,
+        dy: 10,
+      },
+    }
+    const firstMove = await post(moveBody)
+    assert.equal(firstMove.status, 200, await firstMove.text())
+
+    const intervening = await post({
+      branch: 'main',
+      baseRevision: 2,
+      mutationId: 'exact-update',
+      command: {
+        type: 'UpdateTaskGoal',
+        taskId: 'task-exact',
+        goal: 'An intervening command advanced the branch',
+      },
+    })
+    assert.equal(intervening.status, 200, await intervening.text())
+
+    const retry = await post({ ...moveBody, baseRevision: 3 })
+    const retryText = await retry.text()
+    assert.equal(retry.status, 200, retryText)
+    const envelope = JSON.parse(retryText) as {
+      revision: number
+      document: { tasks: Array<{ anchor: { x: number; y: number } }> }
+    }
+    assert.equal(envelope.revision, 3)
+    assert.deepEqual(envelope.document.tasks[0]?.anchor, { x: 125, y: 130 })
+  } finally {
+    await fixture.close()
+  }
+})
+
 test('V2 plugin capability handshake pins strict data before accepting a Run', async () => {
   const fixture = await startTestDaemon()
   const headers = { 'Content-Type': 'application/json' }
