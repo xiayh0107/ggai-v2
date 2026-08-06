@@ -135,6 +135,10 @@ export interface RunSummary {
   runId: string
   /** Task ownership is authoritative for Canvas V2 runs. */
   taskId?: string
+  /** Persisted context revision accepted for this Task-owned V2 run. */
+  baseRevision?: number
+  /** Exact prompt accepted for this Task-owned V2 run. */
+  prompt?: string
   /** Legacy target identity; V2 mirrors taskId here for transport compatibility. */
   nodeId: string
   agentId: string

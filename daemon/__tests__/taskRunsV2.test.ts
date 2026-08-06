@@ -134,6 +134,8 @@ test('Task-owned runs pin persisted context and resume by branch + task + agent'
     canvasDocument.nodes[0]!.text = 'mutated-after-acceptance'
     assert.equal(first.taskId, 'task-a')
     assert.equal(first.nodeId, 'task-a')
+    assert.equal(first.baseRevision, 1)
+    assert.equal(first.prompt, 'execute task-a')
     await waitFor(() => manager.get(first.runId)?.status === 'done')
 
     assert.equal(observed[0]?.sessionId, null)
@@ -155,6 +157,8 @@ test('Task-owned runs pin persisted context and resume by branch + task + agent'
 
     const durable = await manager.getPersisted(first.runId)
     assert.equal(durable?.taskId, 'task-a')
+    assert.equal(durable?.baseRevision, 1)
+    assert.equal(durable?.prompt, 'execute task-a')
     assert.equal((await manager.listRunHistory('.', { taskId: 'task-a' })).length, 2)
   } finally {
     await manager.close()

@@ -29,6 +29,19 @@ function summary(runId: string, status: RunSummary['status'] = 'running'): RunSu
   }
 }
 
+function taskSummary(
+  runId: string,
+  status: RunSummary['status'] = 'running',
+): RunSummary {
+  return {
+    ...summary(runId, status),
+    taskId: 'task-1',
+    nodeId: 'task-1',
+    baseRevision: 17,
+    prompt: 'Render the accepted revision exactly.',
+  }
+}
+
 async function writeRawSummary(root: string, value: RunSummary): Promise<void> {
   const directory = path.join(root, '.gg', 'runtime', 'runs', value.runId)
   await mkdir(directory, { recursive: true })
@@ -92,6 +105,63 @@ test('legacy summaries without a canvas branch normalize to main', async () => {
       (await subject.store.list({ canvasBranch: 'main' })).map((entry) => entry.runId),
       ['run-legacy'],
     )
+  } finally {
+    await subject.close()
+  }
+})
+
+test('Task-owned intent metadata survives finish, list, and a new store instance', async () => {
+  const subject = await fixture()
+  try {
+    await subject.store.start(taskSummary('run-task-intent'))
+    await subject.store.finish({
+      ...taskSummary('run-task-intent', 'done'),
+      finishedAt: 200,
+      sessionId: 'task-session',
+    })
+
+    const restarted = new RunLogStore(subject.root)
+    assert.deepEqual(await restarted.summary('run-task-intent'), {
+      ...taskSummary('run-task-intent', 'done'),
+      finishedAt: 200,
+      sessionId: 'task-session',
+    })
+    assert.deepEqual(
+      (await restarted.list({ taskId: 'task-1' })).map((entry) => ({
+        runId: entry.runId,
+        baseRevision: entry.baseRevision,
+        prompt: entry.prompt,
+      })),
+      [{
+        runId: 'run-task-intent',
+        baseRevision: 17,
+        prompt: 'Render the accepted revision exactly.',
+      }],
+    )
+  } finally {
+    await subject.close()
+  }
+})
+
+test('Task-owned intent metadata rejects malformed or legacy-owned fields', async () => {
+  const subject = await fixture()
+  try {
+    const invalid = [
+      { ...taskSummary('run-negative-revision'), baseRevision: -1 },
+      { ...taskSummary('run-fractional-revision'), baseRevision: 1.5 },
+      { ...taskSummary('run-missing-prompt'), prompt: undefined },
+      { ...taskSummary('run-missing-revision'), baseRevision: undefined },
+      { ...taskSummary('run-oversized-prompt'), prompt: 'x'.repeat(250_001) },
+      { ...summary('run-legacy-intent'), baseRevision: 1, prompt: 'not a V1 field' },
+    ]
+    for (const entry of invalid) {
+      await writeRawSummary(subject.root, entry as RunSummary)
+      await assert.rejects(
+        subject.store.summary(entry.runId),
+        /invalid durable summary: schema validation failed/u,
+      )
+    }
+    assert.deepEqual(await subject.store.list(), [])
   } finally {
     await subject.close()
   }
@@ -203,9 +273,7 @@ test('V2 startup recovery returns durable Task identity and appends one replayab
   const subject = await fixture()
   try {
     await subject.store.start({
-      ...summary('run-task-recovery'),
-      taskId: 'task-1',
-      nodeId: 'task-1',
+      ...taskSummary('run-task-recovery'),
       canvasBranch: 'feature/recovery',
     })
     await subject.store.append('run-task-recovery', {
@@ -216,9 +284,7 @@ test('V2 startup recovery returns durable Task identity and appends one replayab
 
     const [candidate] = await subject.store.prepareInterruptedRecovery()
     assert.deepEqual(candidate?.summary, {
-      ...summary('run-task-recovery', 'interrupted'),
-      taskId: 'task-1',
-      nodeId: 'task-1',
+      ...taskSummary('run-task-recovery', 'interrupted'),
       canvasBranch: 'feature/recovery',
       finishedAt: candidate?.summary.finishedAt,
       error: 'daemon restarted before the run completed',

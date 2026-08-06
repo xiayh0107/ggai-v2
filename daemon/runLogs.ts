@@ -36,6 +36,7 @@ const MAX_PAGE_SIZE = 2_000
 const SUMMARY_READ_CONCURRENCY = 16
 const INDEX_VALIDATION_BYTES = 1024 * 1024
 const MAX_TERMINAL_CLOSE_BYTES = 8 * 1024 * 1024
+const MAX_RUN_PROMPT_LENGTH = 250_000
 const TERMINAL_STATUSES = new Set<RunSummary['status']>([
   'done',
   'error',
@@ -737,6 +738,8 @@ function decodeSummary(source: string, expectedRunId: string): RunSummary {
     throw new RunSummaryCorruptionError(expectedRunId, 'expected an object')
   }
   const record = decoded as Record<string, unknown>
+  const hasBaseRevision = record.baseRevision !== undefined
+  const hasPrompt = record.prompt !== undefined
   if (
     record.runId !== expectedRunId
     || typeof record.nodeId !== 'string'
@@ -745,6 +748,12 @@ function decodeSummary(source: string, expectedRunId: string): RunSummary {
     || !isRunId(record.nodeId)
     || (record.taskId !== undefined
       && (typeof record.taskId !== 'string' || !isRunId(record.taskId)))
+    || hasBaseRevision !== hasPrompt
+    || ((hasBaseRevision || hasPrompt) && record.taskId === undefined)
+    || (hasBaseRevision
+      && (!Number.isSafeInteger(record.baseRevision) || (record.baseRevision as number) < 0))
+    || (hasPrompt
+      && (typeof record.prompt !== 'string' || record.prompt.length > MAX_RUN_PROMPT_LENGTH))
     || (record.pluginCapabilityDigest !== undefined
       && (typeof record.pluginCapabilityDigest !== 'string'
         || !/^[0-9a-f]{64}$/u.test(record.pluginCapabilityDigest)))
@@ -772,6 +781,8 @@ function decodeSummary(source: string, expectedRunId: string): RunSummary {
   return {
     runId: record.runId,
     ...(record.taskId === undefined ? {} : { taskId: record.taskId }),
+    ...(record.baseRevision === undefined ? {} : { baseRevision: record.baseRevision }),
+    ...(record.prompt === undefined ? {} : { prompt: record.prompt }),
     nodeId: record.nodeId,
     agentId: record.agentId,
     canvasBranch,

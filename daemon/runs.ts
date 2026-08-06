@@ -360,7 +360,11 @@ export class RunManager {
       const targetId = runTargetId(request)
       const summary: RunSummary = {
         runId,
-        ...(isResolvedTaskRunRequestV2(request) ? { taskId: request.taskId } : {}),
+        ...(isResolvedTaskRunRequestV2(request) ? {
+          taskId: request.taskId,
+          baseRevision: request.baseRevision,
+          prompt: request.prompt,
+        } : {}),
         nodeId: targetId,
         agentId: request.agentId,
         canvasBranch,
