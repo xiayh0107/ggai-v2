@@ -106,6 +106,12 @@ describe('context-aware Task creation', () => {
         contextRole: 'full',
       }],
     })
+    // The derived Task anchors below the source Node so its chrome and first
+    // output never stack on top of the original content.
+    expect(plan.task.anchor).toEqual({
+      x: 380 - 48,
+      y: 10 + 220,
+    })
     expect(source?.text).toBe('keep original')
   })
 

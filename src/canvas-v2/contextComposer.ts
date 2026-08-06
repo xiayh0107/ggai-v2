@@ -2,6 +2,7 @@ import type {
   CanvasCommandV2,
   DerivedTaskSourceV2,
 } from './commands'
+import { TASK_OUTPUT_LAYOUT_V2 } from './layout'
 import {
   entityKeyV2,
   type CanvasDocumentV2,
@@ -10,6 +11,11 @@ import {
   type CanvasTaskV2,
 } from './model'
 import type { CanvasV2SelectionTarget } from './persistence'
+import {
+  selectTaskBoundsV2,
+  selectTaskNodesV2,
+  type CanvasBoundsV2,
+} from './selectors'
 
 export interface CanvasV2ContextTaskPlan {
   task: CanvasTaskV2
@@ -77,9 +83,13 @@ export function buildContextTaskPlanV2(input: {
       relation: 'modified',
       contextRole: 'full',
     }
+    const derivedTask: CanvasTaskV2 = {
+      ...task,
+      anchor: derivedTaskAnchorV2([node.frame]),
+    }
     return {
-      task,
-      command: { type: 'CreateDerivedTaskFromSelection', task, sources: [source] },
+      task: derivedTask,
+      command: { type: 'CreateDerivedTaskFromSelection', task: derivedTask, sources: [source] },
       kind: 'derived',
       sourceCount: 1,
     }
@@ -93,9 +103,15 @@ export function buildContextTaskPlanV2(input: {
     relation: 'source',
     contextRole: 'full',
   }))
+  const sourceFrames = entities
+    .map((entity) => entityBoundsForAnchorV2(input.document, entity))
+    .filter((frame): frame is CanvasBoundsV2 => frame !== null)
+  const derivedTask: CanvasTaskV2 = sourceFrames.length > 0
+    ? { ...task, anchor: derivedTaskAnchorV2(sourceFrames) }
+    : task
   return {
-    task,
-    command: { type: 'CreateDerivedTaskFromSelection', task, sources },
+    task: derivedTask,
+    command: { type: 'CreateDerivedTaskFromSelection', task: derivedTask, sources },
     kind: 'derived',
     sourceCount: sources.length,
   }
@@ -130,6 +146,33 @@ export function isEmptyUserOutputSlotV2(node: CanvasDocumentV2['nodes'][number])
     && node.artifactRefs.length === 0
     && (node.text === undefined || node.text.trim().length === 0)
     && (node.payload === undefined || Object.keys(node.payload).length === 0)
+}
+
+/**
+ * A derived Task anchors so its chrome starts right below the source content
+ * and its first output Node never stacks on top of the original Node.
+ */
+const DERIVED_TASK_VERTICAL_GAP_V2 = 96
+
+function derivedTaskAnchorV2(frames: readonly CanvasBoundsV2[]): CanvasPointV2 {
+  const left = Math.min(...frames.map((frame) => frame.x))
+  const bottom = Math.max(...frames.map((frame) => frame.y + frame.h))
+  return {
+    x: left - TASK_OUTPUT_LAYOUT_V2.offsetX,
+    y: bottom + DERIVED_TASK_VERTICAL_GAP_V2 - TASK_OUTPUT_LAYOUT_V2.offsetY,
+  }
+}
+
+function entityBoundsForAnchorV2(
+  document: CanvasDocumentV2,
+  entity: CanvasEntityRef,
+): CanvasBoundsV2 | null {
+  if (entity.kind === 'node') {
+    return document.nodes.find((node) => node.id === entity.id)?.frame ?? null
+  }
+  const task = document.tasks.find((entry) => entry.id === entity.id)
+  if (!task) return null
+  return selectTaskBoundsV2(task, selectTaskNodesV2(document, task.id))
 }
 
 function taskTitleFromPromptV2(prompt: string): string {
