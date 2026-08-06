@@ -128,6 +128,40 @@ describe('CanvasV2NodeCard artifact projection', () => {
       `/runs/run-file/artifacts/${artifactId}`,
     )
   })
+
+  it('renders verified R source bytes inside the code artifact view', async () => {
+    const fetchArtifact = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/metadata')) {
+        return new Response(JSON.stringify({
+          schemaVersion: 2,
+          runId: 'run-r-source',
+          artifactId,
+          mediaType: 'text/x-r',
+          size: 45,
+          contentDigest: 'd'.repeat(64),
+        }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response('library(ggplot2)\nggplot(mtcars, aes(wt, mpg))', {
+        headers: { 'Content-Type': 'text/x-r' },
+      })
+    })
+    vi.stubGlobal('fetch', fetchArtifact)
+
+    await renderNode({
+      id: 'node-r-source',
+      type: 'code',
+      frame: { x: 0, y: 0, w: 360, h: 260, z: 1 },
+      title: 'classic_scatter_plot.R',
+      artifactRefs: [{ runId: 'run-r-source', artifactId }],
+      origin: { kind: 'user' },
+    })
+
+    expect(container?.querySelector('pre')?.textContent).toContain('ggplot(mtcars')
+    expect(fetchArtifact).toHaveBeenCalledTimes(2)
+    expect(fetchArtifact.mock.calls.some(([input]) =>
+      String(input).includes(`/runs/run-r-source/artifacts/${artifactId}?`))).toBe(true)
+  })
 })
 
 async function renderNode(node: CanvasNodeV2): Promise<void> {

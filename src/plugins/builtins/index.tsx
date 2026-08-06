@@ -3,7 +3,7 @@
  * 与社区插件完全同构——它们只是"系统自带的插件"，没有任何特权。
  * 新类型要加入画布，照此写一个 NodePlugin 并 registerPlugin 即可。
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Eye, ExternalLink, File as FileIcon, FileText, Link2, Image as ImageIcon,
   Pencil, Type, Table2, Sigma, Code2, Shapes, Sparkles, Globe,
@@ -36,6 +36,7 @@ const projectArtifactSummary: NonNullable<NodePlugin['projectArtifact']> = (arti
   title: artifact.title,
   meta: [artifact.mediaType, formatArtifactSize(artifact.size)],
 })
+const MAX_INLINE_CODE_BYTES_V2 = 1 * 1024 * 1024
 
 function formatArtifactSize(size: number): string {
   if (size < 1_024) return `${size} B`
@@ -78,6 +79,73 @@ function ImageArtifactContentV2({ artifact, content }: NodeArtifactViewPropsV2) 
       draggable={false}
       data-no-drag
     />
+  )
+}
+
+function CodeArtifactContentV2({ artifact, content }: NodeArtifactViewPropsV2) {
+  const artifactKey = `${artifact.runId}:${artifact.artifactId}:${artifact.contentDigest}`
+  const [source, setSource] = useState<{
+    key: string
+    status: 'loading' | 'ready' | 'error' | 'too-large'
+    text?: string
+  }>(() => ({
+    key: artifactKey,
+    status: artifact.size > MAX_INLINE_CODE_BYTES_V2 ? 'too-large' : 'loading',
+  }))
+
+  useEffect(() => {
+    if (artifact.size > MAX_INLINE_CODE_BYTES_V2) return
+    const abort = new AbortController()
+    void fetch(artifact.url, { signal: abort.signal }).then(async (response) => {
+      if (!response.ok) throw new Error(`artifact content request failed (${response.status})`)
+      return response.text()
+    }).then(
+      (text) => setSource({ key: artifactKey, status: 'ready', text }),
+      () => {
+        if (!abort.signal.aborted) setSource({ key: artifactKey, status: 'error' })
+      },
+    )
+    return () => abort.abort()
+  }, [artifact.size, artifact.url, artifactKey])
+
+  const current = source.key === artifactKey
+    ? source
+    : {
+        key: artifactKey,
+        status: artifact.size > MAX_INLINE_CODE_BYTES_V2
+          ? 'too-large' as const
+          : 'loading' as const,
+      }
+  const message = current.status === 'too-large'
+    ? '代码文件过大，请打开产物查看'
+    : current.status === 'error'
+      ? '代码内容暂时无法读取'
+      : '正在读取代码…'
+
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[10px] bg-gg-subtle">
+      {current.status === 'ready' ? (
+        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre p-3 font-mono text-[11.5px] leading-5 text-gg-ink">
+          {current.text}
+        </pre>
+      ) : (
+        <div role="status" className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-[11px] text-gg-muted">
+          {message}
+        </div>
+      )}
+      <div className="flex shrink-0 items-center justify-between gap-3 border-t border-gg-line bg-white px-3 py-2 text-[10px] text-gg-muted">
+        <span className="min-w-0 truncate">{content.title ?? artifact.title}</span>
+        <a
+          href={artifact.url}
+          target="_blank"
+          rel="noreferrer"
+          data-no-drag
+          className="shrink-0 text-gg-primary outline-none focus-visible:ring-2 focus-visible:ring-gg-primary/35"
+        >
+          打开产物
+        </a>
+      </div>
+    </div>
   )
 }
 
@@ -371,7 +439,7 @@ const codePlugin: NodePlugin = {
   views: {
     Empty: makeEmptyView(Code2, '描述并生成代码', '也可以直接粘贴已有代码'),
     Content: CodeContent,
-    Artifact: FileArtifactContentV2,
+    Artifact: CodeArtifactContentV2,
   },
   instr: {
     placeholder: '解释、重构这段代码，或补充注释…',
