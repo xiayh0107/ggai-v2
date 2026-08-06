@@ -14,6 +14,7 @@ import path from 'node:path'
 import test from 'node:test'
 import type { CanvasDocumentV2 } from '../../src/canvas-v2/model.js'
 import { ProtocolError } from '../protocol.js'
+import { resolveProjectionPluginCapabilitySnapshotV2 } from '../pluginCapabilitiesV2.js'
 import type { AgentRegistry } from '../registry.js'
 import { RunManager } from '../runs.js'
 import { RunArtifactStoreV2 } from '../runArtifactStorageV2.js'
@@ -335,6 +336,82 @@ test('successful Task runs persist a trusted plan from the V2 sidecar and verifi
     assert.equal(await reopened.getPendingProjectionPlan(planId, '.', 'other'), null)
   } finally {
     await Promise.all([manager.close(), reopened.close()])
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('Task acceptance pins community artifact capabilities for packing and close projection', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-task-runs-v2-capabilities-'))
+  let renderedPack = ''
+  const transport: AgentProcessTransport = {
+    kind: 'codex',
+    async run(options: TransportRunOptions): Promise<TransportRunResult> {
+      renderedPack = await readFile(options.contextFile, 'utf8')
+      await writeFile(path.join(options.artifactDir, 'result.nbx'), 'notebook\n', 'utf8')
+      await mkdir(path.join(options.artifactDir, '.ggai'), { recursive: true })
+      await writeFile(
+        path.join(options.artifactDir, '.ggai', 'run-result.json'),
+        `${JSON.stringify({
+          schemaVersion: 2,
+          suggestedActions: [],
+          outputs: [{
+            key: 'notebook',
+            path: 'result.nbx',
+            pluginId: '@community/notebook',
+            role: 'primary',
+          }],
+          taskProposals: [],
+        })}\n`,
+        'utf8',
+      )
+      options.onEvent({ type: 'done', stopReason: 'end_turn' })
+      return { sessionId: null }
+    },
+    async cancel() {
+      return false
+    },
+  }
+  const manager = new RunManager({ projectRoot: root, registry: registry(transport) })
+  const pluginCapabilities = resolveProjectionPluginCapabilitySnapshotV2({
+    schemaVersion: 2,
+    plugins: [{
+      id: '@community/notebook',
+      artifactClaims: [{ extensions: ['.nbx'] }],
+    }],
+  })
+  const input = request('task-run-community-plugin')
+  input.pluginCapabilities = pluginCapabilities
+
+  try {
+    const run = await manager.create(input)
+    assert.equal(run.pluginCapabilityDigest, pluginCapabilities.digest)
+    await waitFor(() => manager.get(run.runId)?.status === 'done')
+    assert.match(renderedPack, /@community\/notebook/u)
+    assert.match(renderedPack, new RegExp(pluginCapabilities.digest, 'u'))
+    assert.deepEqual(
+      JSON.parse(await readFile(path.join(
+        root,
+        '.gg',
+        'runtime',
+        'plugin-capabilities-v2',
+        `${pluginCapabilities.digest}.json`,
+      ), 'utf8')),
+      pluginCapabilities,
+    )
+
+    let projectedPluginId: string | undefined
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const page = await manager.readRunLog(run.runId)
+      const close = page?.entries.find((entry) => entry.event === 'close')
+      if (close && close.event === 'close') {
+        projectedPluginId = close.data.projectionPlan?.outputs[0]?.pluginId
+        break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    assert.equal(projectedPluginId, '@community/notebook')
+  } finally {
+    await manager.close()
     await rm(root, { recursive: true, force: true })
   }
 })

@@ -11,6 +11,12 @@ import { readRunOutcome } from './outcome.js'
 import { readRunOutcomeV2 } from './outcomeV2.js'
 import { listArtifactSnapshot, prepareRunContext } from './packer.js'
 import {
+  BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2,
+  ProjectionPluginCapabilityStoreV2,
+  inspectProjectionPluginCapabilitySnapshotV2,
+  type ProjectionPluginCapabilitySnapshotV2,
+} from './pluginCapabilitiesV2.js'
+import {
   assessWritePath,
   canonicalizePotentialPath,
   createProjectScope,
@@ -47,7 +53,6 @@ import {
 import { parseTaskIdV2 } from './taskRunProtocolV2.js'
 import type { AgentProcessTransport } from './transport/types.js'
 import { watchArtifacts, type ArtifactWatcher } from './watcher.js'
-import { BUILTIN_PROJECTION_PLUGIN_CONTRACTS_V2 } from './projectionPluginsV2.js'
 import type { ProjectionPlanV2, ProjectionSettlementV2 } from './projectionPlanV2.js'
 import {
   ProjectionPlanStoreV2,
@@ -184,6 +189,7 @@ export class RunManager {
   readonly #taskSessionStores = new Map<string, TaskSessionStoreV2>()
   readonly #artifactStoresV2 = new Map<string, RunArtifactStoreV2>()
   readonly #projectionPlanStoresV2 = new Map<string, ProjectionPlanStoreV2>()
+  readonly #pluginCapabilityStoresV2 = new Map<string, ProjectionPluginCapabilityStoreV2>()
   readonly #runLogStores = new Map<string, RunLogStore>()
   readonly #runLogRecovery = new Map<string, Promise<void>>()
   readonly #pendingCreates = new Map<string, PendingRunCreation>()
@@ -210,7 +216,10 @@ export class RunManager {
     this.#assertOpen()
     // Pin the revision payload before any asynchronous lease/path work so a
     // caller cannot mutate the context while the run is being accepted.
-    if (isResolvedTaskRunRequestV2(request)) request = structuredClone(request)
+    if (isResolvedTaskRunRequestV2(request)) {
+      const pluginCapabilities = pinProjectionPluginCapabilitiesV2(request.pluginCapabilities)
+      request = structuredClone({ ...request, pluginCapabilities })
+    }
     const transport = this.#registry.resolve(request.agentId)
     if (!transport) {
       throw new ProtocolError(`unknown agent: ${request.agentId}`, 'unknown_agent', 404)
@@ -222,6 +231,14 @@ export class RunManager {
     })
     this.#assertOpen()
     const projectDir = scope.projectDir
+    if (isResolvedTaskRunRequestV2(request)) {
+      request = {
+        ...request,
+        pluginCapabilities: await this.#pluginCapabilitiesV2(projectDir).pin(
+          requirePinnedPluginCapabilitiesV2(request),
+        ),
+      }
+    }
     const canvasBranch = request.canvasBranch ?? 'main'
     const runId = request.runId ?? randomUUID()
     const existing = this.#runs.get(runId)
@@ -347,6 +364,9 @@ export class RunManager {
         nodeId: targetId,
         agentId: request.agentId,
         canvasBranch,
+        ...(isResolvedTaskRunRequestV2(request)
+          ? { pluginCapabilityDigest: requirePinnedPluginCapabilitiesV2(request).digest }
+          : {}),
         status: 'preparing',
         startedAt: Date.now(),
         sessionId: null,
@@ -1015,7 +1035,7 @@ export class RunManager {
           runId: run.summary.runId,
           runStatus: status,
           manifest: artifactManifest,
-          plugins: BUILTIN_PROJECTION_PLUGIN_CONTRACTS_V2,
+          plugins: requirePinnedPluginCapabilitiesV2(run.request).plugins,
           ...(status === 'done' && outcome ? { outcome } : {}),
         })
         projectionPlan = created.plan
@@ -1206,11 +1226,21 @@ export class RunManager {
           projectDir,
           canvasBranch,
         ),
+        pluginCapabilities: (digest) => this.#pluginCapabilitiesV2(projectDir).recover(digest),
         ...(this.#onProjectionPlanReady
           ? { onProjectionPlanReady: this.#onProjectionPlanReady }
           : {}),
       }).then(() => undefined)
       this.#runLogRecovery.set(projectDir, recovery)
+    }
+    return store
+  }
+
+  #pluginCapabilitiesV2(projectDir: string): ProjectionPluginCapabilityStoreV2 {
+    let store = this.#pluginCapabilityStoresV2.get(projectDir)
+    if (!store) {
+      store = new ProjectionPluginCapabilityStoreV2(projectDir)
+      this.#pluginCapabilityStoresV2.set(projectDir, store)
     }
     return store
   }
@@ -1639,7 +1669,34 @@ function runRequestIdentity(request: RunExecutionRequest): string {
     prompt: request.prompt,
     attachments: request.attachments,
     materializationPolicy: request.materializationPolicy,
+    pluginCapabilityDigest: requirePinnedPluginCapabilitiesV2(request).digest,
   })
+}
+
+function pinProjectionPluginCapabilitiesV2(
+  value: ProjectionPluginCapabilitySnapshotV2 | undefined,
+): ProjectionPluginCapabilitySnapshotV2 {
+  if (value === undefined) {
+    return structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2)
+  }
+  const inspection = inspectProjectionPluginCapabilitySnapshotV2(value)
+  if (inspection.status !== 'valid') {
+    throw new ProtocolError(
+      `plugin capability snapshot is invalid: ${inspection.reason}`,
+      'invalid_plugin_capabilities',
+      400,
+    )
+  }
+  return inspection.snapshot
+}
+
+function requirePinnedPluginCapabilitiesV2(
+  request: Extract<RunExecutionRequest, { schemaVersion: 2 }>,
+): ProjectionPluginCapabilitySnapshotV2 {
+  if (!request.pluginCapabilities) {
+    throw new TypeError('Task Run was not pinned to plugin capabilities')
+  }
+  return request.pluginCapabilities
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {

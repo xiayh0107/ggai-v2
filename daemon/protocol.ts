@@ -140,6 +140,8 @@ export interface RunSummary {
   agentId: string
   /** Logical canvas branch that owned the run; absent only on legacy summaries. */
   canvasBranch?: string
+  /** Content-addressed artifact projection registry fixed when this run was accepted. */
+  pluginCapabilityDigest?: string
   status: DaemonRunStatus
   startedAt: number
   finishedAt?: number

@@ -737,6 +737,9 @@ function decodeSummary(source: string, expectedRunId: string): RunSummary {
     || !isRunId(record.nodeId)
     || (record.taskId !== undefined
       && (typeof record.taskId !== 'string' || !isRunId(record.taskId)))
+    || (record.pluginCapabilityDigest !== undefined
+      && (typeof record.pluginCapabilityDigest !== 'string'
+        || !/^[0-9a-f]{64}$/u.test(record.pluginCapabilityDigest)))
     || !isRunId(record.agentId)
     || !isRunStatus(record.status)
     || typeof record.startedAt !== 'number'
@@ -764,6 +767,9 @@ function decodeSummary(source: string, expectedRunId: string): RunSummary {
     nodeId: record.nodeId,
     agentId: record.agentId,
     canvasBranch,
+    ...(record.pluginCapabilityDigest === undefined
+      ? {}
+      : { pluginCapabilityDigest: record.pluginCapabilityDigest }),
     status: record.status,
     startedAt: record.startedAt,
     ...(record.finishedAt === undefined ? {} : { finishedAt: record.finishedAt }),

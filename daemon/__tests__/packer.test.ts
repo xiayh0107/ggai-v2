@@ -6,6 +6,7 @@ import test from 'node:test'
 import type { CanvasDocumentV2 } from '../../src/canvas-v2/model.js'
 import { artifactRunDir } from '../artifactPaths.js'
 import { listArtifactSnapshot, prepareRunContext } from '../packer.js'
+import { BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2 } from '../pluginCapabilitiesV2.js'
 import type { CreateRunRequest } from '../protocol.js'
 import type { ResolvedTaskRunRequestV2 } from '../taskRunTypesV2.js'
 
@@ -225,6 +226,7 @@ test('Task V2 packs bounded full-edge outputs with daemon-verified artifact path
       size: 42,
       contentDigest: digest,
     }],
+    pluginCapabilities: BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2,
     automationMode: 'confirm',
   }
 
@@ -237,6 +239,7 @@ test('Task V2 packs bounded full-edge outputs with daemon-verified artifact path
     )) as {
       inputs: Array<{ outputs?: Array<{ artifactRefs: unknown[] }> }>
       verifiedArtifactAttachments: Array<{ projectRelativePath: string; contentDigest: string }>
+      pluginCapabilities: { digest: string; plugins: Array<{ id: string }> }
     }
 
     assert.deepEqual(json.inputs[0]?.outputs?.[0]?.artifactRefs, [{
@@ -251,6 +254,13 @@ test('Task V2 packs bounded full-edge outputs with daemon-verified artifact path
       size: 42,
       contentDigest: digest,
     }])
+    assert.equal(
+      json.pluginCapabilities.digest,
+      BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2.digest,
+    )
+    assert.ok(json.pluginCapabilities.plugins.some(({ id }) => id === 'file'))
+    assert.match(rendered, /Fixed artifact plugin capabilities for this run/u)
+    assert.match(rendered, new RegExp(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2.digest, 'u'))
     assert.match(rendered, /Verified read-only artifact attachments/u)
     assert.match(rendered, new RegExp(artifactId, 'u'))
     assert.match(rendered, new RegExp(verifiedPath.replaceAll('.', '\\.'), 'u'))

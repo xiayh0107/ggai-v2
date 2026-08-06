@@ -122,6 +122,21 @@ export class ProjectionPluginCapabilityStoreV2 {
 
   async register(value: unknown): Promise<ProjectionPluginCapabilitySnapshotV2> {
     const snapshot = resolveProjectionPluginCapabilitySnapshotV2(value)
+    return this.#persist(snapshot)
+  }
+
+  /** Revalidates and durably pins a daemon-resolved snapshot before Run acceptance. */
+  async pin(value: unknown): Promise<ProjectionPluginCapabilitySnapshotV2> {
+    const inspection = inspectProjectionPluginCapabilitySnapshotV2(value)
+    if (inspection.status !== 'valid') {
+      throw new TypeError(`plugin capability snapshot is invalid: ${inspection.reason}`)
+    }
+    return this.#persist(inspection.snapshot)
+  }
+
+  async #persist(
+    snapshot: ProjectionPluginCapabilitySnapshotV2,
+  ): Promise<ProjectionPluginCapabilitySnapshotV2> {
     await this.#assertSafeRoot(true)
     const target = this.#snapshotPath(snapshot.digest)
     const existing = await this.get(snapshot.digest)

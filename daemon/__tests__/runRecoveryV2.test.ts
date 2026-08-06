@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { buildProjectionPlanV2 } from '../projectionPlanV2.js'
+import { resolveProjectionPluginCapabilitySnapshotV2 } from '../pluginCapabilitiesV2.js'
 import type { ProjectionPlanRecordV2 } from '../projectionPlanStoreV2.js'
 import {
   recoverInterruptedTaskRunsV2,
@@ -14,6 +15,7 @@ import { RunLogStore } from '../runLogs.js'
 
 class PendingRecoveryPlans implements InterruptedProjectionPlanStoreV2 {
   readonly calls: Array<{ taskId: string; runId: string }> = []
+  readonly pluginIds: string[][] = []
   readonly records = new Map<string, ProjectionPlanRecordV2>()
 
   async get(planId: string): Promise<ProjectionPlanRecordV2 | undefined> {
@@ -25,6 +27,7 @@ class PendingRecoveryPlans implements InterruptedProjectionPlanStoreV2 {
     input: Parameters<InterruptedProjectionPlanStoreV2['recoverInterrupted']>[0],
   ): Promise<Awaited<ReturnType<InterruptedProjectionPlanStoreV2['recoverInterrupted']>>> {
     this.calls.push({ taskId: input.taskId, runId: input.runId })
+    this.pluginIds.push(input.plugins.map(({ id }) => id))
     const built = buildProjectionPlanV2({
       ...input,
       runStatus: 'interrupted',
@@ -146,6 +149,52 @@ test('recovers Task V2 manifests, partial plans, and closes while leaving V1 unc
     assert.equal(second.appendedCloses, 0)
     assert.equal(materialized.length, 1)
     assert.equal((await runLogs.page('run-v2-recover'))?.entries.length, 2)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('crash recovery resolves the capability digest fixed in the durable summary', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-run-capability-recovery-')))
+  const runLogs = new RunLogStore(root)
+  const plans = new PendingRecoveryPlans()
+  const artifacts = new RunArtifactStoreV2(root, 'main')
+  const snapshot = resolveProjectionPluginCapabilitySnapshotV2({
+    schemaVersion: 2,
+    plugins: [{
+      id: '@community/notebook',
+      artifactClaims: [{ extensions: ['.nbx'] }],
+    }],
+  })
+  try {
+    await runLogs.start({
+      runId: 'run-community-recovery',
+      taskId: 'task-community-recovery',
+      nodeId: 'task-community-recovery',
+      agentId: 'codex',
+      canvasBranch: 'main',
+      pluginCapabilityDigest: snapshot.digest,
+      status: 'running',
+      startedAt: 100,
+      sessionId: null,
+    })
+    const location = await artifacts.prepareRun('run-community-recovery')
+    await writeFile(path.join(location.absoluteFilesRoot, 'partial.nbx'), 'notebook\n', 'utf8')
+
+    const report = await recoverInterruptedTaskRunsV2({
+      projectDir: root,
+      runLogs,
+      artifactStore: () => artifacts,
+      projectionPlanStore: () => plans,
+      pluginCapabilities: async (digest) => {
+        assert.equal(digest, snapshot.digest)
+        return snapshot
+      },
+    })
+    assert.deepEqual(report.failures, [])
+    assert.ok(plans.pluginIds[0]?.includes('@community/notebook'))
+    const close = await runLogs.terminalClose('run-community-recovery')
+    assert.equal(close?.projectionPlan?.outputs[0]?.pluginId, '@community/notebook')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

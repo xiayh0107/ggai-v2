@@ -1,6 +1,10 @@
 import path from 'node:path'
 import type { ArtifactManifestV1 } from './artifactManifestV2.js'
-import { BUILTIN_PROJECTION_PLUGIN_CONTRACTS_V2 } from './projectionPluginsV2.js'
+import {
+  BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2,
+  type ProjectionPluginCapabilitySnapshotV2,
+} from './pluginCapabilitiesV2.js'
+import type { ProjectionPluginContractV2 } from './projectionPlanV2.js'
 import type { ProjectionPlanRecordV2 } from './projectionPlanStoreV2.js'
 import type { RunClosePayload, RunSummary } from './protocol.js'
 import type { RunArtifactStoreV2 } from './runArtifactStorageV2.js'
@@ -19,7 +23,7 @@ export interface InterruptedProjectionPlanStoreV2 {
     taskId: string
     runId: string
     manifest: ArtifactManifestV1
-    plugins: typeof BUILTIN_PROJECTION_PLUGIN_CONTRACTS_V2
+    plugins: readonly ProjectionPluginContractV2[]
   }): Promise<{
     record: ProjectionPlanRecordV2
     disposition: InterruptedProjectionPlanDispositionV2
@@ -31,6 +35,10 @@ export interface RecoverInterruptedTaskRunsV2Options {
   runLogs: RunLogStore
   artifactStore(canvasBranch: string): RunArtifactStoreV2
   projectionPlanStore(canvasBranch: string): InterruptedProjectionPlanStoreV2
+  /** Resolves the registry digest persisted in summary.json. */
+  pluginCapabilities?(
+    digest: string | undefined,
+  ): Promise<ProjectionPluginCapabilitySnapshotV2>
   /** Runs only after the reconstructed close is durable. */
   onProjectionPlanReady?(input: {
     plan: ProjectionPlanRecordV2['plan']
@@ -41,7 +49,12 @@ export interface RecoverInterruptedTaskRunsV2Options {
 
 export interface InterruptedTaskRunRecoveryFailureV2 {
   runId: string
-  stage: 'manifest' | 'projection-plan' | 'run-log' | 'projection-hook'
+  stage:
+    | 'manifest'
+    | 'plugin-capabilities'
+    | 'projection-plan'
+    | 'run-log'
+    | 'projection-hook'
   message: string
 }
 
@@ -134,6 +147,16 @@ export async function recoverInterruptedTaskRunsV2(
     }
 
     if (manifest) {
+      let pluginCapabilities = structuredClone(
+        BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2,
+      )
+      if (options.pluginCapabilities) {
+        try {
+          pluginCapabilities = await options.pluginCapabilities(summary.pluginCapabilityDigest)
+        } catch (error) {
+          report.failures.push(failure(summary.runId, 'plugin-capabilities', error))
+        }
+      }
       try {
         const recovered = await options
           .projectionPlanStore(summary.canvasBranch ?? 'main')
@@ -141,7 +164,7 @@ export async function recoverInterruptedTaskRunsV2(
             taskId: summary.taskId,
             runId: summary.runId,
             manifest,
-            plugins: BUILTIN_PROJECTION_PLUGIN_CONTRACTS_V2,
+            plugins: pluginCapabilities.plugins,
           })
         if (recovered.disposition === 'closed') {
           report.closedPlans += 1

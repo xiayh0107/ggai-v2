@@ -1,4 +1,5 @@
 import type { CanvasDocumentV2 } from '../src/canvas-v2/model.js'
+import type { ProjectionPluginCapabilitySnapshotV2 } from './pluginCapabilitiesV2.js'
 import type { CreateRunRequest } from './protocol.js'
 import type { RunIntentV2 } from './taskRunProtocolV2.js'
 
@@ -16,6 +17,8 @@ export interface ResolvedTaskRunRequestV2 extends RunIntentV2 {
   projectDir: string
   canvasDocument: CanvasDocumentV2
   resolvedArtifactAttachments: ResolvedArtifactAttachmentV2[]
+  /** Daemon-resolved immutable registry. Absent callers are pinned to built-ins at acceptance. */
+  pluginCapabilities?: ProjectionPluginCapabilitySnapshotV2
   automationMode: 'confirm'
 }
 

@@ -19,6 +19,7 @@ import {
   RUN_OUTCOME_RELATIVE_PATH,
 } from './outcome.js'
 import { isPathWithin } from './permissions.js'
+import type { ProjectionPluginCapabilitySnapshotV2 } from './pluginCapabilitiesV2.js'
 import type { CreateRunRequest, PluginContract } from './protocol.js'
 import { RunArtifactStoreV2 } from './runArtifactStorageV2.js'
 import {
@@ -464,10 +465,16 @@ async function prepareTaskRunContextV2(
     size: attachment.size,
     contentDigest: attachment.contentDigest,
   }))
+  if (!request.pluginCapabilities) {
+    throw new TypeError('Task Run context is missing its fixed plugin capability snapshot')
+  }
+  const pluginCapabilities = renderPluginCapabilitiesV2(request.pluginCapabilities)
   const rendered = [
     daemonContract.trimEnd(),
     '',
     renderTaskContextPromptV2(pack),
+    '',
+    pluginCapabilities,
     ...(verifiedArtifactAttachments.length > 0 ? [
       '',
       '## Verified read-only artifact attachments',
@@ -486,12 +493,17 @@ async function prepareTaskRunContextV2(
   const packJson = `${JSON.stringify({
     ...pack,
     verifiedArtifactAttachments,
+    pluginCapabilities: request.pluginCapabilities,
   }, null, 2)}\n`
 
   await Promise.all([
     atomicWrite(contextFile, rendered),
     atomicWrite(path.join(contextDir, 'pack.json'), packJson),
     atomicWrite(path.join(contextDir, 'AGENTS.md'), daemonContract),
+    atomicWrite(
+      path.join(contextDir, 'plugin-capabilities.v2.json'),
+      `${JSON.stringify(request.pluginCapabilities, null, 2)}\n`,
+    ),
     writePluginContracts(path.join(contextDir, 'skills'), [], artifactTarget),
   ])
 
@@ -514,4 +526,24 @@ async function prepareTaskRunContextV2(
       `Write deliverables under ${JSON.stringify(artifactDir)} and report their project-relative paths.`,
     ].join(' '),
   }
+}
+
+function renderPluginCapabilitiesV2(
+  snapshot: ProjectionPluginCapabilitySnapshotV2,
+): string {
+  return [
+    '## Fixed artifact plugin capabilities for this run',
+    '',
+    `Registry digest: \`${snapshot.digest}\``,
+    '',
+    '- Every output pluginId must name one plugin in this exact registry.',
+    '- The output path and detected media type must match that plugin\'s artifactRules.',
+    '- The daemon intersects the sidecar with the verified artifact manifest and this registry.',
+    '- Unknown files safely fall back to the built-in `file` plugin.',
+    '- These declarations are data only; they grant no Canvas IDs, payload, coordinates, edges, or commands.',
+    '',
+    '```json',
+    JSON.stringify(snapshot.plugins, null, 2),
+    '```',
+  ].join('\n')
 }
