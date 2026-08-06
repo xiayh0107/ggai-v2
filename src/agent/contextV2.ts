@@ -28,6 +28,8 @@ export const MAX_TASK_CONTEXT_ENTITIES_V2 = 256
 export const MAX_TASK_CONTEXT_EDGES_V2 = 512
 export const MAX_TASK_CONTEXT_DEPTH_V2 = 12
 export const MAX_TASK_CONTEXT_TASK_SUMMARY_V2 = 1_000
+export const MAX_TASK_CONTEXT_ARTIFACT_REFS_V2 = 64
+export const MAX_TASK_CONTEXT_TASK_OUTPUTS_V2 = 32
 
 export interface TaskContextTargetV2 {
   id: string
@@ -49,6 +51,7 @@ export interface TaskContextFullNodeInputV2 extends TaskContextInputBaseV2 {
   text: string | null
   payload: Record<string, unknown> | null
   artifactRefs: CanvasArtifactRefV2[]
+  artifactRefsTruncated: boolean
 }
 
 export interface TaskContextSummaryNodeInputV2 extends TaskContextInputBaseV2 {
@@ -59,13 +62,35 @@ export interface TaskContextSummaryNodeInputV2 extends TaskContextInputBaseV2 {
   type: string
 }
 
-export interface TaskContextTaskInputV2 extends TaskContextInputBaseV2 {
+export interface TaskContextTaskOutputV2 {
+  ref: { kind: 'node'; id: string }
+  title: string
+  type: string
+  artifactRefs: CanvasArtifactRefV2[]
+  artifactRefsTruncated: boolean
+}
+
+export interface TaskContextFullTaskInputV2 extends TaskContextInputBaseV2 {
   kind: 'task'
   ref: { kind: 'task'; id: string }
-  contextRole: 'full' | 'summary'
+  contextRole: 'full'
+  title: string
+  goalSummary: string
+  outputs: TaskContextTaskOutputV2[]
+  outputsTruncated: boolean
+}
+
+export interface TaskContextSummaryTaskInputV2 extends TaskContextInputBaseV2 {
+  kind: 'task'
+  ref: { kind: 'task'; id: string }
+  contextRole: 'summary'
   title: string
   goalSummary: string
 }
+
+export type TaskContextTaskInputV2 =
+  | TaskContextFullTaskInputV2
+  | TaskContextSummaryTaskInputV2
 
 export type TaskContextInputV2 =
   | TaskContextFullNodeInputV2
@@ -116,6 +141,8 @@ export interface TaskContextPackV2 {
     maxEntities: number
     maxEdges: number
     maxDepth: number
+    maxArtifactRefs: number
+    maxTaskOutputs: number
   }
   truncated: boolean
 }
@@ -150,11 +177,33 @@ export function compileTaskContextV2(input: CompileTaskContextV2Input): TaskCont
     && edge.to.id === task.id
   )
   const selectedDirectEdges = directEdges.slice(0, limits.maxInputs)
+  const artifactBudget: ArtifactBudgetV2 = {
+    remaining: limits.maxArtifactRefs,
+    selectedKeys: new Set(),
+  }
+  const taskOutputBudget: TaskOutputBudgetV2 = { remaining: limits.maxTaskOutputs }
+  let inputsTruncated = false
   const inputs = selectedDirectEdges.map((edge) => {
+    let built: BuiltTaskContextInputV2
     if (edge.from.kind === 'node') {
-      return buildNodeInput(requireNode(nodesById, edge.from.id), edge.relation, edge.contextRole)
+      built = buildNodeInput(
+        requireNode(nodesById, edge.from.id),
+        edge.relation,
+        edge.contextRole,
+        artifactBudget,
+      )
+    } else {
+      built = buildTaskInput(
+        requireTask(tasksById, edge.from.id),
+        edge.relation,
+        edge.contextRole,
+        input.document.nodes,
+        taskOutputBudget,
+        artifactBudget,
+      )
     }
-    return buildTaskInput(requireTask(tasksById, edge.from.id), edge.relation, edge.contextRole)
+    inputsTruncated ||= built.truncated
+    return built.input
   })
   const graph = collectRelatedGraph(
     input.document,
@@ -179,8 +228,34 @@ export function compileTaskContextV2(input: CompileTaskContextV2Input): TaskCont
       runOutcomeSchemaVersion: 2,
     },
     limits,
-    truncated: directEdges.length > selectedDirectEdges.length || graph.truncated,
+    truncated: directEdges.length > selectedDirectEdges.length || inputsTruncated || graph.truncated,
   }
+}
+
+/**
+ * Returns the unique artifact identities authorized by direct `full` input
+ * edges in a compiled pack. The daemon still has to resolve every identity
+ * through its closed manifest before exposing a filesystem path.
+ */
+export function taskContextArtifactRefsV2(
+  pack: TaskContextPackV2,
+): CanvasArtifactRefV2[] {
+  const refs: CanvasArtifactRefV2[] = []
+  const seen = new Set<string>()
+  const append = (candidates: readonly CanvasArtifactRefV2[]) => {
+    for (const candidate of candidates) {
+      const key = artifactRefKey(candidate)
+      if (seen.has(key)) continue
+      seen.add(key)
+      refs.push(structuredClone(candidate))
+    }
+  }
+  for (const input of pack.inputs) {
+    if (input.contextRole !== 'full') continue
+    if (input.kind === 'node') append(input.artifactRefs)
+    else for (const output of input.outputs) append(output.artifactRefs)
+  }
+  return refs
 }
 
 export function renderTaskContextPromptV2(pack: TaskContextPackV2): string {
@@ -260,7 +335,8 @@ function buildNodeInput(
   node: CanvasNodeV2,
   relation: CanvasEdgeRelationV2,
   contextRole: Exclude<CanvasEdgeContextRoleV2, 'none'>,
-): TaskContextFullNodeInputV2 | TaskContextSummaryNodeInputV2 {
+  artifactBudget: ArtifactBudgetV2,
+): BuiltTaskContextInputV2 {
   const summary = {
     kind: 'node' as const,
     ref: { kind: 'node' as const, id: node.id },
@@ -268,13 +344,20 @@ function buildNodeInput(
     title: node.title,
     type: node.type,
   }
-  if (contextRole === 'summary') return { ...summary, contextRole }
+  if (contextRole === 'summary') {
+    return { input: { ...summary, contextRole }, truncated: false }
+  }
+  const selected = selectArtifactRefs(node.artifactRefs, artifactBudget)
   return {
-    ...summary,
-    contextRole,
-    text: node.text ?? null,
-    payload: node.payload ? structuredClone(node.payload) : null,
-    artifactRefs: structuredClone(node.artifactRefs),
+    input: {
+      ...summary,
+      contextRole,
+      text: node.text ?? null,
+      payload: node.payload ? structuredClone(node.payload) : null,
+      artifactRefs: selected.refs,
+      artifactRefsTruncated: selected.truncated,
+    },
+    truncated: selected.truncated,
   }
 }
 
@@ -282,15 +365,89 @@ function buildTaskInput(
   task: CanvasTaskV2,
   relation: CanvasEdgeRelationV2,
   contextRole: Exclude<CanvasEdgeContextRoleV2, 'none'>,
-): TaskContextTaskInputV2 {
-  return {
-    kind: 'task',
-    ref: { kind: 'task', id: task.id },
+  nodes: readonly CanvasNodeV2[],
+  outputBudget: TaskOutputBudgetV2,
+  artifactBudget: ArtifactBudgetV2,
+): BuiltTaskContextInputV2 {
+  const summary = {
+    kind: 'task' as const,
+    ref: { kind: 'task' as const, id: task.id },
     relation,
-    contextRole,
     title: task.title,
     goalSummary: summarize(task.goal),
   }
+  if (contextRole === 'summary') {
+    return { input: { ...summary, contextRole }, truncated: false }
+  }
+  // Empty output slots are layout state, not readable Task output context.
+  // Artifact identities remain provisional here and are verified against the
+  // owning run's closed manifest by the daemon before any path is exposed.
+  const candidates = nodes.filter((node) =>
+    node.homeTaskId === task.id && node.artifactRefs.length > 0)
+  const selectedCandidates = candidates.slice(0, outputBudget.remaining)
+  outputBudget.remaining -= selectedCandidates.length
+  let truncated = candidates.length > selectedCandidates.length
+  const outputs = selectedCandidates.map((node): TaskContextTaskOutputV2 => {
+    const selected = selectArtifactRefs(node.artifactRefs, artifactBudget)
+    truncated ||= selected.truncated
+    return {
+      ref: { kind: 'node', id: node.id },
+      title: node.title,
+      type: node.type,
+      artifactRefs: selected.refs,
+      artifactRefsTruncated: selected.truncated,
+    }
+  })
+  return {
+    input: {
+      ...summary,
+      contextRole,
+      outputs,
+      outputsTruncated: candidates.length > outputs.length,
+    },
+    truncated,
+  }
+}
+
+interface ArtifactBudgetV2 {
+  remaining: number
+  selectedKeys: Set<string>
+}
+
+interface TaskOutputBudgetV2 {
+  remaining: number
+}
+
+interface BuiltTaskContextInputV2 {
+  input: TaskContextInputV2
+  truncated: boolean
+}
+
+function selectArtifactRefs(
+  candidates: readonly CanvasArtifactRefV2[],
+  budget: ArtifactBudgetV2,
+): { refs: CanvasArtifactRefV2[]; truncated: boolean } {
+  const refs: CanvasArtifactRefV2[] = []
+  let truncated = false
+  for (const candidate of candidates) {
+    const key = artifactRefKey(candidate)
+    if (budget.selectedKeys.has(key)) {
+      refs.push(structuredClone(candidate))
+      continue
+    }
+    if (budget.remaining === 0) {
+      truncated = true
+      continue
+    }
+    budget.selectedKeys.add(key)
+    budget.remaining -= 1
+    refs.push(structuredClone(candidate))
+  }
+  return { refs, truncated }
+}
+
+function artifactRefKey(ref: CanvasArtifactRefV2): string {
+  return `${ref.runId}\0${ref.artifactId}`
 }
 
 function collectRelatedGraph(
@@ -419,6 +576,18 @@ function normalizeLimits(
       MAX_TASK_CONTEXT_DEPTH_V2,
       MAX_TASK_CONTEXT_DEPTH_V2,
       'maxDepth',
+    ),
+    maxArtifactRefs: boundedLimit(
+      values?.maxArtifactRefs,
+      MAX_TASK_CONTEXT_ARTIFACT_REFS_V2,
+      MAX_TASK_CONTEXT_ARTIFACT_REFS_V2,
+      'maxArtifactRefs',
+    ),
+    maxTaskOutputs: boundedLimit(
+      values?.maxTaskOutputs,
+      MAX_TASK_CONTEXT_TASK_OUTPUTS_V2,
+      MAX_TASK_CONTEXT_TASK_OUTPUTS_V2,
+      'maxTaskOutputs',
     ),
   }
 }

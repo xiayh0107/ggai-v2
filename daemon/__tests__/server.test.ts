@@ -473,6 +473,222 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
   }
 })
 
+test('RunIntent V2 resolves readable artifacts from pinned full edges only', async () => {
+  const fixture = await startTestDaemon()
+  type CanvasEnvelope = {
+    revision: number
+    document: {
+      nodes: Array<{
+        id: string
+        homeTaskId?: string
+        artifactRefs: Array<{ runId: string; artifactId: string }>
+      }>
+      receipts: Array<{ kind: string; planId: string }>
+    }
+  }
+  type TaskClose = {
+    projectionPlan: { planId: string }
+    artifactManifest: {
+      entries: Array<{
+        artifactId: string
+        relativePath: string
+      }>
+    }
+  }
+
+  const canvas = async (): Promise<CanvasEnvelope> => {
+    const response = await fetch(`${fixture.baseUrl}/canvas/v2?projectDir=.&branch=main`)
+    assert.equal(response.status, 200)
+    return await response.json() as CanvasEnvelope
+  }
+  const commit = async (mutationId: string, command: Record<string, unknown>) => {
+    const current = await canvas()
+    const response = await fetch(`${fixture.baseUrl}/canvas/commands?projectDir=.`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        branch: 'main',
+        baseRevision: current.revision,
+        mutationId,
+        command,
+      }),
+    })
+    const responseText = await response.text()
+    assert.equal(response.status, 200, responseText)
+    return JSON.parse(responseText) as CanvasEnvelope
+  }
+  const runTask = async (taskId: string, runId: string): Promise<{
+    close: TaskClose
+    pack: string
+    canvas: CanvasEnvelope
+  }> => {
+    const current = await canvas()
+    const response = await fetch(`${fixture.baseUrl}/runs?projectDir=.`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        schemaVersion: 2,
+        runId,
+        taskId,
+        agentId: 'codex',
+        canvasBranch: 'main',
+        baseRevision: current.revision,
+        prompt: `execute ${taskId}`,
+        attachments: [],
+        materializationPolicy: 'auto',
+      }),
+    })
+    assert.equal(response.status, 202, await response.text())
+
+    let close: TaskClose | undefined
+    await waitFor(async () => {
+      const log = await fetch(`${fixture.baseUrl}/runs/${runId}/log?projectDir=.`)
+      if (!log.ok) return false
+      const page = await log.json() as {
+        entries: Array<{ event: string; data: unknown }>
+      }
+      close = page.entries.find((entry) => entry.event === 'close')?.data as TaskClose | undefined
+      return Boolean(close?.projectionPlan?.planId)
+    })
+    let settledCanvas: CanvasEnvelope | undefined
+    await waitFor(async () => {
+      settledCanvas = await canvas()
+      return settledCanvas.document.receipts.some((receipt) =>
+        receipt.kind === 'materialization'
+        && receipt.planId === close?.projectionPlan.planId)
+    })
+    return {
+      close: close!,
+      pack: await readFile(path.join(
+        fixture.root,
+        '.gg',
+        'context',
+        'runs',
+        runId,
+        'pack.md',
+      ), 'utf8'),
+      canvas: settledCanvas!,
+    }
+  }
+  const createDerivedTask = async (
+    taskId: string,
+    source: { kind: 'node' | 'task'; id: string },
+    contextRole: 'full' | 'summary' | 'none',
+  ) => commit(`create-${taskId}`, {
+    type: 'CreateDerivedTaskFromSelection',
+    task: {
+      id: taskId,
+      title: taskId,
+      goal: `derive from ${source.kind} using ${contextRole} context`,
+      anchor: { x: 400, y: 200 },
+      origin: { kind: 'user' },
+    },
+    sources: [{
+      entity: source,
+      relation: 'source',
+      contextRole,
+    }],
+  })
+
+  try {
+    await commit('create-context-source-task', {
+      type: 'CreateTask',
+      task: {
+        id: 'task-context-source',
+        title: 'Context source',
+        goal: 'Create a source artifact',
+        anchor: { x: 100, y: 100 },
+        origin: { kind: 'user' },
+      },
+    })
+    const source = await runTask('task-context-source', 'run-context-source')
+    const sourceArtifact = source.close.artifactManifest.entries[0]!
+    const sourceNode = source.canvas.document.nodes.find((node) =>
+      node.homeTaskId === 'task-context-source'
+      && node.artifactRefs.some((artifact) => artifact.artifactId === sourceArtifact.artifactId))
+    assert.ok(sourceNode)
+
+    await createDerivedTask(
+      'task-context-node-full',
+      { kind: 'node', id: sourceNode.id },
+      'full',
+    )
+    const nodeFull = await runTask('task-context-node-full', 'run-context-node-full')
+    assert.match(nodeFull.pack, /Verified read-only artifact attachments/u)
+    assert.match(nodeFull.pack, new RegExp(sourceArtifact.artifactId, 'u'))
+    assert.match(nodeFull.pack, /run-context-source\/files\/output\.txt/u)
+
+    await createDerivedTask(
+      'task-context-node-summary',
+      { kind: 'node', id: sourceNode.id },
+      'summary',
+    )
+    const nodeSummary = await runTask('task-context-node-summary', 'run-context-node-summary')
+    assert.doesNotMatch(nodeSummary.pack, /Verified read-only artifact attachments/u)
+    assert.doesNotMatch(nodeSummary.pack, new RegExp(sourceArtifact.artifactId, 'u'))
+    assert.match(nodeSummary.pack, /"contextRole": "summary"/u)
+
+    await createDerivedTask(
+      'task-context-task-full',
+      { kind: 'task', id: 'task-context-source' },
+      'full',
+    )
+    const taskFull = await runTask('task-context-task-full', 'run-context-task-full')
+    assert.match(taskFull.pack, /Verified read-only artifact attachments/u)
+    assert.match(taskFull.pack, new RegExp(sourceArtifact.artifactId, 'u'))
+    assert.match(taskFull.pack, /"outputs": \[/u)
+    assert.match(taskFull.pack, new RegExp(`"id": "${sourceNode.id}"`, 'u'))
+
+    const sourceLookup = await fixture.daemon.runs.lookupRunArtifact(
+      'run-context-source',
+      sourceArtifact.artifactId,
+      '.',
+    )
+    assert.ok(sourceLookup)
+    await rm(sourceLookup.absolutePath)
+
+    await createDerivedTask(
+      'task-context-missing-summary',
+      { kind: 'node', id: sourceNode.id },
+      'summary',
+    )
+    const missingSummary = await runTask(
+      'task-context-missing-summary',
+      'run-context-missing-summary',
+    )
+    assert.match(missingSummary.pack, /"contextRole": "summary"/u)
+    assert.doesNotMatch(missingSummary.pack, /Verified read-only artifact attachments/u)
+
+    await createDerivedTask(
+      'task-context-missing-full',
+      { kind: 'node', id: sourceNode.id },
+      'full',
+    )
+    const current = await canvas()
+    const unavailable = await fetch(`${fixture.baseUrl}/runs?projectDir=.`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        schemaVersion: 2,
+        runId: 'run-context-missing-full',
+        taskId: 'task-context-missing-full',
+        agentId: 'codex',
+        canvasBranch: 'main',
+        baseRevision: current.revision,
+        prompt: 'must not run without the authorized artifact',
+        attachments: [],
+        materializationPolicy: 'auto',
+      }),
+    })
+    const unavailableBody = await unavailable.json() as { error: { code: string } }
+    assert.equal(unavailable.status, 409)
+    assert.equal(unavailableBody.error.code, 'context_artifact_unavailable')
+    assert.equal(fixture.daemon.runs.get('run-context-missing-full'), null)
+  } finally {
+    await fixture.close()
+  }
+})
+
 function ssePayloads(source: string, eventName: string): unknown[] {
   return source.split(/\r?\n\r?\n/).flatMap((block) => {
     const event = block.split(/\r?\n/).find((line) => line.startsWith('event: '))?.slice(7)

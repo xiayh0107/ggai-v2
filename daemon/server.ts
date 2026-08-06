@@ -5,6 +5,10 @@ import type { Socket } from 'node:net'
 import path from 'node:path'
 import { CanvasCommandError } from '../src/canvas-v2/commands.js'
 import type { CanvasDocumentV2 } from '../src/canvas-v2/model.js'
+import {
+  compileTaskContextV2,
+  taskContextArtifactRefsV2,
+} from '../src/agent/contextV2.js'
 import type { CanvasModelMode } from './canvasModelMode.js'
 import { isArtifactControlPath } from './artifactPaths.js'
 import {
@@ -1221,6 +1225,11 @@ async function resolveRunIntentAttachments(
   projectDir: string,
 ): Promise<ResolvedArtifactAttachmentV2[]> {
   const nodeIds = new Set(document.nodes.map((node) => node.id))
+  const references: Array<{
+    runId: string
+    artifactId: string
+    authority: 'intent' | 'context-edge'
+  }> = []
   const artifacts: ResolvedArtifactAttachmentV2[] = []
   for (const attachment of intent.attachments) {
     if (attachment.kind === 'node' && !nodeIds.has(attachment.nodeId)) {
@@ -1231,27 +1240,55 @@ async function resolveRunIntentAttachments(
       )
     }
     if (attachment.kind === 'artifact') {
-      const artifact = await runs.lookupRunArtifact(
-        attachment.runId,
-        attachment.artifactId,
-        projectDir,
-      ).catch(() => null)
-      if (!artifact) {
-        throw new ProtocolError(
-          `attachment artifact does not exist or failed verification: ${attachment.artifactId}`,
-          'attachment_not_found',
-          404,
-        )
-      }
-      artifacts.push({
-        runId: artifact.runId,
-        artifactId: artifact.artifactId,
-        projectRelativePath: artifact.projectRelativePath,
-        mediaType: artifact.mediaType,
-        size: artifact.size,
-        contentDigest: artifact.contentDigest,
+      references.push({
+        runId: attachment.runId,
+        artifactId: attachment.artifactId,
+        authority: 'intent',
       })
     }
+  }
+
+  // The browser cannot grant Canvas context by sending paths or a snapshot.
+  // Compile semantic inputs only from the exact document revision loaded above;
+  // summary/none edges contribute no artifact identities.
+  const contextPack = compileTaskContextV2({ document, taskId: intent.taskId })
+  references.push(...taskContextArtifactRefsV2(contextPack).map((reference) => ({
+    ...reference,
+    authority: 'context-edge' as const,
+  })))
+
+  const seen = new Set<string>()
+  for (const reference of references) {
+    const key = `${reference.runId}\0${reference.artifactId}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const artifact = await runs.lookupRunArtifact(
+      reference.runId,
+      reference.artifactId,
+      projectDir,
+    ).catch(() => null)
+    if (!artifact) {
+      if (reference.authority === 'context-edge') {
+        throw new ProtocolError(
+          `full context edge references an unavailable artifact: ${reference.artifactId}`,
+          'context_artifact_unavailable',
+          409,
+        )
+      }
+      throw new ProtocolError(
+        `attachment artifact does not exist or failed verification: ${reference.artifactId}`,
+        'attachment_not_found',
+        404,
+      )
+    }
+    artifacts.push({
+      runId: artifact.runId,
+      artifactId: artifact.artifactId,
+      projectRelativePath: artifact.projectRelativePath,
+      mediaType: artifact.mediaType,
+      size: artifact.size,
+      contentDigest: artifact.contentDigest,
+    })
   }
   return artifacts
 }

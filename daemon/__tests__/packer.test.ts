@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import type { CanvasDocumentV2 } from '../../src/canvas-v2/model.js'
 import { artifactRunDir } from '../artifactPaths.js'
 import { listArtifactSnapshot, prepareRunContext } from '../packer.js'
 import type { CreateRunRequest } from '../protocol.js'
+import type { ResolvedTaskRunRequestV2 } from '../taskRunTypesV2.js'
 
 function request(nodeId: string, prompt: string, text: string): CreateRunRequest {
   return {
@@ -158,6 +160,102 @@ test('a managed source worktree gets source context without redirecting artifact
     assert.doesNotMatch(rendered, /deliverables only under `artifacts\/node_source\//u)
   } finally {
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('Task V2 packs bounded full-edge outputs with daemon-verified artifact paths', async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'ggai-packer-task-v2-'))
+  const root = await realpath(temporaryRoot)
+  const artifactId = `artifact_${'a'.repeat(64)}`
+  const digest = 'b'.repeat(64)
+  const document: CanvasDocumentV2 = {
+    schemaVersion: 2,
+    nodes: [{
+      id: 'node-prior-output',
+      type: 'image',
+      frame: { x: 20, y: 20, w: 320, h: 240, z: 1 },
+      title: 'Prior plot',
+      artifactRefs: [{ runId: 'run-prior', artifactId }],
+      homeTaskId: 'task-prior',
+      origin: { kind: 'user' },
+    }],
+    tasks: [{
+      id: 'task-prior',
+      title: 'Prior task',
+      goal: 'Create the original plot',
+      anchor: { x: 20, y: 20 },
+      origin: { kind: 'user' },
+    }, {
+      id: 'task-derived',
+      title: 'Derived task',
+      goal: 'Adjust the plot colors',
+      anchor: { x: 500, y: 20 },
+      origin: { kind: 'user' },
+    }],
+    collections: [],
+    edges: [{
+      id: 'edge-prior-derived',
+      from: { kind: 'task', id: 'task-prior' },
+      to: { kind: 'task', id: 'task-derived' },
+      relation: 'source',
+      contextRole: 'full',
+      origin: { kind: 'user' },
+    }],
+    receipts: [],
+    everCreated: true,
+  }
+  const verifiedPath = 'artifacts/.branches/main/run-prior/files/prior.png'
+  const input: ResolvedTaskRunRequestV2 = {
+    schemaVersion: 2,
+    runId: 'run-derived',
+    taskId: 'task-derived',
+    agentId: 'codex',
+    canvasBranch: 'main',
+    baseRevision: 7,
+    prompt: 'Adjust the plot colors',
+    attachments: [],
+    materializationPolicy: 'auto',
+    projectDir: '.',
+    canvasDocument: document,
+    resolvedArtifactAttachments: [{
+      runId: 'run-prior',
+      artifactId,
+      projectRelativePath: verifiedPath,
+      mediaType: 'image/png',
+      size: 42,
+      contentDigest: digest,
+    }],
+    automationMode: 'confirm',
+  }
+
+  try {
+    const prepared = await prepareRunContext(input, root, input.runId)
+    const rendered = await readFile(prepared.contextFile, 'utf8')
+    const json = JSON.parse(await readFile(
+      path.join(root, '.gg', 'context', 'runs', input.runId, 'pack.json'),
+      'utf8',
+    )) as {
+      inputs: Array<{ outputs?: Array<{ artifactRefs: unknown[] }> }>
+      verifiedArtifactAttachments: Array<{ projectRelativePath: string; contentDigest: string }>
+    }
+
+    assert.deepEqual(json.inputs[0]?.outputs?.[0]?.artifactRefs, [{
+      runId: 'run-prior',
+      artifactId,
+    }])
+    assert.deepEqual(json.verifiedArtifactAttachments, [{
+      runId: 'run-prior',
+      artifactId,
+      projectRelativePath: verifiedPath,
+      mediaType: 'image/png',
+      size: 42,
+      contentDigest: digest,
+    }])
+    assert.match(rendered, /Verified read-only artifact attachments/u)
+    assert.match(rendered, new RegExp(artifactId, 'u'))
+    assert.match(rendered, new RegExp(verifiedPath.replaceAll('.', '\\.'), 'u'))
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true })
   }
 })
 
