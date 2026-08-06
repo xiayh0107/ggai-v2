@@ -1,4 +1,8 @@
-import type { CanvasCommandV2 } from './commands'
+import type {
+  CanvasCommandV2,
+  TaskProposalEditV2,
+  TaskProposalEditsV2,
+} from './commands'
 import { parseCanvasDocumentV2, type CanvasDocumentV2 } from './model'
 import type {
   CanvasV2OutboxEntry,
@@ -25,12 +29,8 @@ export interface CanvasV2CommandRequest {
   command: CanvasCommandWireV2
 }
 
-export interface CanvasV2TaskProposalEditWire {
-  title?: string
-  prompt?: string
-}
-
-export type CanvasV2TaskProposalEditsWire = Record<string, CanvasV2TaskProposalEditWire>
+export type CanvasV2TaskProposalEditWire = TaskProposalEditV2
+export type CanvasV2TaskProposalEditsWire = TaskProposalEditsV2
 
 type CanvasTrustedCommandWireV2 =
   | { type: 'MaterializeProjectionPlan'; planId: string }
@@ -270,12 +270,11 @@ export function serializeCanvasCommandV2(command: CanvasCommandV2): CanvasComman
     case 'MaterializeProjectionPlan':
       return { type: command.type, planId: command.plan.planId }
     case 'AcceptTaskProposals': {
-      const edits = readProposalEdits(command)
       return {
         type: command.type,
         planId: command.plan.planId,
         proposalKeys: [...command.proposalKeys],
-        ...(edits ? { edits } : {}),
+        ...(command.edits === undefined ? {} : { edits: structuredClone(command.edits) }),
       }
     }
     case 'DismissPlan':
@@ -374,33 +373,6 @@ async function readJson(response: Response, context: string): Promise<unknown> {
   } catch (error) {
     throw new CanvasV2ProtocolError(`${context} is not valid JSON`, { cause: error })
   }
-}
-
-function readProposalEdits(command: Extract<CanvasCommandV2, { type: 'AcceptTaskProposals' }>):
-CanvasV2TaskProposalEditsWire | null {
-  const candidate = (command as typeof command & { edits?: unknown }).edits
-  if (candidate === undefined) return null
-  if (!isRecord(candidate) || Object.keys(candidate).length > 64) {
-    throw new CanvasV2ProtocolError('Task proposal edits are invalid')
-  }
-  const edits: CanvasV2TaskProposalEditsWire = {}
-  for (const [proposalKey, value] of Object.entries(candidate)) {
-    if (proposalKey.length === 0
-      || proposalKey.length > 160
-      || !isRecord(value)
-      || Object.keys(value).some((key) => key !== 'title' && key !== 'prompt')
-      || (value.title !== undefined
-        && (typeof value.title !== 'string' || value.title.length > 1_000))
-      || (value.prompt !== undefined
-        && (typeof value.prompt !== 'string' || value.prompt.length > 250_000))) {
-      throw new CanvasV2ProtocolError('Task proposal edits are invalid')
-    }
-    edits[proposalKey] = {
-      ...(typeof value.title === 'string' ? { title: value.title } : {}),
-      ...(typeof value.prompt === 'string' ? { prompt: value.prompt } : {}),
-    }
-  }
-  return edits
 }
 
 function isPreconditionCode(code: string): boolean {

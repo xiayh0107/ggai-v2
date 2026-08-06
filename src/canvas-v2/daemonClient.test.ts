@@ -141,18 +141,28 @@ describe('Canvas V2 daemon client', () => {
       proposalKeys: ['proposal-1'],
     })
     const edited = {
-      type: 'AcceptTaskProposals',
+      type: 'AcceptTaskProposals' as const,
       plan: trustedPlan,
       proposalKeys: ['proposal-1'],
-      edits: { 'proposal-1': { title: 'Edited title', prompt: 'Edited prompt' } },
-    } as CanvasCommandV2 & {
-      edits: Record<string, { title?: string; prompt?: string }>
+      edits: {
+        'proposal-1': {
+          title: 'Edited title',
+          prompt: 'Edited prompt',
+          dependsOn: [],
+        },
+      },
     }
     expect(serializeCanvasCommandV2(edited)).toEqual({
       type: 'AcceptTaskProposals',
       planId: trustedPlan.planId,
       proposalKeys: ['proposal-1'],
-      edits: { 'proposal-1': { title: 'Edited title', prompt: 'Edited prompt' } },
+      edits: {
+        'proposal-1': {
+          title: 'Edited title',
+          prompt: 'Edited prompt',
+          dependsOn: [],
+        },
+      },
     })
     expect(serializeCanvasCommandV2({
       type: 'DismissPlan',

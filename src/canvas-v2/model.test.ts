@@ -166,4 +166,45 @@ describe('Canvas V2 model', () => {
 
     expect(collectCanvasV2ValidationIssues(input)).toEqual([])
   })
+
+  it('rejects proposal keys accepted and dismissed by the same plan', () => {
+    const input = emptyCanvasDocumentV2()
+    const planId = `plan_${'c'.repeat(64)}`
+    input.tasks.push(task('task-1'), {
+      id: 'task-proposal',
+      title: 'Explain findings',
+      goal: 'Explain the chart',
+      anchor: { x: 180, y: 240 },
+      origin: {
+        kind: 'agent-proposal',
+        parentTaskId: 'task-1',
+        planId,
+        proposalKey: 'explain',
+      },
+    })
+    input.receipts.push(
+      {
+        kind: 'proposal-acceptance',
+        planId,
+        runId: 'run-1',
+        taskId: 'task-1',
+        proposals: [{ proposalKey: 'explain', taskId: 'task-proposal' }],
+      },
+      {
+        kind: 'plan-dismissal',
+        planId,
+        runId: 'run-1',
+        taskId: 'task-1',
+        proposalKeys: ['explain'],
+      },
+    )
+
+    expect(collectCanvasV2ValidationIssues(input)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        path: 'receipts[0].proposals[0].proposalKey',
+        message: 'is both accepted and dismissed for this plan',
+      }),
+    ]))
+    expect(() => parseCanvasDocumentV2(input)).toThrowError(CanvasV2ValidationError)
+  })
 })

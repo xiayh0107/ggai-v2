@@ -5,7 +5,6 @@ import type {
 import type { CanvasDocumentV2 } from '../src/canvas-v2/model.js'
 import type {
   CanvasCommandWireV2,
-  TaskProposalEditWireV2,
 } from './canvasCommandProtocolV2.js'
 import type { CanvasEnvelopeV2 } from './canvasCommandStoreV2.js'
 import type { CanvasCommandStoreV2Manager } from './canvasCommandStoreV2Manager.js'
@@ -132,30 +131,11 @@ function trustedCanvasCommand(
   if (command.type === 'DismissPlan') {
     return { type: command.type, plan: trustedPlan }
   }
-  applyProposalEdits(trustedPlan, command.proposalKeys, command.edits)
   return {
     type: command.type,
     plan: trustedPlan,
     proposalKeys: [...command.proposalKeys],
-  }
-}
-
-function applyProposalEdits(
-  plan: TrustedProjectionPlanInputV2,
-  proposalKeys: readonly string[],
-  edits: Record<string, TaskProposalEditWireV2> | undefined,
-): void {
-  if (!edits) return
-  const selected = new Set(proposalKeys)
-  const proposals = new Map(plan.taskProposals.map((proposal) => [proposal.key, proposal]))
-  for (const [proposalKey, edit] of Object.entries(edits)) {
-    if (!selected.has(proposalKey)) {
-      throw new TypeError(`proposal edit is not selected: ${proposalKey}`)
-    }
-    const proposal = proposals.get(proposalKey)
-    if (!proposal) throw new TypeError(`proposal edit was not present in the plan: ${proposalKey}`)
-    if (edit.title !== undefined) proposal.title = edit.title
-    if (edit.prompt !== undefined) proposal.prompt = edit.prompt
+    ...(command.edits === undefined ? {} : { edits: structuredClone(command.edits) }),
   }
 }
 

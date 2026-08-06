@@ -86,13 +86,22 @@ function plan(): ProjectionPlanV2 {
         materialize: false,
       },
     ],
-    taskProposals: [{
-      key: 'explain',
-      title: 'Explain findings',
-      prompt: 'Explain the relationship',
-      inputOutputKeys: ['preview'],
-      dependsOn: [],
-    }],
+    taskProposals: [
+      {
+        key: 'explain',
+        title: 'Explain findings',
+        prompt: 'Explain the relationship',
+        inputOutputKeys: ['preview'],
+        dependsOn: [],
+      },
+      {
+        key: 'publish',
+        title: 'Publish report',
+        prompt: 'Publish the chart and explanation',
+        inputOutputKeys: ['source'],
+        dependsOn: ['explain'],
+      },
+    ],
     warnings: [],
     digest: 'f'.repeat(64),
   }
@@ -195,6 +204,18 @@ test('resolves proposal edits from an opaque plan and repairs lifecycle on repla
   assert.equal(accepted.revision, 3)
   assert.equal(accepted.document.tasks[1]?.title, 'Explain the chart clearly')
   assert.equal(accepted.document.tasks[1]?.goal, 'Explain the chart in plain language')
+  assert.deepEqual(accepted.document.receipts.slice(1).map((receipt) => receipt.kind), [
+    'proposal-acceptance',
+    'plan-dismissal',
+  ])
+  assert.deepEqual(accepted.document.receipts[2], {
+    kind: 'plan-dismissal',
+    planId: PLAN_ID,
+    runId: 'run-1',
+    taskId: 'task-1',
+    proposalKeys: ['publish'],
+  })
+  assert.equal(plans.record.plan.taskProposals[0]?.title, 'Explain findings')
   assert.equal(plans.record.state, 'dismissed')
   assert.equal(plans.dismissCount, 1)
 
@@ -214,6 +235,107 @@ test('resolves proposal edits from an opaque plan and repairs lifecycle on repla
   assert.equal(replay.revision, 3)
   assert.equal(replay.document.tasks.length, 2)
   assert.equal(plans.dismissCount, 1)
+})
+
+test('delegates reordered content and dependency edits to the atomic canvas reducer', async () => {
+  const { canvases } = await fixture()
+  const plans = registry()
+  await autoMaterializeProjectionPlanV2({
+    canvases,
+    projectDir: '.',
+    branch: 'main',
+    plan: plans.record.plan,
+  })
+
+  const accepted = await commitProjectionPlanCommandV2({
+    canvases,
+    plans,
+    projectDir: '.',
+    branch: 'main',
+    baseRevision: 2,
+    mutationId: 'accept-reordered-proposals',
+    command: {
+      type: 'AcceptTaskProposals',
+      planId: PLAN_ID,
+      proposalKeys: ['publish', 'explain'],
+      edits: {
+        publish: {
+          title: 'Publish final report',
+          prompt: 'Publish a concise final report',
+          dependsOn: [],
+        },
+        explain: { dependsOn: ['publish'] },
+      },
+    },
+  })
+
+  const created = accepted.document.tasks.slice(1)
+  assert.deepEqual(created.map((task) => task.origin.kind === 'agent-proposal'
+    ? task.origin.proposalKey
+    : null), ['publish', 'explain'])
+  assert.deepEqual(created.map((task) => task.anchor.y), [216, 328])
+  assert.equal(created[0]?.title, 'Publish final report')
+  assert.equal(created[0]?.goal, 'Publish a concise final report')
+  assert.deepEqual(Object.keys(created[0] ?? {}).sort(), [
+    'anchor',
+    'goal',
+    'id',
+    'origin',
+    'title',
+  ])
+  assert.deepEqual(accepted.document.edges.find((edge) => edge.relation === 'depends-on'), {
+    id: accepted.document.edges.find((edge) => edge.relation === 'depends-on')?.id,
+    from: { kind: 'task', id: created[0]?.id },
+    to: { kind: 'task', id: created[1]?.id },
+    relation: 'depends-on',
+    contextRole: 'summary',
+    origin: { kind: 'agent', runId: 'run-1', planId: PLAN_ID },
+  })
+  assert.deepEqual(accepted.document.receipts.map((receipt) => receipt.kind), [
+    'materialization',
+    'proposal-acceptance',
+  ])
+  assert.deepEqual(plans.record.plan.taskProposals.map((proposal) => proposal.dependsOn), [
+    [],
+    ['explain'],
+  ])
+  assert.equal(plans.record.state, 'dismissed')
+})
+
+test('keeps canvas and plan lifecycle unchanged when edited dependencies form a cycle', async () => {
+  const { canvases } = await fixture()
+  const plans = registry()
+  await autoMaterializeProjectionPlanV2({
+    canvases,
+    projectDir: '.',
+    branch: 'main',
+    plan: plans.record.plan,
+  })
+
+  await assert.rejects(commitProjectionPlanCommandV2({
+    canvases,
+    plans,
+    projectDir: '.',
+    branch: 'main',
+    baseRevision: 2,
+    mutationId: 'reject-proposal-cycle',
+    command: {
+      type: 'AcceptTaskProposals',
+      planId: PLAN_ID,
+      proposalKeys: ['explain', 'publish'],
+      edits: {
+        explain: { dependsOn: ['publish'] },
+        publish: { dependsOn: ['explain'] },
+      },
+    },
+  }), /must form a DAG/u)
+
+  const current = await canvases.get('.', 'main')
+  assert.equal(current.revision, 2)
+  assert.equal(current.document.tasks.length, 1)
+  assert.deepEqual(current.document.receipts.map((receipt) => receipt.kind), ['materialization'])
+  assert.equal(plans.record.state, 'pending')
+  assert.equal(plans.dismissCount, 0)
 })
 
 test('rejects missing and settled plans without accepting browser-authored content', async () => {

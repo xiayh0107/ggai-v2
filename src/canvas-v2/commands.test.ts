@@ -487,6 +487,205 @@ describe('Canvas V2 commands', () => {
     })).toBe(dismissed)
   })
 
+  it('uses edited proposal order, content, and dependencies without starting a run', () => {
+    const trustedPlan = plan()
+    const materialized = applyCanvasCommandV2(documentWithTask(), {
+      type: 'MaterializeProjectionPlan',
+      plan: trustedPlan,
+    })
+    const accepted = applyCanvasCommandV2(materialized, {
+      type: 'AcceptTaskProposals',
+      plan: trustedPlan,
+      proposalKeys: ['export', 'explain'],
+      edits: {
+        export: {
+          title: 'Publish report',
+          prompt: 'Publish the final chart report',
+          dependsOn: [],
+        },
+        explain: { dependsOn: ['export'] },
+      },
+    })
+    const exportTaskId = deterministicCanvasIdV2('task', PLAN_ID, 'export')
+    const explainTaskId = deterministicCanvasIdV2('task', PLAN_ID, 'explain')
+
+    expect(accepted.tasks.slice(1).map((entry) => ({
+      id: entry.id,
+      title: entry.title,
+      goal: entry.goal,
+      anchor: entry.anchor,
+    }))).toEqual([
+      {
+        id: exportTaskId,
+        title: 'Publish report',
+        goal: 'Publish the final chart report',
+        anchor: { x: 148, y: 216 },
+      },
+      {
+        id: explainTaskId,
+        title: 'Explain findings',
+        goal: 'Explain the relationship in the chart',
+        anchor: { x: 148, y: 328 },
+      },
+    ])
+    expect(accepted.edges.find((edge) => edge.relation === 'depends-on')).toMatchObject({
+      from: { kind: 'task', id: exportTaskId },
+      to: { kind: 'task', id: explainTaskId },
+    })
+    expect(accepted.receipts.find((receipt) => receipt.kind === 'proposal-acceptance'))
+      .toMatchObject({
+        proposals: [
+          { proposalKey: 'export', taskId: exportTaskId },
+          { proposalKey: 'explain', taskId: explainTaskId },
+        ],
+      })
+    expect(accepted.receipts.some((receipt) => receipt.kind === 'plan-dismissal')).toBe(false)
+    expect(Object.keys(accepted.tasks[1]!).sort()).toEqual([
+      'anchor',
+      'goal',
+      'id',
+      'origin',
+      'title',
+    ])
+  })
+
+  it('atomically accepts a subset, dismisses every unselected key, and replays once', () => {
+    const trustedPlan = plan()
+    const materialized = applyCanvasCommandV2(documentWithTask(), {
+      type: 'MaterializeProjectionPlan',
+      plan: trustedPlan,
+    })
+    const command = {
+      type: 'AcceptTaskProposals' as const,
+      plan: trustedPlan,
+      proposalKeys: ['explain'],
+      edits: { explain: { title: 'Explain only' } },
+    }
+    const accepted = applyCanvasCommandV2(materialized, command)
+
+    expect(accepted.tasks).toHaveLength(2)
+    expect(accepted.tasks[1]?.title).toBe('Explain only')
+    expect(accepted.receipts.slice(1)).toEqual([
+      {
+        kind: 'proposal-acceptance',
+        planId: PLAN_ID,
+        runId: 'run-1',
+        taskId: 'task-1',
+        proposals: [{
+          proposalKey: 'explain',
+          taskId: deterministicCanvasIdV2('task', PLAN_ID, 'explain'),
+        }],
+      },
+      {
+        kind: 'plan-dismissal',
+        planId: PLAN_ID,
+        runId: 'run-1',
+        taskId: 'task-1',
+        proposalKeys: ['export'],
+      },
+    ])
+    expect(applyCanvasCommandV2(accepted, command)).toBe(accepted)
+  })
+
+  it('rejects invalid edited proposal graphs atomically', () => {
+    const trustedPlan = plan()
+    const materialized = applyCanvasCommandV2(documentWithTask(), {
+      type: 'MaterializeProjectionPlan',
+      plan: trustedPlan,
+    })
+    const snapshot = structuredClone(materialized)
+    const invalidCommands: Array<{
+      code: string
+      command: Extract<CanvasCommandV2, { type: 'AcceptTaskProposals' }>
+    }> = [
+      {
+        code: 'invalid-proposal-edits',
+        command: {
+          type: 'AcceptTaskProposals',
+          plan: trustedPlan,
+          proposalKeys: ['explain'],
+          edits: { explain: {} },
+        },
+      },
+      {
+        code: 'proposal-edit-not-selected',
+        command: {
+          type: 'AcceptTaskProposals',
+          plan: trustedPlan,
+          proposalKeys: ['explain'],
+          edits: { export: { title: 'Not selected' } },
+        },
+      },
+      {
+        code: 'invalid-proposal-dependency',
+        command: {
+          type: 'AcceptTaskProposals',
+          plan: trustedPlan,
+          proposalKeys: ['explain'],
+          edits: { explain: { dependsOn: ['explain'] } },
+        },
+      },
+      {
+        code: 'invalid-proposal-dependency',
+        command: {
+          type: 'AcceptTaskProposals',
+          plan: trustedPlan,
+          proposalKeys: ['explain', 'export'],
+          edits: { explain: { dependsOn: ['foreign'] } },
+        },
+      },
+      {
+        code: 'invalid-proposal-dependency',
+        command: {
+          type: 'AcceptTaskProposals',
+          plan: trustedPlan,
+          proposalKeys: ['export'],
+          edits: { export: { dependsOn: ['explain'] } },
+        },
+      },
+      {
+        code: 'invalid-proposal-dependency',
+        command: {
+          type: 'AcceptTaskProposals',
+          plan: trustedPlan,
+          proposalKeys: ['explain', 'export'],
+          edits: { explain: { dependsOn: ['export', 'export'] } },
+        },
+      },
+      {
+        code: 'proposal-dependency-cycle',
+        command: {
+          type: 'AcceptTaskProposals',
+          plan: trustedPlan,
+          proposalKeys: ['explain', 'export'],
+          edits: {
+            explain: { dependsOn: ['export'] },
+            export: { dependsOn: ['explain'] },
+          },
+        },
+      },
+      {
+        code: 'invalid-proposal-dependency',
+        command: {
+          type: 'AcceptTaskProposals',
+          plan: trustedPlan,
+          proposalKeys: ['export'],
+        },
+      },
+    ]
+
+    for (const { command, code } of invalidCommands) {
+      try {
+        applyCanvasCommandV2(materialized, command)
+        throw new Error(`Expected ${code}`)
+      } catch (error) {
+        expect(error).toBeInstanceOf(CanvasCommandError)
+        expect((error as CanvasCommandError).code).toBe(code)
+      }
+      expect(materialized).toEqual(snapshot)
+    }
+  })
+
   it('creates, edits, resizes, duplicates, and deletes user nodes without forging artifacts', () => {
     let current = applyCanvasCommandV2(emptyCanvasDocumentV2(), {
       type: 'CreateNode',

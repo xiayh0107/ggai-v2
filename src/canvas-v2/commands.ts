@@ -42,6 +42,20 @@ export interface TrustedTaskProposalV2 {
   dependsOn: string[]
 }
 
+export const MAX_ACCEPTED_TASK_PROPOSALS_V2 = 12
+export const MAX_TASK_PROPOSAL_KEY_LENGTH_V2 = 80
+export const MAX_TASK_PROPOSAL_EDIT_TITLE_LENGTH_V2 = 240
+export const MAX_TASK_PROPOSAL_EDIT_PROMPT_LENGTH_V2 = 10_000
+export const MAX_TASK_PROPOSAL_EDIT_DEPENDENCIES_V2 = 12
+
+export interface TaskProposalEditV2 {
+  title?: string
+  prompt?: string
+  dependsOn?: string[]
+}
+
+export type TaskProposalEditsV2 = Record<string, TaskProposalEditV2>
+
 export interface TrustedProjectionPlanInputV2 {
   schemaVersion: 2
   taskId: string
@@ -141,6 +155,7 @@ export type CanvasCommandV2 =
       type: 'AcceptTaskProposals'
       plan: TrustedProjectionPlanInputV2
       proposalKeys: string[]
+      edits?: TaskProposalEditsV2
     }
   | {
       type: 'DismissPlan'
@@ -1038,12 +1053,16 @@ function acceptTaskProposals(
 ): void {
   const { plan } = command
   const parent = requireTask(document, plan.taskId)
-  if (command.proposalKeys.length === 0 || command.proposalKeys.length > 12) {
+  if (command.proposalKeys.length === 0
+    || command.proposalKeys.length > MAX_ACCEPTED_TASK_PROPOSALS_V2) {
     throw new CanvasCommandError('invalid-proposals', 'AcceptTaskProposals requires 1 to 12 proposals')
   }
   requireUniqueKeys(command.proposalKeys, 'proposal keys')
+  requireUniqueKeys(plan.taskProposals.map((proposal) => proposal.key), 'plan proposal keys')
   const proposalsByKey = new Map(plan.taskProposals.map((proposal) => [proposal.key, proposal]))
-  const proposals = command.proposalKeys.map((proposalKey) => {
+  const selectedKeys = new Set(command.proposalKeys)
+  const edits = parseTaskProposalEditsV2(command.edits, selectedKeys)
+  const proposals = command.proposalKeys.map((proposalKey): TrustedTaskProposalV2 => {
     const proposal = proposalsByKey.get(proposalKey)
     if (!proposal) {
       throw new CanvasCommandError(
@@ -1051,8 +1070,17 @@ function acceptTaskProposals(
         `Proposal ${proposalKey} is not present in plan ${plan.planId}`,
       )
     }
-    return proposal
+    const edit = edits.get(proposalKey)
+    return {
+      ...structuredClone(proposal),
+      ...(edit?.title === undefined ? {} : { title: edit.title }),
+      ...(edit?.prompt === undefined ? {} : { prompt: edit.prompt }),
+      dependsOn: edit?.dependsOn === undefined
+        ? [...proposal.dependsOn]
+        : [...edit.dependsOn],
+    }
   })
+  validateSelectedProposalGraphV2(proposals, selectedKeys)
   const materialization = findReceipt(document, 'materialization', plan.planId)
   if (materialization?.dismissedProposalKeys.some((key) => command.proposalKeys.includes(key))) {
     throw new CanvasCommandError('proposal-dismissed', 'A dismissed proposal cannot be accepted')
@@ -1131,7 +1159,159 @@ function acceptTaskProposals(
       taskId: newTasks[index]!.id,
     })),
   })
+  const dismissedProposalKeys = plan.taskProposals
+    .map((proposal) => proposal.key)
+    .filter((proposalKey) => !selectedKeys.has(proposalKey))
+  if (dismissedProposalKeys.length > 0) {
+    document.receipts.push({
+      kind: 'plan-dismissal',
+      planId: plan.planId,
+      runId: plan.runId,
+      taskId: parent.id,
+      proposalKeys: dismissedProposalKeys,
+    })
+  }
   document.everCreated = true
+}
+
+function parseTaskProposalEditsV2(
+  value: TaskProposalEditsV2 | undefined,
+  selectedKeys: ReadonlySet<string>,
+): ReadonlyMap<string, TaskProposalEditV2> {
+  if (value === undefined) return new Map()
+  if (!isPlainRecord(value)) {
+    throw new CanvasCommandError('invalid-proposal-edits', 'Proposal edits must be an object')
+  }
+  const entries = Object.entries(value)
+  if (entries.length > MAX_ACCEPTED_TASK_PROPOSALS_V2) {
+    throw new CanvasCommandError('invalid-proposal-edits', 'Proposal edits are too large')
+  }
+  const edits = new Map<string, TaskProposalEditV2>()
+  for (const [proposalKey, candidate] of entries) {
+    if (!selectedKeys.has(proposalKey)) {
+      throw new CanvasCommandError(
+        'proposal-edit-not-selected',
+        `Proposal edit ${proposalKey} is not selected`,
+      )
+    }
+    if (!isPlainRecord(candidate)) {
+      throw new CanvasCommandError('invalid-proposal-edits', `Proposal edit ${proposalKey} is invalid`)
+    }
+    const fields = Object.keys(candidate)
+    if (fields.length === 0
+      || fields.some((field) => field !== 'title'
+        && field !== 'prompt'
+        && field !== 'dependsOn')) {
+      throw new CanvasCommandError('invalid-proposal-edits', `Proposal edit ${proposalKey} is invalid`)
+    }
+    const title = candidate.title === undefined
+      ? undefined
+      : requireTaskProposalDisplayStringV2(
+        candidate.title,
+        MAX_TASK_PROPOSAL_EDIT_TITLE_LENGTH_V2,
+        `${proposalKey}.title`,
+      )
+    const prompt = candidate.prompt === undefined
+      ? undefined
+      : requireTaskProposalDisplayStringV2(
+        candidate.prompt,
+        MAX_TASK_PROPOSAL_EDIT_PROMPT_LENGTH_V2,
+        `${proposalKey}.prompt`,
+      )
+    let dependsOn: string[] | undefined
+    if (candidate.dependsOn !== undefined) {
+      if (!Array.isArray(candidate.dependsOn)
+        || candidate.dependsOn.length > MAX_TASK_PROPOSAL_EDIT_DEPENDENCIES_V2
+        || !candidate.dependsOn.every((dependency) => typeof dependency === 'string')) {
+        throw new CanvasCommandError(
+          'invalid-proposal-dependency',
+          `Proposal edit ${proposalKey}.dependsOn is invalid`,
+        )
+      }
+      dependsOn = [...candidate.dependsOn]
+    }
+    if (title === undefined && prompt === undefined && dependsOn === undefined) {
+      throw new CanvasCommandError(
+        'invalid-proposal-edits',
+        `Proposal edit ${proposalKey} must change title, prompt, or dependencies`,
+      )
+    }
+    edits.set(proposalKey, {
+      ...(title === undefined ? {} : { title }),
+      ...(prompt === undefined ? {} : { prompt }),
+      ...(dependsOn === undefined ? {} : { dependsOn }),
+    })
+  }
+  return edits
+}
+
+function requireTaskProposalDisplayStringV2(
+  value: unknown,
+  maxLength: number,
+  label: string,
+): string {
+  if (typeof value !== 'string'
+    || value.length === 0
+    || value.length > maxLength
+    || value !== value.trim()) {
+    throw new CanvasCommandError('invalid-proposal-edits', `Proposal edit ${label} is invalid`)
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code <= 0x1f || code === 0x7f) {
+      throw new CanvasCommandError('invalid-proposal-edits', `Proposal edit ${label} is invalid`)
+    }
+  }
+  return value
+}
+
+function validateSelectedProposalGraphV2(
+  proposals: readonly TrustedTaskProposalV2[],
+  selectedKeys: ReadonlySet<string>,
+): void {
+  const proposalsByKey = new Map(proposals.map((proposal) => [proposal.key, proposal]))
+  for (const proposal of proposals) {
+    if (proposal.dependsOn.length > MAX_TASK_PROPOSAL_EDIT_DEPENDENCIES_V2
+      || new Set(proposal.dependsOn).size !== proposal.dependsOn.length) {
+      throw new CanvasCommandError(
+        'invalid-proposal-dependency',
+        `Proposal ${proposal.key} dependencies must be bounded and unique`,
+      )
+    }
+    for (const dependencyKey of proposal.dependsOn) {
+      if (dependencyKey === proposal.key) {
+        throw new CanvasCommandError(
+          'invalid-proposal-dependency',
+          `Proposal ${proposal.key} cannot depend on itself`,
+        )
+      }
+      if (!selectedKeys.has(dependencyKey) || !proposalsByKey.has(dependencyKey)) {
+        throw new CanvasCommandError(
+          'invalid-proposal-dependency',
+          `Proposal ${proposal.key} depends on an unselected proposal ${dependencyKey}`,
+        )
+      }
+    }
+  }
+
+  const visiting = new Set<string>()
+  const visited = new Set<string>()
+  const visit = (proposalKey: string) => {
+    if (visited.has(proposalKey)) return
+    if (visiting.has(proposalKey)) {
+      throw new CanvasCommandError(
+        'proposal-dependency-cycle',
+        'Selected proposal dependencies must form a DAG',
+      )
+    }
+    visiting.add(proposalKey)
+    for (const dependencyKey of proposalsByKey.get(proposalKey)?.dependsOn ?? []) {
+      visit(dependencyKey)
+    }
+    visiting.delete(proposalKey)
+    visited.add(proposalKey)
+  }
+  for (const proposal of proposals) visit(proposal.key)
 }
 
 function dismissPlan(

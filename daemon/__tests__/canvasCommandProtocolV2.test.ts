@@ -219,16 +219,16 @@ test('plan operations remain opaque discriminated wire commands', () => {
     planId,
     proposalKeys: ['explain', 'publish'],
     edits: {
-      explain: { title: 'Explain the chart' },
-      publish: { prompt: 'Prepare a concise publication-ready report.' },
+      explain: { title: 'Explain the chart', dependsOn: ['publish'] },
+      publish: { prompt: 'Prepare a concise publication-ready report.', dependsOn: [] },
     },
   }), {
     type: 'AcceptTaskProposals',
     planId,
     proposalKeys: ['explain', 'publish'],
     edits: {
-      explain: { title: 'Explain the chart' },
-      publish: { prompt: 'Prepare a concise publication-ready report.' },
+      explain: { title: 'Explain the chart', dependsOn: ['publish'] },
+      publish: { prompt: 'Prepare a concise publication-ready report.', dependsOn: [] },
     },
   })
 
@@ -331,6 +331,52 @@ test('rejects duplicate proposal keys and invalid edit maps', () => {
     proposalKeys: ['explain'],
     edits: { explain: {} },
   }), /must change/u)
+  assert.throws(() => parseCanvasCommandWireV2({
+    type: 'AcceptTaskProposals',
+    planId,
+    proposalKeys: ['explain'],
+    edits: { explain: { dependsOn: ['explain'] } },
+  }), /cannot contain itself/u)
+  assert.throws(() => parseCanvasCommandWireV2({
+    type: 'AcceptTaskProposals',
+    planId,
+    proposalKeys: ['explain', 'publish'],
+    edits: { explain: { dependsOn: ['publish', 'publish'] } },
+  }), /duplicate keys/u)
+  assert.throws(() => parseCanvasCommandWireV2({
+    type: 'AcceptTaskProposals',
+    planId,
+    proposalKeys: ['explain'],
+    edits: { explain: { dependsOn: ['publish'] } },
+  }), /unselected proposal/u)
+  assert.throws(() => parseCanvasCommandWireV2({
+    type: 'AcceptTaskProposals',
+    planId,
+    proposalKeys: ['explain'],
+    edits: { explain: { dependsOn: 'publish' } },
+  }), /dependsOn is invalid/u)
+  assert.throws(() => parseCanvasCommandWireV2({
+    type: 'AcceptTaskProposals',
+    planId,
+    proposalKeys: Array.from({ length: 12 }, (_, index) => `proposal-${index}`),
+    edits: {
+      'proposal-0': {
+        dependsOn: Array.from({ length: 13 }, (_, index) => `proposal-${index}`),
+      },
+    },
+  }), /dependsOn is invalid/u)
+  assert.throws(() => parseCanvasCommandWireV2({
+    type: 'AcceptTaskProposals',
+    planId,
+    proposalKeys: ['explain'],
+    edits: { explain: { title: ' trailing ' } },
+  }), /trimmed/u)
+  assert.throws(() => parseCanvasCommandWireV2({
+    type: 'AcceptTaskProposals',
+    planId,
+    proposalKeys: ['explain'],
+    edits: { explain: { prompt: 'x'.repeat(10_001) } },
+  }), /prompt is invalid/u)
 })
 
 test('rejects malformed request identity, duplicate entities, and non-finite movement', () => {

@@ -1,8 +1,14 @@
-import type {
-  CanvasCommandV2,
-  DerivedTaskSourceV2,
-  UpdateEdgePatchV2,
-  UpdateNodeContentPatchV2,
+import {
+  MAX_ACCEPTED_TASK_PROPOSALS_V2,
+  MAX_TASK_PROPOSAL_EDIT_DEPENDENCIES_V2,
+  MAX_TASK_PROPOSAL_EDIT_PROMPT_LENGTH_V2,
+  MAX_TASK_PROPOSAL_EDIT_TITLE_LENGTH_V2,
+  MAX_TASK_PROPOSAL_KEY_LENGTH_V2,
+  type CanvasCommandV2,
+  type DerivedTaskSourceV2,
+  type TaskProposalEditV2,
+  type UpdateEdgePatchV2,
+  type UpdateNodeContentPatchV2,
 } from '../src/canvas-v2/commands.js'
 import {
   collectCanvasV2ValidationIssues,
@@ -21,10 +27,13 @@ import {
 import { parseCanvasBranch, ProtocolError } from './protocol.js'
 
 export const MAX_CANVAS_COMMAND_ENTITIES_V2 = 500
-export const MAX_ACCEPTED_TASK_PROPOSALS_V2 = 12
-export const MAX_PROPOSAL_KEY_LENGTH_V2 = 80
-export const MAX_PROPOSAL_EDIT_TITLE_LENGTH_V2 = 240
-export const MAX_PROPOSAL_EDIT_PROMPT_LENGTH_V2 = 10_000
+export {
+  MAX_ACCEPTED_TASK_PROPOSALS_V2,
+  MAX_TASK_PROPOSAL_EDIT_DEPENDENCIES_V2,
+}
+export const MAX_PROPOSAL_KEY_LENGTH_V2 = MAX_TASK_PROPOSAL_KEY_LENGTH_V2
+export const MAX_PROPOSAL_EDIT_TITLE_LENGTH_V2 = MAX_TASK_PROPOSAL_EDIT_TITLE_LENGTH_V2
+export const MAX_PROPOSAL_EDIT_PROMPT_LENGTH_V2 = MAX_TASK_PROPOSAL_EDIT_PROMPT_LENGTH_V2
 
 type TrustedPlanCommandV2 = Extract<CanvasCommandV2, {
   type: 'MaterializeProjectionPlan' | 'AcceptTaskProposals' | 'DismissPlan'
@@ -32,10 +41,7 @@ type TrustedPlanCommandV2 = Extract<CanvasCommandV2, {
 
 export type OrdinaryCanvasCommandV2 = Exclude<CanvasCommandV2, TrustedPlanCommandV2>
 
-export interface TaskProposalEditWireV2 {
-  title?: string
-  prompt?: string
-}
+export type TaskProposalEditWireV2 = TaskProposalEditV2
 
 /**
  * Browser-writable command wire shape.
@@ -660,9 +666,9 @@ function parseProposalEdits(
       throw new ProtocolError(`command.edits.${key} is not present in proposalKeys`)
     }
     if (!isRecord(candidate)) throw new ProtocolError(`command.edits.${key} must be an object`)
-    assertCommandKeys(candidate, ['title', 'prompt'], [])
+    assertCommandKeys(candidate, ['title', 'prompt', 'dependsOn'], [])
     if (Object.keys(candidate).length === 0) {
-      throw new ProtocolError(`command.edits.${key} must change title or prompt`)
+      throw new ProtocolError(`command.edits.${key} must change title, prompt, or dependencies`)
     }
     const title = candidate.title === undefined
       ? undefined
@@ -678,15 +684,47 @@ function parseProposalEdits(
         `command.edits.${key}.prompt`,
         MAX_PROPOSAL_EDIT_PROMPT_LENGTH_V2,
       )
-    if (title === undefined && prompt === undefined) {
-      throw new ProtocolError(`command.edits.${key} must change title or prompt`)
+    const dependsOn = candidate.dependsOn === undefined
+      ? undefined
+      : parseProposalDependencies(candidate.dependsOn, acceptedKeys, key)
+    if (title === undefined && prompt === undefined && dependsOn === undefined) {
+      throw new ProtocolError(`command.edits.${key} must change title, prompt, or dependencies`)
     }
     edits[key] = {
-      ...(title ? { title } : {}),
-      ...(prompt ? { prompt } : {}),
+      ...(title === undefined ? {} : { title }),
+      ...(prompt === undefined ? {} : { prompt }),
+      ...(dependsOn === undefined ? {} : { dependsOn }),
     }
   }
   return edits
+}
+
+function parseProposalDependencies(
+  value: unknown,
+  acceptedKeys: ReadonlySet<string>,
+  proposalKey: string,
+): string[] {
+  if (!Array.isArray(value) || value.length > MAX_TASK_PROPOSAL_EDIT_DEPENDENCIES_V2) {
+    throw new ProtocolError(`command.edits.${proposalKey}.dependsOn is invalid`)
+  }
+  const dependencies = value.map((candidate, index) => parseStableKey(
+    candidate,
+    `command.edits.${proposalKey}.dependsOn[${index}]`,
+  ))
+  if (new Set(dependencies).size !== dependencies.length) {
+    throw new ProtocolError(`command.edits.${proposalKey}.dependsOn contains duplicate keys`)
+  }
+  for (const dependencyKey of dependencies) {
+    if (dependencyKey === proposalKey) {
+      throw new ProtocolError(`command.edits.${proposalKey}.dependsOn cannot contain itself`)
+    }
+    if (!acceptedKeys.has(dependencyKey)) {
+      throw new ProtocolError(
+        `command.edits.${proposalKey}.dependsOn contains an unselected proposal`,
+      )
+    }
+  }
+  return dependencies
 }
 
 function parsePlanId(value: unknown): string {

@@ -555,6 +555,8 @@ function validateInvariants(
   }
 
   const acceptanceByProposal = new Map<string, string>()
+  const acceptedProposalPaths = new Map<string, string>()
+  const dismissedProposalPaths = new Map<string, string>()
   const materializationByOutput = new Map<string, string>()
   const receiptKinds = new Set<string>()
   const identityByPlan = new Map<string, { runId: string; taskId: string }>()
@@ -574,13 +576,35 @@ function validateInvariants(
       for (const outcome of receipt.outcomes) {
         materializationByOutput.set(`${receipt.planId}\0${outcome.outputKey}`, outcome.nodeId)
       }
+      for (const [proposalIndex, proposalKey] of receipt.dismissedProposalKeys.entries()) {
+        dismissedProposalPaths.set(
+          `${receipt.planId}\0${proposalKey}`,
+          `receipts[${index}].dismissedProposalKeys[${proposalIndex}]`,
+        )
+      }
     } else if (receipt.kind === 'proposal-acceptance') {
       validateUniqueMappings(receipt.proposals, 'proposalKey', 'taskId', `receipts[${index}].proposals`, issues)
-      for (const proposal of receipt.proposals) {
+      for (const [proposalIndex, proposal] of receipt.proposals.entries()) {
         acceptanceByProposal.set(`${receipt.planId}\0${proposal.proposalKey}`, proposal.taskId)
+        acceptedProposalPaths.set(
+          `${receipt.planId}\0${proposal.proposalKey}`,
+          `receipts[${index}].proposals[${proposalIndex}].proposalKey`,
+        )
       }
     } else {
       validateUniqueStrings(receipt.proposalKeys, `receipts[${index}].proposalKeys`, issues)
+      for (const [proposalIndex, proposalKey] of receipt.proposalKeys.entries()) {
+        dismissedProposalPaths.set(
+          `${receipt.planId}\0${proposalKey}`,
+          `receipts[${index}].proposalKeys[${proposalIndex}]`,
+        )
+      }
+    }
+  }
+
+  for (const [proposalIdentity, acceptedPath] of acceptedProposalPaths) {
+    if (dismissedProposalPaths.has(proposalIdentity)) {
+      issue(issues, acceptedPath, 'is both accepted and dismissed for this plan')
     }
   }
 
