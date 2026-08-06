@@ -31,6 +31,7 @@
     "build:daemon:test": "node scripts/clean-daemon-output.mjs dist-daemon-test && tsc -p tsconfig.daemon-test.json",
     "daemon": "npm run build:daemon && node dist-daemon/daemon/index.js",
     "daemon:start": "node dist-daemon/daemon/index.js",
+    "canvas:v2:reset": "node scripts/reset-canvas-v2.mjs",
     "test": "npm run test:startup && npm run test:daemon && npm run test:ui",
     "test:startup": "node --test scripts/*.test.mjs",
     "test:daemon": "npm run build:daemon:test && node --test dist-daemon-test/daemon/__tests__/*.test.js",

@@ -24,6 +24,7 @@ import {
 } from './atomic-file.js'
 
 const EMPTY_UPDATED_AT = '1970-01-01T00:00:00.000Z'
+const CANVAS_MAINTENANCE_LOCK_RELATIVE = '.gg/canvas-maintenance.lock'
 
 export interface CanvasRecovery {
   canvasPath: string
@@ -495,6 +496,7 @@ async function acquireProjectLease(filePath: string, scope: ProjectScope): Promi
     scope,
     path.relative(scope.projectDir, filePath),
   )
+  await assertNoCanvasMaintenance(scope)
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const token = randomUUID()
     const temporary = `${filePath}.tmp-${process.pid}-${token}`
@@ -506,6 +508,16 @@ async function acquireProjectLease(filePath: string, scope: ProjectScope): Promi
       await handle.close()
       handle = null
       await link(temporary, filePath)
+      try {
+        // Close the race with a reset that acquired maintenance after our
+        // initial check but before this hard-link became visible.
+        await assertNoCanvasMaintenance(scope)
+      } catch (error) {
+        const linkedOwner = await readLeaseOwner(filePath)
+        if (linkedOwner?.token === token) await rm(filePath, { force: true })
+        await syncDirectory(directory)
+        throw error
+      }
       await syncDirectory(directory)
       return { filePath, token, scope }
     } catch (error) {
@@ -538,6 +550,22 @@ async function acquireProjectLease(filePath: string, scope: ProjectScope): Promi
     }
   }
   throw new ProtocolError('could not acquire the canvas daemon lease', 'daemon_instance_active', 409)
+}
+
+async function assertNoCanvasMaintenance(scope: ProjectScope): Promise<void> {
+  await assertCanvasManagedPath(scope, CANVAS_MAINTENANCE_LOCK_RELATIVE)
+  const filePath = path.resolve(scope.projectDir, CANVAS_MAINTENANCE_LOCK_RELATIVE)
+  if (!await pathExistsNoFollow(filePath)) return
+  const owner = await readLeaseOwner(filePath)
+  const pid = owner?.pid
+  const active = pid !== undefined && processIsAlive(pid)
+  throw new ProtocolError(
+    active
+      ? `canvas maintenance is active in process ${pid}`
+      : 'stale canvas maintenance lock requires operator inspection',
+    active ? 'canvas_maintenance_active' : 'canvas_maintenance_stale',
+    409,
+  )
 }
 
 async function releaseProjectLease(lease: ProjectLease): Promise<void> {

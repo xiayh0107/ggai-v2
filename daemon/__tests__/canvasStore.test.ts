@@ -307,6 +307,44 @@ test('the daemon lease rejects an in-.gg runtime redirect', async () => {
   await manager.close()
 })
 
+test('canvas maintenance fences daemon lease acquisition without leaving a lock', async () => {
+  const projectDir = await temporaryProject()
+  const maintenancePath = path.join(projectDir, '.gg', 'canvas-maintenance.lock')
+  await mkdir(path.dirname(maintenancePath), { recursive: true })
+  await writeFile(
+    maintenancePath,
+    `${JSON.stringify({ pid: process.pid, token: 'reset-in-progress' })}\n`,
+    'utf8',
+  )
+  const manager = new CanvasStoreManager({ projectRoot: projectDir })
+  await assert.rejects(
+    manager.get('.', 'main'),
+    (error: unknown) => error instanceof ProtocolError && error.code === 'canvas_maintenance_active',
+  )
+  await assert.rejects(
+    readFile(path.join(projectDir, '.gg', 'runtime', 'canvas-daemon.lock')),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT',
+  )
+  await manager.close()
+})
+
+test('a stale canvas maintenance fence requires explicit operator inspection', async () => {
+  const projectDir = await temporaryProject()
+  const maintenancePath = path.join(projectDir, '.gg', 'canvas-maintenance.lock')
+  await mkdir(path.dirname(maintenancePath), { recursive: true })
+  await writeFile(
+    maintenancePath,
+    `${JSON.stringify({ pid: 2_147_483_647, token: 'stale-reset' })}\n`,
+    'utf8',
+  )
+  const manager = new CanvasStoreManager({ projectRoot: projectDir })
+  await assert.rejects(
+    manager.get('.', 'main'),
+    (error: unknown) => error instanceof ProtocolError && error.code === 'canvas_maintenance_stale',
+  )
+  await manager.close()
+})
+
 test('only one daemon manager can own a project at a time', async () => {
   const projectDir = await temporaryProject()
   const first = new CanvasStoreManager({ projectRoot: projectDir })
