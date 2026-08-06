@@ -739,6 +739,31 @@ describe('Canvas V2 interactive stage', () => {
     expect(document.activeElement).toBe(required(host, '[data-testid="canvas-v2-stage"]'))
   })
 
+  it('moves focus to the saved Collection when the temporary large node becomes durable', async () => {
+    const { store, host } = await createSubject()
+    act(() => store.setSelection([
+      { kind: 'task', id: 'task-empty' },
+      { kind: 'node', id: 'node-top' },
+    ]))
+    const save = required<HTMLButtonElement>(
+      host,
+      '[aria-label="把临时选择保存为集合"]',
+    )
+    save.focus()
+
+    await act(async () => save.click())
+    await vi.waitFor(() => {
+      const selected = store.getSnapshot().view.selection
+      expect(selected).toHaveLength(1)
+      expect(selected[0]?.kind).toBe('collection')
+      const collectionId = selected[0]!.id
+      expect(document.activeElement).toBe(required(
+        host,
+        `[data-focus-key="collection:${collectionId}"]`,
+      ))
+    })
+  })
+
   it('keeps camera, selection, and Task focus across materialization shape changes', async () => {
     const initialDocument = fixtureDocument()
     const materializedDocument = structuredClone(initialDocument)

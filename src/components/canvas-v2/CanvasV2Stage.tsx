@@ -984,6 +984,7 @@ export default function CanvasV2Stage() {
       members: collectableSelection,
     }
     void store.dispatchCommand(command).then(() => {
+      focusRestoreKeyRef.current = `collection:${id}`
       store.setSelection([{ kind: 'collection', id }])
       setRovingKey(`collection:${id}`)
       showUndoOffer({
