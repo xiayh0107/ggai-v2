@@ -3,20 +3,14 @@
 This document describes the isolated Canvas V2 frontend data path and its first
 interactive task-centric stage. V2 does not reuse or mutate the V1 React store.
 
-## Entry gate
+## Entry boundary
 
-`/canvas` selects a model before either store mounts:
-
-1. `VITE_GGAI_CANVAS_MODEL_V2` must explicitly be `1` or `true`.
-2. When enabled, `GET /health` must report `capabilities.canvasModelV2: true`.
-3. A disabled frontend flag mounts V1 without a health request.
-4. An enabled frontend with an unsupported or unreachable daemon mounts neither
-   model and shows an incompatibility error. It never silently falls back to V1,
-   because doing so could mix V1 and V2 writes after an operator explicitly
-   selected V2.
-
-The gate lives above `useCanvasStore`, so the V1 hook cannot hydrate or persist
-while V2 capability detection is pending.
+`/canvas` is a V2-only application entry. Before mounting the V2 provider it
+requires `GET /health` to report `capabilities.canvasModelV2: true`. A daemon
+running in explicit V1 archive-diagnostic mode, a reset-required response, or an
+unreachable daemon mounts no canvas store and shows a blocking recovery page.
+The page includes the explicit `npm run canvas:v2:reset -- --apply` instruction;
+it never silently initializes state or falls back to the V1 React tree.
 
 ## State ownership
 

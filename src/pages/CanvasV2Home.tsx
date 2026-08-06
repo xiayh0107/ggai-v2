@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import CanvasV2Shell from '@/components/canvas-v2/CanvasV2Shell'
 import { CanvasV2DaemonClient } from '@/canvas-v2/daemonClient'
-import { canvasV2BranchFromSearch } from '@/canvas-v2/featureFlag'
+import { canvasV2BranchFromSearch } from '@/canvas-v2/scope'
 import { CanvasV2Provider } from '@/canvas-v2/provider'
 import { CanvasV2TaskRunProvider } from '@/canvas-v2/runProvider'
 import { CanvasV2Store } from '@/canvas-v2/store'
