@@ -1161,7 +1161,7 @@ function canvasRouteModel(pathname: string): CanvasModelMode | null {
     || pathname === '/canvas/commands'
     || pathname === '/canvas/conflicts'
     || pathname.startsWith('/projection-plans/')
-    || /^\/runs\/[^/]+\/artifacts\/[^/]+$/u.test(pathname)
+    || /^\/runs\/[^/]+\/artifacts\/[^/]+(?:\/metadata)?$/u.test(pathname)
   ) return 'v2'
   if (
     pathname === '/canvas'

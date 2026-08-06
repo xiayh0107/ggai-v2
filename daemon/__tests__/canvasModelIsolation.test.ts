@@ -58,6 +58,22 @@ test('V1 mode advertises its actual schema and rejects every V2 write path', asy
     assert.equal(canvas.status, 409)
     assert.equal((await canvas.json() as { error: { code: string } }).error.code, 'canvas_model_mismatch')
 
+    const conflicts = await fetch(`${baseUrl}/canvas/conflicts`, { method: 'POST' })
+    assert.equal(conflicts.status, 409)
+    assert.equal(
+      (await conflicts.json() as { error: { code: string } }).error.code,
+      'canvas_model_mismatch',
+    )
+
+    const artifactMetadata = await fetch(
+      `${baseUrl}/runs/run-v2-rejected/artifacts/artifact-v2-rejected/metadata`,
+    )
+    assert.equal(artifactMetadata.status, 409)
+    assert.equal(
+      (await artifactMetadata.json() as { error: { code: string } }).error.code,
+      'canvas_model_mismatch',
+    )
+
     const run = await fetch(`${baseUrl}/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
