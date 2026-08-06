@@ -564,13 +564,14 @@ export class CanvasV2TaskRunController {
     }
     this.#settledRunIds.add(close.runId)
     if (snapshot.document.tasks.some((task) => task.id === execution.taskId)) {
-      const previous = snapshot.runtimeByTaskId[execution.taskId]
       this.#store.setTaskRuntime({
         taskId: execution.taskId,
         runId: execution.runId,
         phase: terminalPhase(close),
         ...(close.status === 'error' ? { message: '运行失败' } : {}),
-        ghosts: previous?.runId === execution.runId ? previous.ghosts : [],
+        // Ghosts describe transient file-write progress only. Durable close
+        // reloads the real projections, so retaining ghosts would duplicate them.
+        ghosts: [],
       })
     }
     const plan = close.projectionPlan

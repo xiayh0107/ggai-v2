@@ -330,7 +330,12 @@ describe('CanvasV2TaskRunController', () => {
     const subject = controller(store, client)
     const handle = await subject.runTask({ taskId: 'task-a', agentId: 'codex' })
 
-    client.emit(handle.runId, 1, { type: 'done', stopReason: 'end_turn' })
+    client.emit(handle.runId, 1, {
+      type: 'file-write',
+      path: 'files/classic_scatter_plot.png',
+    })
+    expect(store.snapshot.runtimeByTaskId['task-a']?.ghosts).toHaveLength(1)
+    client.emit(handle.runId, 2, { type: 'done', stopReason: 'end_turn' })
     expect(store.reloadCount).toBe(0)
     expect(store.snapshot.runtimeByTaskId['task-a']?.phase).toBe('running')
 
@@ -338,6 +343,7 @@ describe('CanvasV2TaskRunController', () => {
     await expect(handle.completion).resolves.toMatchObject({ status: 'done' })
     expect(store.reloadCount).toBe(1)
     expect(store.snapshot.runtimeByTaskId['task-a']?.phase).toBe('done')
+    expect(store.snapshot.runtimeByTaskId['task-a']?.ghosts).toEqual([])
     expect(store.order.indexOf('reload')).toBeLessThan(store.order.lastIndexOf('runtime:done'))
   })
 
