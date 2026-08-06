@@ -49,6 +49,7 @@ import {
 import { useCanvasV2State, useCanvasV2Store } from '@/canvas-v2/hooks'
 import { useThrottledAnnouncement } from '@/canvas-v2/useThrottledAnnouncement'
 import CanvasV2CollectionFrame from './CanvasV2CollectionFrame'
+import CanvasV2ContextComposer from './CanvasV2ContextComposer'
 import CanvasV2EdgeLayer, {
   type CanvasV2EdgeEndpoint,
 } from './CanvasV2EdgeLayer'
@@ -857,6 +858,14 @@ export default function CanvasV2Stage() {
       clientY: viewport.top + viewport.height / 2,
     }, camera.zoom * factor))
   }
+  const contextComposerAnchor = () => {
+    const camera = stateRef.current.view.camera
+    const viewport = viewportRect()
+    return screenToWorldV2({
+      clientX: viewport.left + viewport.width / 2,
+      clientY: viewport.top + viewport.height / 2,
+    }, camera, viewport)
+  }
 
   return (
     <div
@@ -999,6 +1008,8 @@ export default function CanvasV2Stage() {
           </div>
         </div>
       )}
+
+      <CanvasV2ContextComposer getAnchor={contextComposerAnchor} />
 
       <div className="absolute left-4 top-4 flex max-w-[calc(100%-2rem)] flex-wrap items-center gap-2">
         <button
