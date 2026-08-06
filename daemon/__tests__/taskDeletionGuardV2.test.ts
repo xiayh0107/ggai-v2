@@ -148,7 +148,7 @@ test('daemon blocks destructive Task and collection commands while a member Run 
     registry: registry(control.transport),
     watchArtifacts: async () => ({ close: async () => undefined }),
   })
-  const daemon = createDaemonServer({ projectRoot: root, runManager: runs })
+  const daemon = createDaemonServer({ projectRoot: root, runManager: runs, canvasModel: 'v2' })
   await new Promise<void>((resolve, reject) => {
     daemon.server.once('error', reject)
     daemon.server.listen(0, '127.0.0.1', resolve)

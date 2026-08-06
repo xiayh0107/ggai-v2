@@ -31,7 +31,13 @@ async function startTestDaemon(allowedOrigins: string[] = []): Promise<TestDaemo
     acpxCommand: path.join(root, 'missing-acpx'),
     acpxAgents: ['codex'],
   })
-  const daemon = createDaemonServer({ projectRoot: root, registry, allowedOrigins })
+  const daemon = createDaemonServer({
+    projectRoot: root,
+    registry,
+    allowedOrigins,
+    canvasModel: 'v2',
+    allowCanvasModelMixingForTests: true,
+  })
   await new Promise<void>((resolve, reject) => {
     daemon.server.once('error', reject)
     daemon.server.listen(0, '127.0.0.1', resolve)

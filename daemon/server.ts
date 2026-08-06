@@ -5,6 +5,7 @@ import type { Socket } from 'node:net'
 import path from 'node:path'
 import { CanvasCommandError } from '../src/canvas-v2/commands.js'
 import type { CanvasDocumentV2 } from '../src/canvas-v2/model.js'
+import type { CanvasModelMode } from './canvasModelMode.js'
 import { isArtifactControlPath } from './artifactPaths.js'
 import {
   CanvasCorruptionError,
@@ -80,6 +81,9 @@ export interface DaemonServerOptions {
   workspaceVersionManager?: WorkspaceVersionManager
   preferencesManager?: WorkspacePreferencesManager
   canvasCommandStoreV2Manager?: CanvasCommandStoreV2Manager
+  canvasModel?: CanvasModelMode
+  /** Existing cross-model integration suites only; never set from the CLI. */
+  allowCanvasModelMixingForTests?: boolean
 }
 
 export interface DaemonServer {
@@ -90,10 +94,12 @@ export interface DaemonServer {
   versions: WorkspaceVersionManager
   preferences: WorkspacePreferencesManager
   canvasV2: CanvasCommandStoreV2Manager
+  canvasModel: CanvasModelMode
   close(): Promise<void>
 }
 
 export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
+  const canvasModel = options.canvasModel ?? 'v1'
   const registry = options.registry ?? new AgentRegistry()
   const versions = options.workspaceVersionManager ?? new WorkspaceVersionManager({
     projectRoot: options.projectRoot,
@@ -111,13 +117,17 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     acquireProjectLease: (projectDir) => versions.canvases.acquireProjectLease(projectDir),
     resolveSourceProjectDir: ({ projectDir, canvasBranch }) =>
       versions.sourceExecutionProjectDir(projectDir, canvasBranch),
-    onProjectionPlanReady: ({ plan, projectDir, canvasBranch }) =>
-      autoMaterializeProjectionPlanV2({
-        canvases: canvasV2,
-        projectDir,
-        branch: canvasBranch,
-        plan,
-      }).then(() => undefined),
+    ...(canvasModel === 'v2' || options.allowCanvasModelMixingForTests
+      ? {
+          onProjectionPlanReady: ({ plan, projectDir, canvasBranch }) =>
+            autoMaterializeProjectionPlanV2({
+              canvases: canvasV2,
+              projectDir,
+              branch: canvasBranch,
+              plan,
+            }).then(() => undefined),
+        }
+      : {}),
     onRunFinished: async ({ summary, request, projectDir }) => {
       if (isResolvedTaskRunRequestV2(request)) return
       if (summary.status !== 'done' || request.automationMode !== 'auto') return
@@ -150,6 +160,8 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
       preferences,
       allowedOrigins,
       lifecycle,
+      canvasModel,
+      allowCanvasModelMixingForTests: options.allowCanvasModelMixingForTests === true,
     })
       .catch((error: unknown) => writeError(response, error))
   })
@@ -166,6 +178,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     versions,
     preferences,
     canvasV2,
+    canvasModel,
     close() {
       closePromise ??= closeDaemonServer(
         server,
@@ -191,6 +204,8 @@ interface RouteContext {
   preferences: WorkspacePreferencesManager
   allowedOrigins: Set<string>
   lifecycle: { closing: boolean }
+  canvasModel: CanvasModelMode
+  allowCanvasModelMixingForTests: boolean
 }
 
 async function route(
@@ -225,11 +240,22 @@ async function route(
     writeJson(response, 200, {
       status: 'ok',
       version: 1,
-      capabilities: { canvasModelV2: true },
+      capabilities: {
+        canvasModelV1: context.canvasModel === 'v1',
+        canvasModelV2: context.canvasModel === 'v2',
+      },
+      canvas: {
+        model: context.canvasModel,
+        schemaVersion: context.canvasModel === 'v2' ? 2 : 1,
+        resetRequired: false,
+      },
       projectRoot: context.projectRoot,
     })
     return
   }
+
+  const routeModel = canvasRouteModel(pathname)
+  if (routeModel) assertCanvasModel(context, routeModel)
 
   if (request.method === 'GET' && pathname === '/canvas/v2') {
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
@@ -502,6 +528,7 @@ async function route(
   if (request.method === 'POST' && pathname === '/runs') {
     const raw = await readJson(request)
     if (isRunIntentV2Candidate(raw)) {
+      assertCanvasModel(context, 'v2')
       const intent = parseRunIntentV2ForServer(raw)
       const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
       assertServerOpen(context)
@@ -543,6 +570,7 @@ async function route(
       return
     }
 
+    assertCanvasModel(context, 'v1')
     const parsed = parseCreateRunRequest(raw)
     const projectDir = parsed.projectDir ?? '.'
     assertServerOpen(context)
@@ -566,6 +594,8 @@ async function route(
     const nodeId = rawNodeId === undefined ? undefined : parseNodeId(rawNodeId)
     const rawTaskId = singleQueryParameter(url, 'taskId')
     const taskId = rawTaskId === undefined ? undefined : parseTaskIdV2(rawTaskId)
+    if (nodeId !== undefined) assertCanvasModel(context, 'v1')
+    if (taskId !== undefined) assertCanvasModel(context, 'v2')
     const rawBranch = singleQueryParameter(url, 'branch')
     const canvasBranch = rawBranch === undefined ? undefined : parseCanvasBranch(rawBranch)
     const limit = optionalIntegerQuery(url, 'limit', { min: 1, max: 2_000 })
@@ -832,6 +862,31 @@ function optionalIntegerQuery(
     throw new ProtocolError(`${name} must be between ${range.min} and ${range.max}`)
   }
   return parsed
+}
+
+function canvasRouteModel(pathname: string): CanvasModelMode | null {
+  if (
+    pathname === '/canvas/v2'
+    || pathname === '/canvas/commands'
+    || pathname.startsWith('/projection-plans/')
+    || /^\/runs\/[^/]+\/artifacts\/[^/]+$/u.test(pathname)
+  ) return 'v2'
+  if (
+    pathname === '/canvas'
+    || pathname.startsWith('/canvas/')
+    || pathname === '/artifacts'
+    || pathname === '/sessions'
+  ) return 'v1'
+  return null
+}
+
+function assertCanvasModel(context: RouteContext, required: CanvasModelMode): void {
+  if (context.allowCanvasModelMixingForTests || context.canvasModel === required) return
+  throw new ProtocolError(
+    `route requires Canvas ${required.toUpperCase()}, but daemon is running ${context.canvasModel.toUpperCase()}`,
+    'canvas_model_mismatch',
+    409,
+  )
 }
 
 function assertServerOpen(context: RouteContext): void {

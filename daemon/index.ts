@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 import path from 'node:path'
 import process from 'node:process'
+import {
+  assertCanvasModelReady,
+  CanvasModelBootError,
+  parseCanvasModelMode,
+  parseCanvasModelV2Flag,
+  type CanvasModelMode,
+} from './canvasModelMode.js'
 import { AgentRegistry } from './registry.js'
 import { createDaemonServer } from './server.js'
 
@@ -13,6 +20,7 @@ interface DaemonConfig {
   acpxApprovalMode: 'approve-all' | 'approve-reads' | 'deny-all'
   codexCommand: string
   acpxCommand: string
+  canvasModel: CanvasModelMode
 }
 
 function parseConfig(argv: string[]): DaemonConfig {
@@ -33,6 +41,7 @@ function parseConfig(argv: string[]): DaemonConfig {
   )
   let codexCommand = process.env.GGAI_CODEX_COMMAND ?? 'codex'
   let acpxCommand = process.env.GGAI_ACPX_COMMAND ?? 'acpx'
+  let canvasModel = parseCanvasModelV2Flag(process.env.GGAI_CANVAS_MODEL_V2)
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -54,11 +63,14 @@ function parseConfig(argv: string[]): DaemonConfig {
       codexCommand = parseCommand(argv[++index] ?? '', '--codex-command')
     } else if (argument === '--acpx-command') {
       acpxCommand = parseCommand(argv[++index] ?? '', '--acpx-command')
+    } else if (argument === '--canvas-model') {
+      canvasModel = parseCanvasModelMode(argv[++index] ?? '')
     } else if (argument === '--help' || argument === '-h') {
       console.log([
         'Usage: ggai-daemon [--port 7380] [--project-root DIR] [--allow-origin ORIGIN]',
         '                   [--acpx-agent ID] [--acpx-approval approve-reads|deny-all|approve-all]',
         '                   [--codex-command FILE] [--acpx-command FILE]',
+        '                   [--canvas-model v1|v2]',
         '',
         'The server always binds to 127.0.0.1.',
         'acpx adapters are experimental and disabled until --acpx-agent is provided.',
@@ -83,6 +95,7 @@ function parseConfig(argv: string[]): DaemonConfig {
     acpxApprovalMode,
     codexCommand,
     acpxCommand,
+    canvasModel,
   }
 }
 
@@ -102,25 +115,38 @@ function parseCommand(value: string, label: string): string {
   return command
 }
 
-const config = parseConfig(process.argv.slice(2))
-const registry = new AgentRegistry({
-  acpxAgents: config.acpxAgents,
-  acpxApprovalMode: config.acpxApprovalMode,
-  codexCommand: config.codexCommand,
-  acpxCommand: config.acpxCommand,
-})
-const daemon = createDaemonServer({ ...config, registry })
+async function main(): Promise<void> {
+  const config = parseConfig(process.argv.slice(2))
+  await assertCanvasModelReady(config.projectRoot, config.canvasModel)
+  const registry = new AgentRegistry({
+    acpxAgents: config.acpxAgents,
+    acpxApprovalMode: config.acpxApprovalMode,
+    codexCommand: config.codexCommand,
+    acpxCommand: config.acpxCommand,
+  })
+  const daemon = createDaemonServer({ ...config, registry })
 
-daemon.server.listen(config.port, config.host, () => {
-  console.log(`GGAI daemon listening on http://${config.host}:${config.port}`)
-  console.log(`Project root: ${config.projectRoot}`)
-})
+  daemon.server.listen(config.port, config.host, () => {
+    console.log(`GGAI daemon listening on http://${config.host}:${config.port}`)
+    console.log(`Project root: ${config.projectRoot}`)
+    console.log(`Canvas model: ${config.canvasModel}`)
+  })
 
-let closing = false
-const shutdown = async () => {
-  if (closing) return
-  closing = true
-  await daemon.close()
+  let closing = false
+  const shutdown = async () => {
+    if (closing) return
+    closing = true
+    await daemon.close()
+  }
+  process.once('SIGINT', () => void shutdown().finally(() => process.exit(0)))
+  process.once('SIGTERM', () => void shutdown().finally(() => process.exit(0)))
 }
-process.once('SIGINT', () => void shutdown().finally(() => process.exit(0)))
-process.once('SIGTERM', () => void shutdown().finally(() => process.exit(0)))
+
+void main().catch((error: unknown) => {
+  if (error instanceof CanvasModelBootError) {
+    process.stderr.write(`[${error.code}] ${error.message}\n`)
+  } else {
+    process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`)
+  }
+  process.exitCode = 1
+})

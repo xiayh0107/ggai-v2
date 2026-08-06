@@ -46,6 +46,15 @@ artifacts/.branches/
 
 `.git`、tracked source files、`.gg/source-worktrees` 和其他用户源码 worktree 不在 reset 目标内。
 
+reset 完成后，同时启用 daemon 与前端门禁：
+
+```dotenv
+GGAI_CANVAS_MODEL_V2=1
+VITE_GGAI_CANVAS_MODEL_V2=1
+```
+
+daemon 的 `--canvas-model v1|v2` 可覆盖环境选择。V2 模式只接受 command/Task Run 协议；V1 模式只接受旧 snapshot/Node Run 协议。两端不一致时前端停止 hydration，后端返回 `canvas_model_mismatch`，不会降级写入另一种 schema。
+
 ## 故障处理
 
 - `daemon_instance_active`：先正常停止 daemon，不能用 reset 强杀进程。
