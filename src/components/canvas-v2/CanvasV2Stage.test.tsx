@@ -605,8 +605,11 @@ describe('Canvas V2 interactive stage', () => {
       bubbles: true,
       cancelable: true,
     })))
-    expect(dispatch).toHaveBeenCalledTimes(3)
-    expect(dispatch.mock.calls.every(([command]) => command.type === 'DeleteEdge')).toBe(true)
+    expect(dispatch).toHaveBeenCalledOnce()
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'DeleteEdges',
+      edgeIds: ['edge-task', 'edge-node', 'edge-child'],
+    })
     dispatch.mockClear()
 
     await act(async () => dispatchPointer(collection, 'pointerover'))

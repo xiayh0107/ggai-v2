@@ -817,11 +817,18 @@ describe('Canvas V2 commands', () => {
     })).toThrowError(CanvasCommandError)
     expect(updated).toEqual(snapshot)
 
+    const snapshotBeforeInvalidDelete = structuredClone(updated)
+    expect(() => applyCanvasCommandV2(updated, {
+      type: 'DeleteEdges',
+      edgeIds: ['edge-source', 'edge-missing'],
+    })).toThrowError(CanvasCommandError)
+    expect(updated).toEqual(snapshotBeforeInvalidDelete)
+
     const deleted = applyCanvasCommandV2(updated, {
-      type: 'DeleteEdge',
-      edgeId: 'edge-dependency',
+      type: 'DeleteEdges',
+      edgeIds: ['edge-dependency', 'edge-source'],
     })
-    expect(deleted.edges.map(({ id }) => id)).toEqual(['edge-source'])
+    expect(deleted.edges).toEqual([])
   })
 
   it('adopts one empty output slot, supports detach/assign, and never resurrects a deleted view', () => {

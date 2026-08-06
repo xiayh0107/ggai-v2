@@ -1,5 +1,6 @@
 import {
   MAX_ACCEPTED_TASK_PROPOSALS_V2,
+  MAX_CANVAS_EDGE_BATCH_V2,
   MAX_TASK_PROPOSAL_EDIT_DEPENDENCIES_V2,
   MAX_TASK_PROPOSAL_EDIT_PROMPT_LENGTH_V2,
   MAX_TASK_PROPOSAL_EDIT_TITLE_LENGTH_V2,
@@ -142,6 +143,12 @@ export function parseCanvasCommandWireV2(value: unknown): CanvasCommandWireV2 {
       return {
         type: value.type,
         edgeId: parseIdentifier(value.edgeId, 'command.edgeId'),
+      }
+    case 'DeleteEdges':
+      assertCommandKeys(value, ['type', 'edgeIds'], ['type', 'edgeIds'])
+      return {
+        type: value.type,
+        edgeIds: parseIdentifierArray(value.edgeIds, 'command.edgeIds', true),
       }
     case 'DetachNodeFromTask':
       assertCommandKeys(value, ['type', 'nodeId'], ['type', 'nodeId'])
@@ -322,8 +329,8 @@ function parseDuplicateNode(
 }
 
 function parseUserEdges(value: unknown): CanvasEdgeV2[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CANVAS_COMMAND_ENTITIES_V2) {
-    throw new ProtocolError('command.edges must contain 1 to 500 edges')
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CANVAS_EDGE_BATCH_V2) {
+    throw new ProtocolError(`command.edges must contain 1 to ${MAX_CANVAS_EDGE_BATCH_V2} edges`)
   }
   const edges = value.map((candidate, index) =>
     parseUserEdge(candidate, `command.edges[${index}]`, false))

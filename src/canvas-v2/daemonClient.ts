@@ -312,6 +312,7 @@ export function serializeCanvasCommandV2(command: CanvasCommandV2): CanvasComman
     case 'CreateEdges':
     case 'UpdateEdge':
     case 'DeleteEdge':
+    case 'DeleteEdges':
     case 'DetachNodeFromTask':
     case 'AssignNodeToTask':
     case 'CreateTaskForOutputSlot':

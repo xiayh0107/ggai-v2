@@ -131,6 +131,13 @@ test('parses bounded user node, edge, membership, and derived-task commands', ()
     patch: { relation: 'modified', contextRole: 'summary' },
   })
   assert.deepEqual(parseCanvasCommandWireV2({
+    type: 'DeleteEdges',
+    edgeIds: ['edge-source', 'edge-derived'],
+  }), {
+    type: 'DeleteEdges',
+    edgeIds: ['edge-source', 'edge-derived'],
+  })
+  assert.deepEqual(parseCanvasCommandWireV2({
     type: 'CreateDerivedTaskFromSelection',
     task: {
       id: 'task-derived',
@@ -248,6 +255,14 @@ test('rejects extra request and ordinary-command fields', () => {
     taskId: 'task-1',
     payload: { hidden: true },
   }), /unsupported/u)
+  assert.throws(() => parseCanvasCommandWireV2({
+    type: 'DeleteEdges',
+    edgeIds: ['edge-source', 'edge-source'],
+  }), /duplicate ids/u)
+  assert.throws(() => parseCanvasCommandWireV2({
+    type: 'DeleteEdges',
+    edgeIds: [],
+  }), /non-empty/u)
   assert.throws(() => parseCanvasCommandWireV2({
     type: 'CreateTask',
     task: {

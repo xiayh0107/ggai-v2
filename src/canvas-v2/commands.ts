@@ -43,6 +43,7 @@ export interface TrustedTaskProposalV2 {
 }
 
 export const MAX_ACCEPTED_TASK_PROPOSALS_V2 = 12
+export const MAX_CANVAS_EDGE_BATCH_V2 = 500
 export const MAX_TASK_PROPOSAL_KEY_LENGTH_V2 = 80
 export const MAX_TASK_PROPOSAL_EDIT_TITLE_LENGTH_V2 = 240
 export const MAX_TASK_PROPOSAL_EDIT_PROMPT_LENGTH_V2 = 10_000
@@ -106,6 +107,7 @@ export type CanvasCommandV2 =
   | { type: 'CreateEdges'; edges: CanvasEdgeV2[] }
   | { type: 'UpdateEdge'; edgeId: string; patch: UpdateEdgePatchV2 }
   | { type: 'DeleteEdge'; edgeId: string }
+  | { type: 'DeleteEdges'; edgeIds: string[] }
   | { type: 'DetachNodeFromTask'; nodeId: string }
   | { type: 'AssignNodeToTask'; nodeId: string; taskId: string }
   | { type: 'CreateTaskForOutputSlot'; task: CanvasTaskV2; nodeId: string }
@@ -213,6 +215,9 @@ export function applyCanvasCommandV2(
       break
     case 'DeleteEdge':
       deleteEdge(next, command.edgeId)
+      break
+    case 'DeleteEdges':
+      deleteEdges(next, command.edgeIds)
       break
     case 'DetachNodeFromTask':
       detachNodeFromTask(next, command.nodeId)
@@ -443,8 +448,11 @@ function createUserEdge(document: CanvasDocumentV2, edge: CanvasEdgeV2): void {
 }
 
 function createUserEdges(document: CanvasDocumentV2, edges: CanvasEdgeV2[]): void {
-  if (!Array.isArray(edges) || edges.length === 0 || edges.length > 500) {
-    throw new CanvasCommandError('invalid-edges', 'CreateEdges requires 1 to 500 edges')
+  if (!Array.isArray(edges) || edges.length === 0 || edges.length > MAX_CANVAS_EDGE_BATCH_V2) {
+    throw new CanvasCommandError(
+      'invalid-edges',
+      `CreateEdges requires 1 to ${MAX_CANVAS_EDGE_BATCH_V2} edges`,
+    )
   }
   for (const edge of edges) createUserEdge(document, edge)
 }
@@ -496,6 +504,21 @@ function updateUserEdge(
 function deleteEdge(document: CanvasDocumentV2, edgeId: string): void {
   requireEdge(document, edgeId)
   document.edges = document.edges.filter((edge) => edge.id !== edgeId)
+}
+
+function deleteEdges(document: CanvasDocumentV2, edgeIds: string[]): void {
+  if (!Array.isArray(edgeIds)
+    || edgeIds.length === 0
+    || edgeIds.length > MAX_CANVAS_EDGE_BATCH_V2
+    || new Set(edgeIds).size !== edgeIds.length) {
+    throw new CanvasCommandError(
+      'invalid-edge-ids',
+      `DeleteEdges requires 1 to ${MAX_CANVAS_EDGE_BATCH_V2} unique edge ids`,
+    )
+  }
+  for (const edgeId of edgeIds) requireEdge(document, edgeId)
+  const deleted = new Set(edgeIds)
+  document.edges = document.edges.filter((edge) => !deleted.has(edge.id))
 }
 
 function detachNodeFromTask(document: CanvasDocumentV2, nodeId: string): void {

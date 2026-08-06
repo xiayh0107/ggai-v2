@@ -14,7 +14,11 @@ import {
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
-import { applyCanvasCommandV2, type CanvasCommandV2 } from '@/canvas-v2/commands'
+import {
+  applyCanvasCommandV2,
+  MAX_CANVAS_EDGE_BATCH_V2,
+  type CanvasCommandV2,
+} from '@/canvas-v2/commands'
 import {
   mergeSelectionV2,
   nextRovingKeyV2,
@@ -819,8 +823,16 @@ export default function CanvasV2Stage() {
       setNotice('已取消连接')
       return
     }
-    const pairs = expandEndpoint(edgeDraft).flatMap((from) =>
-      expandEndpoint(endpoint).map((to) => ({ from, to })))
+    const fromEndpoints = expandEndpoint(edgeDraft)
+    const toEndpoints = expandEndpoint(endpoint)
+    if (fromEndpoints.length * toEndpoints.length > MAX_CANVAS_EDGE_BATCH_V2) {
+      setNotice(
+        `集合连接会生成超过 ${MAX_CANVAS_EDGE_BATCH_V2} 条边；请缩小集合或分批连接`,
+      )
+      return
+    }
+    const pairs = fromEndpoints.flatMap((from) =>
+      toEndpoints.map((to) => ({ from, to })))
     const existing = new Set(stageDocument.edges.map((edge) => edgeSemanticKeyV2(edge)))
     const edges = pairs.flatMap(({ from, to }) => {
       const candidate = {
@@ -838,7 +850,7 @@ export default function CanvasV2Stage() {
         ...candidate,
         origin: { kind: 'user' as const },
       }]
-    }).slice(0, 500)
+    })
     if (edges.length === 0) {
       setNotice('当前 relation 与端点类型不兼容，或连接已经存在')
       return
@@ -847,7 +859,7 @@ export default function CanvasV2Stage() {
       setEdgeDraft(null)
       showUndoOffer({
         label: `已创建 ${edges.length} 条 ${relationLabelV2(edgeRelation)} 连接`,
-        undoCommands: edges.map((edge) => ({ type: 'DeleteEdge', edgeId: edge.id })),
+        undoCommands: [{ type: 'DeleteEdges', edgeIds: edges.map((edge) => edge.id) }],
       })
     }).catch((error: unknown) => setNotice(errorMessageV2(error)))
   }
@@ -946,16 +958,19 @@ export default function CanvasV2Stage() {
           preview={preview}
           nodeFrames={nodeFrames}
           onDeleteEdges={(edgeIds) => {
-            const deletable = edgeIds.filter((id) =>
-              stageDocument.edges.find((edge) => edge.id === id)?.origin.kind === 'user')
+            const deletable = edgeIds.flatMap((id) => {
+              const edge = stageDocument.edges.find((candidate) => candidate.id === id)
+              return edge?.origin.kind === 'user' ? [structuredClone(edge)] : []
+            })
             if (deletable.length === 0) {
               setNotice('Agent 创建的连接不能由浏览器删除')
               return
             }
-            void dispatchCommandsV2(store, deletable.map((edgeId) => ({
-              type: 'DeleteEdge',
-              edgeId,
-            }))).catch((error: unknown) => setNotice(errorMessageV2(error)))
+            dispatchWithUndo(
+              { type: 'DeleteEdges', edgeIds: deletable.map((edge) => edge.id) },
+              `已删除 ${deletable.length} 条连接`,
+              [{ type: 'CreateEdges', edges: deletable }],
+            )
           }}
         />
         {visibleTaskViews.map((view) => (
