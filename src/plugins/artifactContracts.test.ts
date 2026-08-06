@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION_V2,
   BUILTIN_ARTIFACT_CLAIM_REGISTRY_V2,
   MAX_ARTIFACT_CLAIM_MATCHERS_PER_RULE_V2,
   MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN_V2,
   artifactClaimsForBuiltinV2,
+  inspectArtifactCapabilitySnapshotRequestV2,
   inspectArtifactClaimRegistryV2,
 } from './artifactContracts'
 
@@ -73,5 +75,39 @@ describe('V2 artifact claim registry', () => {
       ...valid,
       projectArtifact: () => null,
     }]).status).toBe('invalid')
+  })
+
+  it('strictly canonicalizes the serializable capability envelope', () => {
+    expect(inspectArtifactCapabilitySnapshotRequestV2({
+      schemaVersion: ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION_V2,
+      plugins: [{
+        id: '@community/data-view',
+        artifactClaims: [{
+          mediaTypes: ['application/x-zeta', 'application/x-alpha'],
+          extensions: ['.zeta', '.alpha'],
+        }],
+      }],
+    })).toEqual({
+      status: 'valid',
+      snapshot: {
+        schemaVersion: 2,
+        plugins: [{
+          id: '@community/data-view',
+          artifactClaims: [{
+            extensions: ['.alpha', '.zeta'],
+            mediaTypes: ['application/x-alpha', 'application/x-zeta'],
+          }],
+        }],
+      },
+    })
+    expect(inspectArtifactCapabilitySnapshotRequestV2({
+      schemaVersion: 2,
+      plugins: [],
+      projectArtifact: () => null,
+    }).status).toBe('invalid')
+    expect(inspectArtifactCapabilitySnapshotRequestV2({
+      schemaVersion: 1,
+      plugins: [],
+    }).status).toBe('invalid')
   })
 })

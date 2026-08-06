@@ -21,6 +21,21 @@ export interface ArtifactClaimRegistrationV2 {
   acceptsUnknown?: boolean
 }
 
+export const ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION_V2 = 2
+
+/**
+ * Browser-to-daemon data contract. It contains claims only; executable hooks,
+ * renderers and canvas authority can never be represented by this shape.
+ */
+export interface ArtifactCapabilitySnapshotRequestV2 {
+  schemaVersion: 2
+  plugins: ArtifactClaimRegistrationV2[]
+}
+
+export type ArtifactCapabilitySnapshotRequestInspectionV2 =
+  | { status: 'valid'; snapshot: ArtifactCapabilitySnapshotRequestV2 }
+  | { status: 'invalid'; reason: string }
+
 export type ArtifactClaimRegistryInspectionV2 =
   | { status: 'valid'; registrations: ArtifactClaimRegistrationV2[] }
   | { status: 'invalid'; reason: string }
@@ -54,6 +69,52 @@ export function defineArtifactClaimRegistryV2(
     throw new TypeError(`artifact claim registry is invalid: ${inspection.reason}`)
   }
   return inspection.registrations
+}
+
+export function inspectArtifactCapabilitySnapshotRequestV2(
+  value: unknown,
+): ArtifactCapabilitySnapshotRequestInspectionV2 {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ['schemaVersion', 'plugins'])
+    || value.schemaVersion !== ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION_V2) {
+    return { status: 'invalid', reason: 'artifact capability snapshot envelope is invalid' }
+  }
+  const inspection = inspectArtifactClaimRegistryV2(value.plugins)
+  if (inspection.status !== 'valid') return inspection
+  return {
+    status: 'valid',
+    snapshot: {
+      schemaVersion: ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION_V2,
+      plugins: canonicalArtifactClaimRegistrationsV2(inspection.registrations),
+    },
+  }
+}
+
+/** Stable ordering keeps capability digests independent from plugin load order. */
+export function canonicalArtifactClaimRegistrationsV2(
+  registrations: readonly ArtifactClaimRegistrationV2[],
+): ArtifactClaimRegistrationV2[] {
+  const inspection = inspectArtifactClaimRegistryV2(registrations)
+  if (inspection.status !== 'valid') {
+    throw new TypeError(`artifact claim registry is invalid: ${inspection.reason}`)
+  }
+  return inspection.registrations
+    .map((registration) => ({
+      id: registration.id,
+      artifactClaims: registration.artifactClaims
+        .map((claim) => ({
+          ...(claim.extensions
+            ? { extensions: [...claim.extensions].sort((left, right) => left.localeCompare(right)) }
+            : {}),
+          ...(claim.mediaTypes
+            ? { mediaTypes: [...claim.mediaTypes].sort((left, right) => left.localeCompare(right)) }
+            : {}),
+          ...(claim.priority !== undefined ? { priority: claim.priority } : {}),
+        }))
+        .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+      ...(registration.acceptsUnknown ? { acceptsUnknown: true } : {}),
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id))
 }
 
 function parseRegistrations(value: unknown): ArtifactClaimRegistrationV2[] {
@@ -215,6 +276,10 @@ export const BUILTIN_ARTIFACT_CLAIM_REGISTRY_V2 = defineArtifactClaimRegistryV2(
     acceptsUnknown: true,
   },
 ])
+
+export const BUILTIN_ARTIFACT_PLUGIN_IDS_V2: ReadonlySet<string> = new Set(
+  BUILTIN_ARTIFACT_CLAIM_REGISTRY_V2.map(({ id }) => id),
+)
 
 /** Returns a mutable copy suitable for one browser-side NodePlugin declaration. */
 export function artifactClaimsForBuiltinV2(
