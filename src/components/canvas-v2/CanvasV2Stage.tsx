@@ -284,6 +284,13 @@ export default function CanvasV2Stage() {
     && edgeDraft.id !== selectionDraftId
     ? null
     : edgeDraft
+  useEffect(() => {
+    if (edgeDraft?.kind !== 'selection' || edgeDraft.id === selectionDraftId) return
+    const staleDraft = edgeDraft
+    queueMicrotask(() => {
+      setEdgeDraft((current) => current === staleDraft ? null : current)
+    })
+  }, [edgeDraft, selectionDraftId])
   const taskViews = stageDocument.tasks
     .map((task) => selectTaskViewV2(stageDocument, task.id, {
       zoom: state.view.camera.zoom,

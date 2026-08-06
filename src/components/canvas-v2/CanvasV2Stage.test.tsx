@@ -696,6 +696,32 @@ describe('Canvas V2 interactive stage', () => {
     })))
   })
 
+  it('permanently invalidates a temporary selection edge draft after selection changes', async () => {
+    const { store, host } = await createSubject()
+    act(() => store.setSelection([
+      { kind: 'node', id: 'node-image' },
+      { kind: 'node', id: 'node-code' },
+    ]))
+    let rightPort = required<HTMLButtonElement>(host, '[data-selection-port="right"]')
+    await act(async () => rightPort.click())
+    expect(rightPort.getAttribute('aria-pressed')).toBe('true')
+
+    await act(async () => {
+      store.setSelection([{ kind: 'node', id: 'node-top' }])
+      await Promise.resolve()
+    })
+    await act(async () => {
+      store.setSelection([
+        { kind: 'node', id: 'node-image' },
+        { kind: 'node', id: 'node-code' },
+      ])
+      await Promise.resolve()
+    })
+
+    rightPort = required<HTMLButtonElement>(host, '[data-selection-port="right"]')
+    expect(rightPort.getAttribute('aria-pressed')).toBe('false')
+  })
+
   it('returns focus to the stage when the temporary large node is dismissed', async () => {
     const { store, host } = await createSubject()
     act(() => store.setSelection([
