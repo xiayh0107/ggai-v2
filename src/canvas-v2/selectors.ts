@@ -20,7 +20,7 @@ export interface CanvasBoundsV2 {
 }
 
 export type CanvasTaskRunPhaseV2 =
-  | 'idle'
+  | 'draft'
   | 'queued'
   | 'running'
   | 'awaiting-permission'
@@ -59,7 +59,7 @@ export type CanvasTaskPresentationV2 = 'expanded' | 'compact' | 'collapsed'
 export type CanvasTaskContainerKindV2 = 'task-card' | 'title-strip' | 'output-frame'
 
 export type CanvasTaskStatusKindV2 =
-  | 'idle'
+  | 'draft'
   | 'queued'
   | 'generating'
   | 'needs-attention'
@@ -211,10 +211,10 @@ export function deriveTaskStatusV2(
   runtime: CanvasTaskRuntimeV2 | undefined,
   nodes: readonly CanvasNodeV2[] = [],
 ): CanvasTaskStatusV2 {
-  if (!runtime || runtime.phase === 'idle') {
+  if (!runtime || runtime.phase === 'draft') {
     return nodes.length > 0
       ? { kind: 'ready', label: '已有产物', live: 'off' }
-      : { kind: 'idle', label: '未运行', live: 'off' }
+      : { kind: 'draft', label: '未运行', live: 'off' }
   }
 
   const progress = runtime.progress === undefined

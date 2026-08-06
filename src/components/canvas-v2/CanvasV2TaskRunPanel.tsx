@@ -433,7 +433,7 @@ function runtimeStatusLabel(runtime: CanvasTaskRuntimeV2 | undefined): string {
   if (!runtime) return '尚未运行；提交后将使用此 Task 的独立会话'
   if (runtime.message) return runtime.message
   switch (runtime.phase) {
-    case 'idle': return '尚未运行'
+    case 'draft': return '尚未运行'
     case 'queued': return '等待运行'
     case 'running': return '正在运行'
     case 'awaiting-permission': return '等待权限确认'

@@ -145,12 +145,14 @@ describe('Canvas V2 task selectors', () => {
   })
 
   it('keeps explicit collapse authoritative while surfacing active work otherwise', () => {
+    const draft = deriveTaskStatusV2(undefined, [])
     const generating = deriveTaskStatusV2(runtime('running'), [])
     const failed = deriveTaskStatusV2(runtime('interrupted', { message: 'Connection lost' }), [])
 
     expect(deriveTaskPresentationV2(1, true, true, generating, 2)).toBe('collapsed')
     expect(deriveTaskPresentationV2(0.2, false, false, generating, 0)).toBe('compact')
     expect(deriveTaskPresentationV2(0.8, false, false, generating, 0)).toBe('expanded')
+    expect(draft).toEqual({ kind: 'draft', label: '未运行', live: 'off' })
     expect(failed).toMatchObject({
       kind: 'failed',
       label: '运行失败',
