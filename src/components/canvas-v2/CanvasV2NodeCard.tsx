@@ -21,7 +21,7 @@ export interface CanvasV2NodeCardProps {
   tabIndex: number
   onFocus: () => void
   onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void
-  onDragStart: (event: PointerEvent<HTMLButtonElement>, node: CanvasNodeV2) => void
+  onDragStart: (event: PointerEvent<HTMLElement>, node: CanvasNodeV2) => void
   onResizeStart: (event: PointerEvent<HTMLButtonElement>, node: CanvasNodeV2) => void
   onPortActivate?: (node: CanvasNodeV2) => void
   connectionActive?: boolean
@@ -67,6 +67,12 @@ export default function CanvasV2NodeCard({
         width: frame.w,
         height: frame.h,
         zIndex: node.frame.z + 10,
+      }}
+      onPointerDown={(event) => {
+        if ((event.target as HTMLElement).closest('button, a, input, textarea, select, [data-no-drag]')) {
+          return
+        }
+        onDragStart(event, node)
       }}
     >
       <header className="flex h-10 items-center gap-2 border-b border-gg-line px-3">

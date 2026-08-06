@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act } from 'react'
+import type { ComponentProps } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { FileQuestion } from 'lucide-react'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -162,9 +163,36 @@ describe('CanvasV2NodeCard artifact projection', () => {
     expect(fetchArtifact.mock.calls.some(([input]) =>
       String(input).includes(`/runs/run-r-source/artifacts/${artifactId}?`))).toBe(true)
   })
+
+  it('selects from the content surface while preserving nested controls', async () => {
+    const onDragStart = vi.fn()
+    await renderNode({
+      id: 'node-clickable-body',
+      type: 'text',
+      frame: { x: 0, y: 0, w: 320, h: 220, z: 1 },
+      title: 'Clickable body',
+      text: 'Clicking this content opens its node-local prompt surface.',
+      artifactRefs: [],
+      origin: { kind: 'user' },
+    }, onDragStart)
+
+    act(() => {
+      container?.querySelector('pre')?.dispatchEvent(new MouseEvent('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      }))
+    })
+    expect(onDragStart).toHaveBeenCalledOnce()
+    expect(onDragStart.mock.calls[0]?.[1]).toMatchObject({ id: 'node-clickable-body' })
+  })
 })
 
-async function renderNode(node: CanvasNodeV2): Promise<void> {
+async function renderNode(
+  node: CanvasNodeV2,
+  onDragStart: NonNullable<ComponentProps<typeof CanvasV2NodeCard>['onDragStart']>
+    = () => undefined,
+): Promise<void> {
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
@@ -177,7 +205,7 @@ async function renderNode(node: CanvasNodeV2): Promise<void> {
         tabIndex={0}
         onFocus={() => undefined}
         onKeyDown={() => undefined}
-        onDragStart={() => undefined}
+        onDragStart={onDragStart}
         onResizeStart={() => undefined}
         registerFocusable={() => undefined}
       />,

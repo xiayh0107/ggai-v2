@@ -35,7 +35,7 @@ export interface CanvasV2TaskGroupProps {
   onSelectTask: (task: CanvasTaskV2, additive: boolean) => void
   onToggleCollapsed: (taskId: string, collapsed: boolean) => void
   onTaskDragStart: (event: PointerEvent<HTMLElement>, task: CanvasTaskV2) => void
-  onNodeDragStart: (event: PointerEvent<HTMLButtonElement>, node: CanvasNodeV2) => void
+  onNodeDragStart: (event: PointerEvent<HTMLElement>, node: CanvasNodeV2) => void
   onNodeResizeStart: (event: PointerEvent<HTMLButtonElement>, node: CanvasNodeV2) => void
   onTaskPortActivate?: (task: CanvasTaskV2) => void
   onNodePortActivate?: (node: CanvasNodeV2) => void

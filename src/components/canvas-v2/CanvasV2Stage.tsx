@@ -380,7 +380,7 @@ export default function CanvasV2Stage() {
   }, [beginGesture, selectTask])
 
   const beginNodeDrag = useCallback((
-    event: ReactPointerEvent<HTMLButtonElement>,
+    event: ReactPointerEvent<HTMLElement>,
     node: CanvasNodeV2,
   ) => {
     if (event.button !== 0) return
@@ -653,6 +653,41 @@ export default function CanvasV2Stage() {
       })
     }
   }
+
+  const contextSelectionBounds = (() => {
+    const bounds = state.view.selection.flatMap((target): CanvasBoundsV2[] => {
+      if (target.kind === 'node') {
+        const node = stageDocument.nodes.find((entry) => entry.id === target.id)
+        if (!node) return []
+        return [nodeFrames.get(node.id) ?? node.frame]
+      }
+      if (target.kind === 'task') {
+        const view = taskViewsById.get(target.id)
+        if (!view) return []
+        const frame = taskInteractionBoundsV2(view)
+        const offset = taskPreviewOffsetV2(view.task, preview)
+        return [{
+          ...frame,
+          x: frame.x + (offset?.dx ?? 0),
+          y: frame.y + (offset?.dy ?? 0),
+        }]
+      }
+      const view = collectionViewsById.get(target.id)
+      if (!view) return []
+      const frame = view.collapsed
+        ? collapsedCollectionBoundsV2(view.collection)
+        : view.bounds
+      const offset = preview?.kind === 'collection' && preview.id === target.id
+        ? preview
+        : null
+      return [{
+        ...frame,
+        x: frame.x + (offset?.dx ?? 0),
+        y: frame.y + (offset?.dy ?? 0),
+      }]
+    })
+    return bounds.length > 0 ? unionBoundsV2(bounds) : null
+  })()
 
   const clearUndoOffer = () => {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current)
@@ -1188,7 +1223,11 @@ export default function CanvasV2Stage() {
         </div>
       )}
 
-      <CanvasV2ContextComposer getAnchor={contextComposerAnchor} />
+      <CanvasV2ContextComposer
+        getAnchor={contextComposerAnchor}
+        selectionBounds={contextSelectionBounds}
+        getViewport={viewportRect}
+      />
 
       <div className="absolute left-4 top-4 flex max-w-[calc(100%-2rem)] flex-wrap items-center gap-2">
         <button

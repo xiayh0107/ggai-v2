@@ -148,4 +148,121 @@ describe('Canvas V2 context composer', () => {
       prompt: '生成一个 ggplot 散点图',
     })
   })
+
+  it('attaches to a generated Node and restores the exact immutable Run prompt', async () => {
+    const fakeStore = new FakeStore()
+    fakeStore.state.document.tasks.push({
+      id: 'task-origin',
+      title: '生成散点图',
+      goal: '旧任务目标不能代替本次 Run prompt',
+      anchor: { x: 120, y: 80 },
+      origin: { kind: 'user' },
+    })
+    fakeStore.state.document.nodes.push({
+      id: 'node-image',
+      type: 'image',
+      frame: { x: 160, y: 180, w: 300, h: 240, z: 1 },
+      title: '散点图预览',
+      artifactRefs: [],
+      homeTaskId: 'task-origin',
+      origin: {
+        kind: 'agent-output',
+        taskId: 'task-origin',
+        runId: 'run-exact-prompt',
+        planId: `plan_${'a'.repeat(64)}`,
+        outputKey: 'preview',
+      },
+    })
+    fakeStore.state.document.receipts.push({
+      kind: 'materialization',
+      planId: `plan_${'a'.repeat(64)}`,
+      runId: 'run-exact-prompt',
+      taskId: 'task-origin',
+      outcomes: [{ outputKey: 'preview', nodeId: 'node-image' }],
+      dismissedProposalKeys: [],
+    })
+    fakeStore.state.view.selection = [{ kind: 'node', id: 'node-image' }]
+    const store = fakeStore as unknown as CanvasV2Store
+    const startTaskMock = vi.fn(async (input: CanvasV2RunTaskInput) => ({
+      taskId: input.taskId,
+      runId: 'run-derived',
+      completion: new Promise(() => undefined),
+      detach: () => undefined,
+    }))
+    const readTaskRunSummary = vi.fn(async () => ({
+      runId: 'run-exact-prompt',
+      taskId: 'task-origin',
+      agentId: 'codex',
+      canvasBranch: 'main',
+      baseRevision: 17,
+      prompt: '展示生成的图片，并保留 ggplot 源代码',
+      status: 'done' as const,
+      startedAt: 1,
+    }))
+    const lifecycle = {
+      startTask: startTaskMock,
+      readTaskRunSummary,
+      getSuggestedActions: () => [],
+    } as unknown as CanvasV2TaskRunLifecycle
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => {
+      root?.render(
+        <CanvasV2Context.Provider value={store}>
+          <CanvasV2TaskRunContext.Provider value={lifecycle}>
+            <CanvasV2ContextComposer
+              getAnchor={() => ({ x: 320, y: 240 })}
+              selectionBounds={{ x: 160, y: 180, w: 300, h: 240 }}
+              getViewport={() => ({ left: 0, top: 0, width: 1_000, height: 800 })}
+            />
+          </CanvasV2TaskRunContext.Provider>
+        </CanvasV2Context.Provider>,
+      )
+    })
+
+    await vi.waitFor(() => {
+      expect((container?.querySelector('textarea') as HTMLTextAreaElement).value)
+        .toBe('展示生成的图片，并保留 ggplot 源代码')
+    })
+    expect(readTaskRunSummary).toHaveBeenCalledWith('run-exact-prompt')
+    expect(container?.querySelector('form')?.dataset.attached).toBe('true')
+    expect(container?.querySelector('[data-testid="canvas-v2-node-provenance"]')?.textContent)
+      .toContain('由“生成散点图”的提示词生成')
+    expect(container?.querySelector('[data-testid="canvas-v2-node-provenance-prompt"]')?.textContent)
+      .toContain('展示生成的图片，并保留 ggplot 源代码')
+    expect(container?.textContent).toContain('Canvas r17')
+
+    const textarea = container?.querySelector('textarea') as HTMLTextAreaElement
+    const valueSetter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      'value',
+    )?.set
+    await act(async () => {
+      valueSetter?.call(textarea, '调整配色并生成新图')
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await vi.waitFor(() => {
+      expect((container?.querySelector('textarea') as HTMLTextAreaElement).value)
+        .toBe('调整配色并生成新图')
+      expect((container?.querySelector('button[type="submit"]') as HTMLButtonElement).disabled)
+        .toBe(false)
+    })
+    await act(async () => {
+      ;(container?.querySelector('button[type="submit"]') as HTMLButtonElement).click()
+      await vi.waitFor(() => expect(startTaskMock).toHaveBeenCalledOnce())
+    })
+
+    expect(fakeStore.getSnapshot().document.nodes.find((node) => node.id === 'node-image'))
+      .toMatchObject({ title: '散点图预览', homeTaskId: 'task-origin' })
+    const derivedTask = fakeStore.getSnapshot().document.tasks.find((task) =>
+      task.id !== 'task-origin')
+    expect(derivedTask).toMatchObject({ goal: '调整配色并生成新图' })
+    expect(fakeStore.getSnapshot().document.edges).toContainEqual(expect.objectContaining({
+      from: { kind: 'node', id: 'node-image' },
+      to: { kind: 'task', id: derivedTask?.id },
+      relation: 'modified',
+      contextRole: 'full',
+    }))
+  })
 })
