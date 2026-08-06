@@ -23,6 +23,7 @@ import {
   type CanvasCommandV2,
 } from '@/canvas-v2/commands'
 import {
+  canonicalizeCanvasV2Selection,
   mergeSelectionV2,
   nextRovingKeyV2,
   normalizedBoundsV2,
@@ -47,6 +48,7 @@ import {
   type CanvasTaskV2,
 } from '@/canvas-v2/model'
 import type { CanvasV2SelectionTarget } from '@/canvas-v2/persistence'
+import type { CanvasV2StoreState } from '@/canvas-v2/store'
 import {
   selectCollectionBoundsV2,
   selectCollectionMembersV2,
@@ -226,22 +228,22 @@ export default function CanvasV2Stage() {
   }, [createMenu])
 
   useEffect(() => {
-    const taskIds = new Set(state.document.tasks.map((task) => task.id))
-    const nodeIds = new Set(state.document.nodes.map((node) => node.id))
-    const collectionIds = new Set(state.document.collections.map((collection) => collection.id))
-    const selection = state.view.selection.filter((target) => target.kind === 'task'
-      ? taskIds.has(target.id)
-      : target.kind === 'node'
-        ? nodeIds.has(target.id)
-        : collectionIds.has(target.id))
-    if (selection.length !== state.view.selection.length) store.setSelection(selection)
-  }, [state.document, state.view.selection, store])
-
-  const selectionDraftId = state.view.selection.map(selectionKeyV2).sort().join('|')
-  const currentEdgeDraft = edgeDraft?.kind === 'selection'
-    && edgeDraft.id !== selectionDraftId
-    ? null
-    : edgeDraft
+    const selection = canonicalizeCanvasV2Selection(
+      state.document,
+      state.view.selection,
+      {
+        collapsedTaskIds: state.view.collapsedTaskIds,
+        collapsedCollectionIds: state.view.collapsedCollectionIds,
+      },
+    )
+    if (!sameSelectionV2(selection, state.view.selection)) store.setSelection(selection)
+  }, [
+    state.document,
+    state.view.collapsedCollectionIds,
+    state.view.collapsedTaskIds,
+    state.view.selection,
+    store,
+  ])
 
   useEffect(() => () => {
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current)
@@ -269,10 +271,23 @@ export default function CanvasV2Stage() {
       // The timer will surface the dispatch error and restore the full document.
     }
   }
+  const effectiveSelection = canonicalizeCanvasV2Selection(
+    stageDocument,
+    state.view.selection,
+    {
+      collapsedTaskIds: state.view.collapsedTaskIds,
+      collapsedCollectionIds: state.view.collapsedCollectionIds,
+    },
+  )
+  const selectionDraftId = effectiveSelection.map(selectionKeyV2).sort().join('|')
+  const currentEdgeDraft = edgeDraft?.kind === 'selection'
+    && edgeDraft.id !== selectionDraftId
+    ? null
+    : edgeDraft
   const taskViews = stageDocument.tasks
     .map((task) => selectTaskViewV2(stageDocument, task.id, {
       zoom: state.view.camera.zoom,
-      selected: state.view.selection.some((target) =>
+      selected: effectiveSelection.some((target) =>
         target.kind === 'task' && target.id === task.id),
       explicitlyCollapsed: state.view.collapsedTaskIds.includes(task.id),
       runtime: state.runtimeByTaskId[task.id],
@@ -310,13 +325,13 @@ export default function CanvasV2Stage() {
   const topLevelNodes = stageDocument.nodes.filter((node) => !node.homeTaskId)
   const visibleTopLevelNodes = topLevelNodes.filter((node) =>
     !node.collectionId || !collapsedCollectionIds.has(node.collectionId))
-  const selectedTaskIds = new Set(state.view.selection
+  const selectedTaskIds = new Set(effectiveSelection
     .filter((target) => target.kind === 'task')
     .map((target) => target.id))
-  const selectedNodeIds = new Set(state.view.selection
+  const selectedNodeIds = new Set(effectiveSelection
     .filter((target) => target.kind === 'node')
     .map((target) => target.id))
-  const selectedCollectionIds = new Set(state.view.selection
+  const selectedCollectionIds = new Set(effectiveSelection
     .filter((target) => target.kind === 'collection')
     .map((target) => target.id))
 
@@ -327,7 +342,7 @@ export default function CanvasV2Stage() {
       ? []
       : view.nodes.map((node) => `node:${node.id}`)),
     ])).concat(visibleTopLevelNodes.map((node) => `node:${node.id}`))
-  const selectedFocusableKey = state.view.selection
+  const selectedFocusableKey = effectiveSelection
     .map(selectionKeyV2)
     .find((key) => focusableKeys.includes(key))
   const activeKey = rovingKey && focusableKeys.includes(rovingKey)
@@ -358,7 +373,12 @@ export default function CanvasV2Stage() {
     target: CanvasV2SelectionTarget,
     additive: boolean,
   ) => {
-    store.setSelection(updateSelectionV2(stateRef.current.view.selection, target, additive))
+    const current = stateRef.current
+    const selection = updateSelectionV2(current.view.selection, target, additive)
+    store.setSelection(canonicalizeCanvasV2Selection(current.document, selection, {
+      collapsedTaskIds: current.view.collapsedTaskIds,
+      collapsedCollectionIds: current.view.collapsedCollectionIds,
+    }))
     setRovingKey(selectionKeyV2(target))
   }, [store])
 
@@ -392,7 +412,12 @@ export default function CanvasV2Stage() {
 
   const beginSelectionDrag = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 0) return false
-    const targets = moveTargetsForSelectionV2(stateRef.current.view.selection)
+    const current = stateRef.current
+    const selection = canonicalizeCanvasV2Selection(current.document, current.view.selection, {
+      collapsedTaskIds: current.view.collapsedTaskIds,
+      collapsedCollectionIds: current.view.collapsedCollectionIds,
+    })
+    const targets = moveTargetsForSelectionV2(selection)
     if (targets.entities.length + targets.collectionIds.length < 2) return false
     event.stopPropagation()
     beginGesture({
@@ -414,13 +439,14 @@ export default function CanvasV2Stage() {
     event.stopPropagation()
     const key = `task:${task.id}`
     focusableRefs.current.get(key)?.focus({ preventScroll: true })
-    const alreadySelected = stateRef.current.view.selection.some((target) =>
+    const selection = canonicalSelectionForStateV2(stateRef.current)
+    const alreadySelected = selection.some((target) =>
       target.kind === 'task' && target.id === task.id)
     if (event.shiftKey) {
       selectTask(task, true)
       return
     }
-    if (alreadySelected && stateRef.current.view.selection.length > 1
+    if (alreadySelected && selection.length > 1
       && beginSelectionDrag(event)) return
     selectTask(task, false)
     beginGesture({
@@ -440,13 +466,14 @@ export default function CanvasV2Stage() {
     if (event.button !== 0) return
     event.stopPropagation()
     event.currentTarget.focus({ preventScroll: true })
-    const alreadySelected = stateRef.current.view.selection.some((target) =>
+    const selection = canonicalSelectionForStateV2(stateRef.current)
+    const alreadySelected = selection.some((target) =>
       target.kind === 'node' && target.id === node.id)
     if (event.shiftKey) {
       selectTarget({ kind: 'node', id: node.id }, true)
       return
     }
-    if (alreadySelected && stateRef.current.view.selection.length > 1
+    if (alreadySelected && selection.length > 1
       && beginSelectionDrag(event)) return
     selectTarget({ kind: 'node', id: node.id }, false)
     beginGesture({
@@ -466,13 +493,14 @@ export default function CanvasV2Stage() {
     if (event.button !== 0) return
     event.stopPropagation()
     event.currentTarget.focus({ preventScroll: true })
-    const alreadySelected = stateRef.current.view.selection.some((target) =>
+    const selection = canonicalSelectionForStateV2(stateRef.current)
+    const alreadySelected = selection.some((target) =>
       target.kind === 'collection' && target.id === collection.id)
     if (event.shiftKey) {
       selectCollection(collection, true)
       return
     }
-    if (alreadySelected && stateRef.current.view.selection.length > 1
+    if (alreadySelected && selection.length > 1
       && beginSelectionDrag(event)) return
     selectCollection(collection, false)
     beginGesture({
@@ -505,7 +533,11 @@ export default function CanvasV2Stage() {
   const selectable = (() : CanvasV2SelectableBounds[] => {
     const values: CanvasV2SelectableBounds[] = collectionViews.map((view) => ({
       target: { kind: 'collection', id: view.collection.id },
-      bounds: view.collapsed ? collapsedCollectionBoundsV2(view.collection) : view.bounds,
+      // Expanded Collection interiors contain independently selectable members;
+      // only its header chrome participates in marquee hit-testing.
+      bounds: view.collapsed
+        ? collapsedCollectionBoundsV2(view.collection)
+        : expandedCollectionSelectionBoundsV2(view.bounds),
     }))
     for (const view of visibleTaskViews) {
       values.push({
@@ -642,9 +674,14 @@ export default function CanvasV2Stage() {
         setMarquee(null)
         if (Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) < 4) return
         const hits = selectionFromMarqueeV2(selectableRef.current, bounds)
-        store.setSelection(gesture.additive
-          ? mergeSelectionV2(stateRef.current.view.selection, hits)
-          : hits)
+        const current = stateRef.current
+        const selection = gesture.additive
+          ? mergeSelectionV2(current.view.selection, hits)
+          : hits
+        store.setSelection(canonicalizeCanvasV2Selection(current.document, selection, {
+          collapsedTaskIds: current.view.collapsedTaskIds,
+          collapsedCollectionIds: current.view.collapsedCollectionIds,
+        }))
       }
     }
     const onUp = (event: PointerEvent) => onEnd(event, false)
@@ -776,7 +813,7 @@ export default function CanvasV2Stage() {
   }
 
   const contextSelectionBounds = (() => {
-    const bounds = state.view.selection.flatMap((target): CanvasBoundsV2[] => {
+    const bounds = effectiveSelection.flatMap((target): CanvasBoundsV2[] => {
       if (target.kind === 'node') {
         const node = stageDocument.nodes.find((entry) => entry.id === target.id)
         if (!node) return []
@@ -794,7 +831,7 @@ export default function CanvasV2Stage() {
       if (target.kind === 'task') {
         const view = taskViewsById.get(target.id)
         if (!view) return []
-        const frame = state.view.selection.length > 1
+        const frame = effectiveSelection.length > 1
           ? view.bounds
           : taskInteractionBoundsV2(view)
         const offset = taskPreviewOffsetV2(view.task, preview)
@@ -818,7 +855,7 @@ export default function CanvasV2Stage() {
     })
     return bounds.length > 0 ? unionBoundsV2(bounds) : null
   })()
-  const compoundSelection = state.view.selection.length > 1 && contextSelectionBounds !== null
+  const compoundSelection = effectiveSelection.length > 1 && contextSelectionBounds !== null
   const selectionSurfaceBounds = contextSelectionBounds
     ? compoundSelection
       ? padBoundsV2(contextSelectionBounds, 14)
@@ -877,7 +914,7 @@ export default function CanvasV2Stage() {
       ...members.nodes.map((node) => ({ kind: 'node' as const, id: node.id })),
     ]
   }
-  const collectableSelection = state.view.selection.flatMap((target): CanvasEntityRef[] => {
+  const collectableSelection = effectiveSelection.flatMap((target): CanvasEntityRef[] => {
     if (target.kind === 'collection') return []
     if (target.kind === 'task') {
       const task = stageDocument.tasks.find((entry) => entry.id === target.id)
@@ -1100,7 +1137,7 @@ export default function CanvasV2Stage() {
 
   const temporarySelectionMembers = (() => {
     if (!compoundSelection) return []
-    const members = state.view.selection.flatMap((target): CanvasEntityRef[] => {
+    const members = effectiveSelection.flatMap((target): CanvasEntityRef[] => {
       if (target.kind === 'collection') {
         const entries = selectCollectionMembersV2(stageDocument, target.id)
         return [
@@ -1119,7 +1156,7 @@ export default function CanvasV2Stage() {
     && temporarySelectionMembers.length > 0
     ? {
         kind: 'selection',
-        id: state.view.selection.map(selectionKeyV2).sort().join('|'),
+        id: effectiveSelection.map(selectionKeyV2).sort().join('|'),
         members: temporarySelectionMembers,
       }
     : null
@@ -1153,9 +1190,9 @@ export default function CanvasV2Stage() {
       clientY: viewport.top + viewport.height / 2,
     }, camera, viewport)
   }
-  const selectedNodeForSurface = state.view.selection.length === 1
-    && state.view.selection[0]?.kind === 'node'
-    ? stageDocument.nodes.find((node) => node.id === state.view.selection[0]?.id) ?? null
+  const selectedNodeForSurface = effectiveSelection.length === 1
+    && effectiveSelection[0]?.kind === 'node'
+    ? stageDocument.nodes.find((node) => node.id === effectiveSelection[0]?.id) ?? null
     : null
   const focusContextComposer = () => {
     stageRef.current?.querySelector<HTMLTextAreaElement>(
@@ -1303,19 +1340,19 @@ export default function CanvasV2Stage() {
             )
           }}
         />
-        {selectionSurfaceBounds && (compoundSelection || state.view.selection[0]?.kind === 'node') && (
+        {selectionSurfaceBounds && (compoundSelection || effectiveSelection[0]?.kind === 'node') && (
           <CanvasV2SelectionWorldSurface
             bounds={selectionSurfaceBounds}
             compound={compoundSelection}
             solid={selectedCollectionIds.size === 0}
-            count={state.view.selection.length}
+            count={effectiveSelection.length}
             activePortSide={compoundSelection
               ? currentEdgeDraft?.kind === 'selection'
                 && currentEdgeDraft.id === temporarySelectionEndpoint?.id
                 ? currentEdgeDraft.portSide ?? null
                 : null
               : currentEdgeDraft?.kind === 'node'
-                && currentEdgeDraft.id === state.view.selection[0]?.id
+                && currentEdgeDraft.id === effectiveSelection[0]?.id
                 ? currentEdgeDraft.portSide ?? null
                 : null}
             onPortActivate={(side: CanvasV2SelectionPortSide) => {
@@ -1323,7 +1360,7 @@ export default function CanvasV2Stage() {
                 onPortActivate({ ...temporarySelectionEndpoint, portSide: side })
                 return
               }
-              const target = state.view.selection[0]
+              const target = effectiveSelection[0]
               if (target?.kind === 'node') onPortActivate({ ...target, portSide: side })
             }}
           />
@@ -1336,7 +1373,7 @@ export default function CanvasV2Stage() {
             selectedTask={selectedTaskIds.has(view.task.id)}
             compoundSelectedTask={compoundSelection && selectedTaskIds.has(view.task.id)}
             compoundSelection={compoundSelection}
-            showRunPanel={!compoundSelection && state.view.selection.length === 1
+            showRunPanel={!compoundSelection && effectiveSelection.length === 1
               && selectedTaskIds.has(view.task.id)}
             selectedNodeIds={selectedNodeIds}
             explicitlyCollapsed={state.view.collapsedTaskIds.includes(view.task.id)}
@@ -1435,7 +1472,7 @@ export default function CanvasV2Stage() {
           bounds={selectionSurfaceBounds}
           camera={state.view.camera}
           compound={compoundSelection}
-          count={state.view.selection.length}
+          count={effectiveSelection.length}
           canSaveCollection={collectableSelection.length >= 2}
           onFocusComposer={focusContextComposer}
           onDuplicate={selectedNodeForSurface
@@ -1455,6 +1492,7 @@ export default function CanvasV2Stage() {
 
       <CanvasV2ContextComposer
         getAnchor={contextComposerAnchor}
+        selectionOverride={effectiveSelection}
         selectionBounds={selectionSurfaceBounds}
         getViewport={viewportRect}
       />
@@ -1739,6 +1777,32 @@ function moveTargetsForSelectionV2(
       ? [target.id]
       : []),
   }
+}
+
+function canonicalSelectionForStateV2(
+  state: CanvasV2StoreState,
+): CanvasV2SelectionTarget[] {
+  return canonicalizeCanvasV2Selection(state.document, state.view.selection, {
+    collapsedTaskIds: state.view.collapsedTaskIds,
+    collapsedCollectionIds: state.view.collapsedCollectionIds,
+  })
+}
+
+function expandedCollectionSelectionBoundsV2(bounds: CanvasBoundsV2): CanvasBoundsV2 {
+  return {
+    x: bounds.x,
+    y: bounds.y,
+    w: COLLECTION_CHROME_LAYOUT_V2.minimumWidth,
+    h: 64,
+  }
+}
+
+function sameSelectionV2(
+  left: readonly CanvasV2SelectionTarget[],
+  right: readonly CanvasV2SelectionTarget[],
+): boolean {
+  return left.length === right.length
+    && left.every((target, index) => selectionKeyV2(target) === selectionKeyV2(right[index]!))
 }
 
 function padBoundsV2(bounds: CanvasBoundsV2, padding: number): CanvasBoundsV2 {

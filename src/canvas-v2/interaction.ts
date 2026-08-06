@@ -1,4 +1,4 @@
-import type { CanvasPointV2 } from './model'
+import type { CanvasDocumentV2, CanvasPointV2 } from './model'
 import type {
   CanvasV2CameraState,
   CanvasV2SelectionTarget,
@@ -99,6 +99,73 @@ export function mergeSelectionV2(
     merged.push({ ...target })
   }
   return merged
+}
+
+export interface CanvasV2SelectionHierarchyState {
+  collapsedTaskIds?: readonly string[]
+  collapsedCollectionIds?: readonly string[]
+}
+
+/**
+ * Reduces a transient selection to the visible top-level entities that can act
+ * as a single canvas surface. Containers are the canonical source of selection
+ * whenever one of their descendants is selected alongside them.
+ */
+export function canonicalizeCanvasV2Selection(
+  document: CanvasDocumentV2,
+  selection: readonly CanvasV2SelectionTarget[],
+  hierarchy: CanvasV2SelectionHierarchyState = {},
+): CanvasV2SelectionTarget[] {
+  const tasksById = new Map(document.tasks.map((task) => [task.id, task]))
+  const nodesById = new Map(document.nodes.map((node) => [node.id, node]))
+  const collectionIds = new Set(document.collections.map((collection) => collection.id))
+  const collapsedTaskIds = new Set(hierarchy.collapsedTaskIds ?? [])
+  const collapsedCollectionIds = new Set(hierarchy.collapsedCollectionIds ?? [])
+
+  const uniqueSelection: CanvasV2SelectionTarget[] = []
+  const selectedKeys = new Set<string>()
+  for (const target of selection) {
+    const key = selectionKeyV2(target)
+    if (selectedKeys.has(key) || !selectionTargetExists(target)) continue
+    selectedKeys.add(key)
+    uniqueSelection.push({ ...target })
+  }
+
+  const selectedTaskIds = new Set(uniqueSelection
+    .filter((target) => target.kind === 'task')
+    .map((target) => target.id))
+  const selectedCollectionIds = new Set(uniqueSelection
+    .filter((target) => target.kind === 'collection')
+    .map((target) => target.id))
+
+  return uniqueSelection.filter((target) => {
+    if (target.kind === 'collection') return true
+
+    if (target.kind === 'task') {
+      const collectionId = tasksById.get(target.id)?.collectionId
+      if (!collectionId) return true
+      if (selectedCollectionIds.has(collectionId)) return false
+      return !collapsedCollectionIds.has(collectionId)
+    }
+
+    const node = nodesById.get(target.id)
+    if (!node) return false
+    const homeTask = node.homeTaskId ? tasksById.get(node.homeTaskId) : undefined
+    const collectionId = node.collectionId ?? homeTask?.collectionId
+    if (collectionId) {
+      if (selectedCollectionIds.has(collectionId)) return false
+      if (collapsedCollectionIds.has(collectionId)) return false
+    }
+    if (!node.homeTaskId) return true
+    if (selectedTaskIds.has(node.homeTaskId)) return false
+    return !collapsedTaskIds.has(node.homeTaskId)
+  })
+
+  function selectionTargetExists(target: CanvasV2SelectionTarget): boolean {
+    if (target.kind === 'node') return nodesById.has(target.id)
+    if (target.kind === 'task') return tasksById.has(target.id)
+    return collectionIds.has(target.id)
+  }
 }
 
 export function nextRovingKeyV2(

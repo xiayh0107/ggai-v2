@@ -23,6 +23,7 @@ import {
 import { useCanvasV2State, useCanvasV2Store } from '@/canvas-v2/hooks'
 import type { CanvasNodeV2, CanvasPointV2 } from '@/canvas-v2/model'
 import type { CanvasV2ViewportRect } from '@/canvas-v2/interaction'
+import type { CanvasV2SelectionTarget } from '@/canvas-v2/persistence'
 import { CanvasV2TaskRunContext } from '@/canvas-v2/runHooks'
 import type { CanvasV2TaskRunSummary } from '@/canvas-v2/runController'
 import type { CanvasBoundsV2 } from '@/canvas-v2/selectors'
@@ -31,6 +32,8 @@ import { getPlugin } from '@/plugins/types'
 
 export interface CanvasV2ContextComposerProps {
   getAnchor: () => CanvasPointV2
+  /** Canonical visible selection supplied by the Stage hierarchy. */
+  selectionOverride?: readonly CanvasV2SelectionTarget[]
   /** World-space bounds for the current selection. The panel remains screen-sized. */
   selectionBounds?: CanvasBoundsV2 | null
   getViewport?: () => CanvasV2ViewportRect
@@ -48,6 +51,7 @@ const runSummaryCache = new Map<string, Promise<CanvasV2TaskRunSummary>>()
 /** Context-aware Task creation. It never overwrites a selected content Node. */
 export default function CanvasV2ContextComposer({
   getAnchor,
+  selectionOverride,
   selectionBounds = null,
   getViewport,
 }: CanvasV2ContextComposerProps) {
@@ -56,7 +60,7 @@ export default function CanvasV2ContextComposer({
   const state = useCanvasV2State()
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const selection = state.view.selection
+  const selection = selectionOverride ?? state.view.selection
   const draftKey = canvasV2ContextComposerKey(selection)
   const hasDraft = Object.prototype.hasOwnProperty.call(state.view.composerDrafts, draftKey)
   const draft = state.view.composerDrafts[draftKey] ?? ''

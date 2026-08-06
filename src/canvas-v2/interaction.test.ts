@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  canonicalizeCanvasV2Selection,
   mergeSelectionV2,
   nextRovingKeyV2,
   normalizedBoundsV2,
@@ -8,6 +9,7 @@ import {
   updateSelectionV2,
   zoomCameraAtV2,
 } from './interaction'
+import { emptyCanvasDocumentV2, type CanvasDocumentV2 } from './model'
 
 describe('Canvas V2 interaction geometry', () => {
   it('converts through an offset viewport and keeps the zoom anchor fixed', () => {
@@ -52,3 +54,154 @@ describe('Canvas V2 interaction geometry', () => {
     expect(nextRovingKeyV2(keys, 'node:a', 'Enter')).toBe('node:a')
   })
 })
+
+describe('Canvas V2 canonical selection hierarchy', () => {
+  it('lets a selected Task absorb its output Nodes regardless of input order', () => {
+    const document = selectionHierarchyDocument()
+
+    expect(canonicalizeCanvasV2Selection(document, [
+      { kind: 'node', id: 'member-output' },
+      { kind: 'task', id: 'member-task' },
+      { kind: 'node', id: 'outside-node' },
+      { kind: 'node', id: 'member-output' },
+    ])).toEqual([
+      { kind: 'task', id: 'member-task' },
+      { kind: 'node', id: 'outside-node' },
+    ])
+  })
+
+  it('lets a selected Collection absorb direct members and member Task outputs', () => {
+    const document = selectionHierarchyDocument()
+
+    expect(canonicalizeCanvasV2Selection(document, [
+      { kind: 'node', id: 'member-output' },
+      { kind: 'node', id: 'loose-member' },
+      { kind: 'task', id: 'member-task' },
+      { kind: 'collection', id: 'collection-1' },
+      { kind: 'task', id: 'outside-task' },
+    ])).toEqual([
+      { kind: 'collection', id: 'collection-1' },
+      { kind: 'task', id: 'outside-task' },
+    ])
+  })
+
+  it('removes invalid and duplicate references while preserving survivor order', () => {
+    const document = selectionHierarchyDocument()
+
+    expect(canonicalizeCanvasV2Selection(document, [
+      { kind: 'node', id: 'outside-node' },
+      { kind: 'task', id: 'missing-task' },
+      { kind: 'node', id: 'outside-node' },
+      { kind: 'collection', id: 'missing-collection' },
+      { kind: 'task', id: 'outside-task' },
+      { kind: 'node', id: 'missing-node' },
+    ])).toEqual([
+      { kind: 'node', id: 'outside-node' },
+      { kind: 'task', id: 'outside-task' },
+    ])
+  })
+
+  it('drops Nodes hidden by a collapsed Task unless the Task is selected', () => {
+    const document = selectionHierarchyDocument()
+
+    expect(canonicalizeCanvasV2Selection(document, [
+      { kind: 'node', id: 'outside-output' },
+      { kind: 'node', id: 'outside-node' },
+    ], { collapsedTaskIds: ['outside-task'] })).toEqual([
+      { kind: 'node', id: 'outside-node' },
+    ])
+    expect(canonicalizeCanvasV2Selection(document, [
+      { kind: 'node', id: 'outside-output' },
+      { kind: 'task', id: 'outside-task' },
+    ], { collapsedTaskIds: ['outside-task'] })).toEqual([
+      { kind: 'task', id: 'outside-task' },
+    ])
+  })
+
+  it('drops every member hidden by a collapsed Collection unless it is selected', () => {
+    const document = selectionHierarchyDocument()
+    const hiddenMembers = [
+      { kind: 'task' as const, id: 'member-task' },
+      { kind: 'node' as const, id: 'member-output' },
+      { kind: 'node' as const, id: 'loose-member' },
+      { kind: 'node' as const, id: 'outside-node' },
+    ]
+
+    expect(canonicalizeCanvasV2Selection(document, hiddenMembers, {
+      collapsedCollectionIds: ['collection-1'],
+    })).toEqual([
+      { kind: 'node', id: 'outside-node' },
+    ])
+    expect(canonicalizeCanvasV2Selection(document, [
+      ...hiddenMembers,
+      { kind: 'collection', id: 'collection-1' },
+    ], { collapsedCollectionIds: ['collection-1'] })).toEqual([
+      { kind: 'node', id: 'outside-node' },
+      { kind: 'collection', id: 'collection-1' },
+    ])
+  })
+})
+
+function selectionHierarchyDocument(): CanvasDocumentV2 {
+  const document = emptyCanvasDocumentV2()
+  document.collections.push({
+    id: 'collection-1',
+    title: 'Research set',
+    anchor: { x: 40, y: 40 },
+  })
+  document.tasks.push(
+    {
+      id: 'member-task',
+      title: 'Collection task',
+      goal: 'Create a chart',
+      anchor: { x: 100, y: 120 },
+      collectionId: 'collection-1',
+      origin: { kind: 'user' },
+    },
+    {
+      id: 'outside-task',
+      title: 'Outside task',
+      goal: 'Create a report',
+      anchor: { x: 800, y: 120 },
+      origin: { kind: 'user' },
+    },
+  )
+  document.nodes.push(
+    {
+      id: 'member-output',
+      type: 'file',
+      frame: { x: 120, y: 240, w: 300, h: 200, z: 1 },
+      title: 'Task output',
+      artifactRefs: [],
+      homeTaskId: 'member-task',
+      origin: { kind: 'user' },
+    },
+    {
+      id: 'loose-member',
+      type: 'file',
+      frame: { x: 460, y: 240, w: 300, h: 200, z: 1 },
+      title: 'Loose collection member',
+      artifactRefs: [],
+      collectionId: 'collection-1',
+      origin: { kind: 'user' },
+    },
+    {
+      id: 'outside-output',
+      type: 'file',
+      frame: { x: 840, y: 240, w: 300, h: 200, z: 1 },
+      title: 'Outside task output',
+      artifactRefs: [],
+      homeTaskId: 'outside-task',
+      origin: { kind: 'user' },
+    },
+    {
+      id: 'outside-node',
+      type: 'file',
+      frame: { x: 1200, y: 240, w: 300, h: 200, z: 1 },
+      title: 'Outside node',
+      artifactRefs: [],
+      origin: { kind: 'user' },
+    },
+  )
+  return document
+}

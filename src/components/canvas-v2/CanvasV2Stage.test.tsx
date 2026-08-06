@@ -460,6 +460,99 @@ describe('Canvas V2 interactive stage', () => {
     expect(document.activeElement).toBe(focused)
   })
 
+  it('canonicalizes a selected Task so its output Nodes are never double-counted', async () => {
+    const { store, host } = await createSubject()
+    act(() => store.setSelection([
+      { kind: 'node', id: 'node-image' },
+      { kind: 'task', id: 'task-multi' },
+      { kind: 'node', id: 'node-code' },
+    ]))
+
+    await vi.waitFor(() => expect(store.getSnapshot().view.selection).toEqual([
+      { kind: 'task', id: 'task-multi' },
+    ]))
+    expect(host.querySelector('[data-testid="canvas-v2-selection-hull"]')).toBeNull()
+    expect(required(host, '[data-task-id="task-multi"]').getAttribute('data-selected')).toBe('true')
+    expect(required(host, '[data-node-id="node-image"]').getAttribute('data-selected')).toBe('false')
+  })
+
+  it('canonicalizes a selected Collection so its top-level members are never double-counted', async () => {
+    const { store, host } = await createSubject(undefined, collectionFixture())
+    act(() => store.setSelection([
+      { kind: 'node', id: 'node-child' },
+      { kind: 'task', id: 'task-a' },
+      { kind: 'node', id: 'node-a' },
+      { kind: 'collection', id: 'collection-1' },
+    ]))
+    await vi.waitFor(() => expect(store.getSnapshot().view.selection).toEqual([
+      { kind: 'collection', id: 'collection-1' },
+    ]))
+    expect(host.querySelector('[data-testid="canvas-v2-selection-hull"]')).toBeNull()
+    expect(required(host, '[data-collection-id="collection-1"]')
+      .getAttribute('data-selected')).toBe('true')
+  })
+
+  it('uses the full Task footprint in a mixed temporary large node', async () => {
+    const canvasDocument = fixtureDocument()
+    const { store, host } = await createSubject(undefined, canvasDocument)
+    act(() => store.setSelection([
+      { kind: 'task', id: 'task-multi' },
+      { kind: 'node', id: 'node-top' },
+    ]))
+
+    const hull = required<HTMLElement>(host, '[data-testid="canvas-v2-selection-hull"]')
+    const top = Number.parseFloat(hull.style.top)
+    const bottom = top + Number.parseFloat(hull.style.height)
+    const right = Number.parseFloat(hull.style.left) + Number.parseFloat(hull.style.width)
+    for (const id of ['node-image', 'node-code']) {
+      const frame = canvasDocument.nodes.find((node) => node.id === id)!.frame
+      expect(bottom).toBeGreaterThanOrEqual(frame.y + frame.h + 14)
+      expect(right).toBeGreaterThanOrEqual(frame.x + frame.w + 14)
+    }
+  })
+
+  it('removes selected descendants as soon as their owning Task is collapsed', async () => {
+    const { store, host } = await createSubject({
+      selection: [
+        { kind: 'node', id: 'node-single' },
+        { kind: 'node', id: 'node-top' },
+      ],
+      collapsedTaskIds: ['task-single'],
+    })
+
+    await vi.waitFor(() => expect(store.getSnapshot().view.selection).toEqual([
+      { kind: 'node', id: 'node-top' },
+    ]))
+    expect(host.querySelector('[data-node-id="node-single"]')).toBeNull()
+    expect(host.querySelector('[data-testid="canvas-v2-selection-hull"]')).toBeNull()
+    expect(required(host, '[data-testid="canvas-v2-selection-toolbar"]')
+      .getAttribute('data-selection-mode')).toBe('single')
+  })
+
+  it('marquee-selects content inside an expanded Collection without absorbing it into the Collection', async () => {
+    const { store, host } = await createSubject({ camera: { x: 0, y: 0, zoom: 1 } }, collectionFixture())
+    const stage = required<HTMLElement>(host, '[data-testid="canvas-v2-stage"]')
+    act(() => dispatchPointer(stage, 'pointerdown', {
+      clientX: 540,
+      clientY: 130,
+      shiftKey: true,
+    }))
+    act(() => dispatchPointer(window, 'pointermove', {
+      clientX: 860,
+      clientY: 330,
+      shiftKey: true,
+    }))
+    act(() => dispatchPointer(window, 'pointerup', {
+      clientX: 860,
+      clientY: 330,
+      shiftKey: true,
+    }))
+
+    expect(store.getSnapshot().view.selection).toEqual([
+      { kind: 'node', id: 'node-a' },
+    ])
+  })
+
   it('moves a temporary multi-selection as one view-only large node', async () => {
     const { store, host } = await createSubject({ camera: { x: 0, y: 0, zoom: 1 } })
     act(() => store.setSelection([
@@ -689,8 +782,10 @@ describe('Canvas V2 interactive stage', () => {
     expect(store.getSnapshot().view.selection).toEqual(expect.arrayContaining([
       { kind: 'node', id: 'node-top' },
       { kind: 'task', id: 'task-single' },
-      { kind: 'node', id: 'node-single' },
     ]))
+    expect(store.getSnapshot().view.selection).not.toContainEqual(
+      { kind: 'node', id: 'node-single' },
+    )
   })
 
   it('explicitly saves a typed top-level selection as a collection and undoes through commands', async () => {
