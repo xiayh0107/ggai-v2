@@ -19,6 +19,7 @@ import { getPlugin } from '@/plugins/types'
 import CanvasV2EdgePort from './CanvasV2EdgePort'
 import CanvasV2EntityMenu from './CanvasV2EntityMenu'
 import CanvasV2NodeCard from './CanvasV2NodeCard'
+import CanvasV2TaskRunPanel from './CanvasV2TaskRunPanel'
 
 export interface CanvasV2TaskGroupProps {
   view: CanvasTaskViewV2
@@ -75,6 +76,7 @@ export default function CanvasV2TaskGroup({
   const outputCount = view.nodes.length + view.ghosts.length
   const outputRegionId = `canvas-v2-task-${task.id}-outputs`
   const taskKey = `task:${task.id}`
+  const runPanelPosition = taskRunPanelPosition(view)
   const taskHeader = (
     <TaskHeader
       task={task}
@@ -236,8 +238,32 @@ export default function CanvasV2TaskGroup({
           ))}
         </div>
       )}
+
+      {!collapsed && selectedTask && (
+        <div
+          className="pointer-events-auto absolute z-30"
+          style={{ left: runPanelPosition.x, top: runPanelPosition.y }}
+        >
+          <CanvasV2TaskRunPanel task={task} />
+        </div>
+      )}
     </section>
   )
+}
+
+function taskRunPanelPosition(view: CanvasTaskViewV2): { x: number; y: number } {
+  const { task } = view
+  const chromeBottom = view.containerKind === 'task-card'
+    ? task.anchor.y + (view.presentation === 'compact'
+      ? TASK_CHROME_LAYOUT_V2.compactHeight
+      : TASK_CHROME_LAYOUT_V2.cardHeight)
+    : view.containerKind === 'title-strip'
+      ? task.anchor.y + TASK_CHROME_LAYOUT_V2.titleStripHeight
+      : view.bounds.y + view.bounds.h
+  return {
+    x: view.containerKind === 'output-frame' ? view.bounds.x : task.anchor.x,
+    y: Math.max(chromeBottom, view.bounds.y + view.bounds.h) + 12,
+  }
 }
 
 function TaskHeader({
