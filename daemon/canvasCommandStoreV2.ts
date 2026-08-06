@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { lstat, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import {
@@ -26,6 +27,17 @@ export interface CanvasEnvelopeV2 {
 export interface CanvasCommandStoreV2Options {
   filePath: string
   now?: () => number
+}
+
+interface CanvasMutationReceiptV2 {
+  mutationId: string
+  commandDigest: string
+  committedRevision: number
+}
+
+interface StoredCanvasEnvelopeV2 extends CanvasEnvelopeV2 {
+  /** Runtime-only exactly-once ledger. It never enters CanvasDocument or Canvas Git. */
+  mutationReceipts: CanvasMutationReceiptV2[]
 }
 
 export class CanvasRevisionConflictV2Error extends Error {
@@ -64,7 +76,7 @@ export class CanvasCommandStoreV2 {
   readonly filePath: string
 
   readonly #now: () => number
-  #envelope: CanvasEnvelopeV2 | null = null
+  #envelope: StoredCanvasEnvelopeV2 | null = null
   #operationTail: Promise<void> = Promise.resolve()
 
   constructor(branch: string, options: CanvasCommandStoreV2Options) {
@@ -107,8 +119,10 @@ export class CanvasCommandStoreV2 {
     return this.#runExclusive(async () => {
       await this.#ensureLoaded()
       const current = this.#current()
-      if (current.lastMutationId === mutationId) {
-        if (baseRevision === current.revision - 1) return cloneEnvelope(current)
+      const digest = canvasCommandDigestV2(command)
+      const receipt = findMutationReceipt(current, mutationId)
+      if (receipt) {
+        if (receipt.commandDigest === digest) return cloneEnvelope(current)
         throw new CanvasMutationReuseV2Error(mutationId)
       }
       if (baseRevision !== current.revision) {
@@ -117,13 +131,18 @@ export class CanvasCommandStoreV2 {
 
       const document = applyCanvasCommandV2(current.document, command)
       const updatedAt = new Date(this.#now()).toISOString()
-      const next: CanvasEnvelopeV2 = {
+      const next: StoredCanvasEnvelopeV2 = {
         branch: this.branch,
         revision: current.revision + 1,
         updatedAt,
         lastMutationId: mutationId,
         lastCheckpoint: current.lastCheckpoint,
         document,
+        mutationReceipts: [...current.mutationReceipts, {
+          mutationId,
+          commandDigest: digest,
+          committedRevision: current.revision + 1,
+        }],
       }
       await atomicWriteText(this.filePath, serializeEnvelope(next))
       this.#envelope = next
@@ -147,17 +166,40 @@ export class CanvasCommandStoreV2 {
     return this.#runExclusive(async () => {
       await this.#ensureLoaded()
       const current = this.#current()
+      const digest = canvasCommandDigestV2(command)
+      const receipt = findMutationReceipt(current, mutationId)
+      if (receipt) {
+        if (receipt.commandDigest === digest) return cloneEnvelope(current)
+        throw new CanvasMutationReuseV2Error(mutationId)
+      }
       const document = applyCanvasCommandV2(current.document, command)
-      if (document === current.document) return cloneEnvelope(current)
+      if (document === current.document) {
+        const next: StoredCanvasEnvelopeV2 = {
+          ...current,
+          mutationReceipts: [...current.mutationReceipts, {
+            mutationId,
+            commandDigest: digest,
+            committedRevision: current.revision,
+          }],
+        }
+        await atomicWriteText(this.filePath, serializeEnvelope(next))
+        this.#envelope = next
+        return cloneEnvelope(next)
+      }
 
       const updatedAt = new Date(this.#now()).toISOString()
-      const next: CanvasEnvelopeV2 = {
+      const next: StoredCanvasEnvelopeV2 = {
         branch: this.branch,
         revision: current.revision + 1,
         updatedAt,
         lastMutationId: mutationId,
         lastCheckpoint: current.lastCheckpoint,
         document,
+        mutationReceipts: [...current.mutationReceipts, {
+          mutationId,
+          commandDigest: digest,
+          committedRevision: current.revision + 1,
+        }],
       }
       await atomicWriteText(this.filePath, serializeEnvelope(next))
       this.#envelope = next
@@ -180,7 +222,7 @@ export class CanvasCommandStoreV2 {
       }
       if (current.lastCheckpoint === commit) return cloneEnvelope(current)
 
-      const next: CanvasEnvelopeV2 = { ...current, lastCheckpoint: commit }
+      const next: StoredCanvasEnvelopeV2 = { ...current, lastCheckpoint: commit }
       await atomicWriteText(this.filePath, serializeEnvelope(next))
       this.#envelope = next
       return cloneEnvelope(next)
@@ -200,13 +242,14 @@ export class CanvasCommandStoreV2 {
       if (current.revision !== 0) {
         throw new CanvasRevisionConflictV2Error(current.revision)
       }
-      const materialized: CanvasEnvelopeV2 = {
+      const materialized: StoredCanvasEnvelopeV2 = {
         branch: this.branch,
         revision: 1,
         updatedAt: new Date(this.#now()).toISOString(),
         lastMutationId: null,
         lastCheckpoint: checkpoint,
         document: parsed,
+        mutationReceipts: [],
       }
       await atomicWriteText(this.filePath, serializeEnvelope(materialized))
       this.#envelope = materialized
@@ -229,13 +272,14 @@ export class CanvasCommandStoreV2 {
       if (current.revision !== expectedRevision) {
         throw new CanvasRevisionConflictV2Error(current.revision)
       }
-      const applied: CanvasEnvelopeV2 = {
+      const applied: StoredCanvasEnvelopeV2 = {
         branch: this.branch,
         revision: current.revision + 1,
         updatedAt: new Date(this.#now()).toISOString(),
         lastMutationId: null,
         lastCheckpoint: checkpoint,
         document: parsed,
+        mutationReceipts: current.mutationReceipts,
       }
       await atomicWriteText(this.filePath, serializeEnvelope(applied))
       this.#envelope = applied
@@ -265,7 +309,7 @@ export class CanvasCommandStoreV2 {
     }
   }
 
-  #current(): CanvasEnvelopeV2 {
+  #current(): StoredCanvasEnvelopeV2 {
     if (!this.#envelope) throw new Error('Canvas V2 command store was not loaded')
     return this.#envelope
   }
@@ -280,7 +324,7 @@ export class CanvasCommandStoreV2 {
   }
 }
 
-function emptyEnvelope(branch: string): CanvasEnvelopeV2 {
+function emptyEnvelope(branch: string): StoredCanvasEnvelopeV2 {
   return {
     branch,
     revision: 0,
@@ -288,19 +332,24 @@ function emptyEnvelope(branch: string): CanvasEnvelopeV2 {
     lastMutationId: null,
     lastCheckpoint: null,
     document: emptyCanvasDocumentV2(),
+    mutationReceipts: [],
   }
 }
 
-function parseStoredEnvelope(source: string, expectedBranch: string): CanvasEnvelopeV2 {
+function parseStoredEnvelope(source: string, expectedBranch: string): StoredCanvasEnvelopeV2 {
   const value: unknown = JSON.parse(source)
-  if (!isExactRecord(value, [
+  const legacyKeys = [
     'branch',
     'revision',
     'updatedAt',
     'lastMutationId',
     'lastCheckpoint',
     'document',
-  ])) throw new TypeError('Canvas V2 snapshot has an invalid envelope')
+  ]
+  const currentKeys = [...legacyKeys, 'mutationReceipts']
+  if (!isExactRecord(value, legacyKeys) && !isExactRecord(value, currentKeys)) {
+    throw new TypeError('Canvas V2 snapshot has an invalid envelope')
+  }
   const branch = parseCanvasBranch(value.branch)
   if (branch !== expectedBranch) throw new TypeError('Canvas V2 snapshot branch does not match')
   validateRevision(value.revision)
@@ -309,6 +358,9 @@ function parseStoredEnvelope(source: string, expectedBranch: string): CanvasEnve
   }
   if (value.lastMutationId !== null) validateMutationId(value.lastMutationId)
   if (value.lastCheckpoint !== null) validateCheckpoint(value.lastCheckpoint)
+  const mutationReceipts = Object.prototype.hasOwnProperty.call(value, 'mutationReceipts')
+    ? parseMutationReceipts(value.mutationReceipts, value.revision)
+    : []
   return {
     branch,
     revision: value.revision,
@@ -316,6 +368,7 @@ function parseStoredEnvelope(source: string, expectedBranch: string): CanvasEnve
     lastMutationId: value.lastMutationId,
     lastCheckpoint: value.lastCheckpoint,
     document: parseCanvasDocumentV2(value.document),
+    mutationReceipts,
   }
 }
 
@@ -339,12 +392,79 @@ function validateCheckpoint(value: unknown): asserts value is string {
   }
 }
 
-function serializeEnvelope(envelope: CanvasEnvelopeV2): string {
+function serializeEnvelope(envelope: StoredCanvasEnvelopeV2): string {
   return `${JSON.stringify(envelope, null, 2)}\n`
 }
 
-function cloneEnvelope(envelope: CanvasEnvelopeV2): CanvasEnvelopeV2 {
-  return structuredClone(envelope)
+function cloneEnvelope(envelope: StoredCanvasEnvelopeV2): CanvasEnvelopeV2 {
+  return structuredClone({
+    branch: envelope.branch,
+    revision: envelope.revision,
+    updatedAt: envelope.updatedAt,
+    lastMutationId: envelope.lastMutationId,
+    lastCheckpoint: envelope.lastCheckpoint,
+    document: envelope.document,
+  })
+}
+
+function findMutationReceipt(
+  envelope: StoredCanvasEnvelopeV2,
+  mutationId: string,
+): CanvasMutationReceiptV2 | undefined {
+  return envelope.mutationReceipts.find((receipt) => receipt.mutationId === mutationId)
+}
+
+function parseMutationReceipts(value: unknown, currentRevision: number): CanvasMutationReceiptV2[] {
+  if (!Array.isArray(value)) throw new TypeError('Canvas V2 mutation receipts must be an array')
+  const seen = new Set<string>()
+  return value.map((candidate) => {
+    if (!isExactRecord(candidate, ['mutationId', 'commandDigest', 'committedRevision'])) {
+      throw new TypeError('Canvas V2 mutation receipt has an invalid shape')
+    }
+    validateMutationId(candidate.mutationId)
+    if (seen.has(candidate.mutationId)) {
+      throw new TypeError('Canvas V2 mutation receipts contain a duplicate mutationId')
+    }
+    seen.add(candidate.mutationId)
+    if (typeof candidate.commandDigest !== 'string'
+      || !/^[0-9a-f]{64}$/u.test(candidate.commandDigest)) {
+      throw new TypeError('Canvas V2 mutation receipt digest is invalid')
+    }
+    validateRevision(candidate.committedRevision)
+    if (candidate.committedRevision > currentRevision) {
+      throw new TypeError('Canvas V2 mutation receipt revision is invalid')
+    }
+    return {
+      mutationId: candidate.mutationId,
+      commandDigest: candidate.commandDigest,
+      committedRevision: candidate.committedRevision,
+    }
+  })
+}
+
+function canvasCommandDigestV2(command: CanvasCommandV2): string {
+  return createHash('sha256').update(canonicalValue(command)).digest('hex')
+}
+
+function canonicalValue(value: unknown): string {
+  if (value === null) return 'null'
+  if (value === undefined) return 'undefined'
+  if (typeof value === 'string') return `string:${JSON.stringify(value)}`
+  if (typeof value === 'boolean') return value ? 'boolean:true' : 'boolean:false'
+  if (typeof value === 'number') {
+    if (Number.isNaN(value)) return 'number:NaN'
+    if (value === Number.POSITIVE_INFINITY) return 'number:+Infinity'
+    if (value === Number.NEGATIVE_INFINITY) return 'number:-Infinity'
+    if (Object.is(value, -0)) return 'number:-0'
+    return `number:${String(value)}`
+  }
+  if (Array.isArray(value)) return `array:[${value.map(canonicalValue).join(',')}]`
+  if (typeof value === 'object') {
+    const object = value as Record<string, unknown>
+    return `object:{${Object.keys(object).sort().map((key) =>
+      `${JSON.stringify(key)}=${canonicalValue(object[key])}`).join(',')}}`
+  }
+  return `${typeof value}:${String(value)}`
 }
 
 function isExactRecord(

@@ -84,6 +84,54 @@ test('returns the committed envelope for an idempotent mutation retry', async ()
   )
 })
 
+test('deduplicates a lost-ack mutation after intervening browser and daemon commits', async () => {
+  const filePath = await temporarySnapshot()
+  const store = new CanvasCommandStoreV2('main', { filePath })
+  await store.commit(0, 'mutation-create', createTask('task-1'))
+  const move = {
+    type: 'MoveEntities' as const,
+    entities: [{ kind: 'task' as const, id: 'task-1' }],
+    dx: 12,
+    dy: -4,
+  }
+  await store.commit(1, 'mutation-move', move)
+  await store.commitLatest('mutation-projection', {
+    type: 'UpdateTaskGoal',
+    taskId: 'task-1',
+    goal: 'Intervening daemon settlement',
+  })
+
+  const retried = await store.commit(3, 'mutation-move', move)
+  assert.equal(retried.revision, 3)
+  assert.equal(retried.lastMutationId, 'mutation-projection')
+  assert.deepEqual(retried.document.tasks[0]?.anchor, { x: 112, y: 116 })
+
+  const reopened = new CanvasCommandStoreV2('main', { filePath })
+  const retriedAfterRestart = await reopened.commit(3, 'mutation-move', {
+    dy: -4,
+    entities: [{ id: 'task-1', kind: 'task' as const }],
+    dx: 12,
+    type: 'MoveEntities' as const,
+  })
+  assert.deepEqual(retriedAfterRestart, retried)
+  await assert.rejects(
+    reopened.commit(3, 'mutation-move', { ...move, dx: 24 }),
+    CanvasMutationReuseV2Error,
+  )
+})
+
+test('deduplicates a create retry after another client advanced the branch', async () => {
+  const filePath = await temporarySnapshot()
+  const store = new CanvasCommandStoreV2('main', { filePath })
+  const first = createTask('task-1')
+  await store.commit(0, 'mutation-create-1', first)
+  const current = await store.commit(1, 'mutation-create-2', createTask('task-2'))
+
+  const retried = await store.commit(2, 'mutation-create-1', first)
+  assert.deepEqual(retried, current)
+  assert.deepEqual(retried.document.tasks.map((task) => task.id), ['task-1', 'task-2'])
+})
+
 test('keeps memory and disk unchanged when a command fails atomically', async () => {
   const filePath = await temporarySnapshot()
   const store = new CanvasCommandStoreV2('main', { filePath })
@@ -137,6 +185,22 @@ test('fails explicitly without overwriting an invalid stored snapshot', async ()
 
   await assert.rejects(store.get(), CanvasSnapshotV2Error)
   assert.equal(await readFile(filePath, 'utf8'), source)
+})
+
+test('rejects corrupted or duplicate durable mutation receipts', async () => {
+  const filePath = await temporarySnapshot()
+  const store = new CanvasCommandStoreV2('main', { filePath })
+  await store.commit(0, 'mutation-1', createTask('task-1'))
+  const snapshot = JSON.parse(await readFile(filePath, 'utf8')) as {
+    mutationReceipts: Array<Record<string, unknown>>
+  }
+  snapshot.mutationReceipts.push({ ...snapshot.mutationReceipts[0] })
+  await writeFile(filePath, JSON.stringify(snapshot), 'utf8')
+
+  await assert.rejects(
+    new CanvasCommandStoreV2('main', { filePath }).get(),
+    CanvasSnapshotV2Error,
+  )
 })
 
 test('anchors checkpoints without changing the semantic revision', async () => {
