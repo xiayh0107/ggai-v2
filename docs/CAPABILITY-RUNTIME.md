@@ -11,6 +11,7 @@ permission 和 receipt。Capability Runtime 只负责把内核之外的可替换
 - 插件激活失败时原子回滚已经注册的服务和副作用；
 - 为 Workspace、Task、Run 等后续作用域保留层级化 service scope；
 - 以类型化、仅观察的事件暴露生命周期，而不是建立可以改写事实的全局消息总线；
+- 通过 Profile / Bundle 描述可检查、可复现的启动组合；
 - 不让 runtime plugin 获得 Canvas command、entity id、布局或 manifest 写权限。
 
 ## 最小运行时原语
@@ -62,11 +63,29 @@ Host 验证 `id / version / apiVersion`，为每个插件建立独立生命周�
 插件 activation 抛错时，Host 会先广播失败事实，再回滚已经贡献的能力和监听器，把原始错误
 交给启动边界。正常卸载也使用同一清理路径。
 
+### `CapabilityProfile` 与 `CapabilityBundle`
+
+Profile 是启动组合，Bundle 是其中有序的一组插件。组合器在首个 activation 之前完成：
+
+- profile / bundle / plugin 身份与版本校验；
+- bundle ID 和 plugin ID 全局去重；
+- bundle、plugin 数量上限校验；
+- data-only snapshot 生成，便于诊断和将来的配置 dump。
+
+插件按 Bundle 顺序挂载，卸载时按相反顺序清理。异步组合路径如果中途失败，会等待已挂载插件
+完整回滚；同步路径仅用于现有构造器兼容，结构错误同样保证在任何插件执行前失败。
+
+Profile 当前只负责**可信进程内组合**，不等于允许任意 npm 包执行。第三方动态加载、签名、
+权限声明和进程隔离必须在单独的安全设计之后引入。
+
 ## Agent Transport 首个迁移切片
 
 `AgentTransportRegistry` 是第一个落到 Capability Runtime 的真实 seam。核心只认识
 `AgentTransportProvider` 和稳定 service key `ggai.agent-transports.v1`；Codex 与 acpx 的探测、
 兼容性判断和 transport 实例分别位于 builtin plugin。新增 Agent 不再需要修改通用 registry。
+
+默认 Agent 装配现已表示为 `@ggai/default-agent-runtime` Profile：Codex Bundle 始终存在；acpx
+Bundle 仍只有在显式配置 adapter 后才加入。因此组合方式升级，但 CLI 参数和安全默认值不变。
 
 ## 信任边界
 
@@ -85,8 +104,9 @@ backend 等能力，但不能伪造持久事实，也不能扩大既有权限。
 1. 落地 service、effect 与 plugin host，不改变现有行为；
 2. 将硬编码的 Codex / acpx Agent transport 迁移为 builtin runtime plugins；
 3. 增加 scoped typed runtime events，先作为 observe-only 扩展点；
-4. 增加物理依赖边界和架构门禁，再逐步迁移 Node capability、Skill 与 Projection contribution；
-5. 最后才考虑 bundle/profile 和第三方 runtime SDK。
+4. 增加 Profile / Bundle 组合与可检查 snapshot；
+5. 增加物理依赖边界和架构门禁，再逐步迁移 Node capability、Skill 与 Projection contribution；
+6. 第三方 runtime SDK、动态加载和隔离另立安全阶段。
 
 每一步都必须保持 daemon API 与 UI 行为兼容。尤其不得借架构升级修改 Canvas 样式、工具条、
 节点交互或面板动线。
