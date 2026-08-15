@@ -1,4 +1,10 @@
 import { EffectScope, type Disposer } from './effects.js'
+import {
+  TypedEventBus,
+  type EventListener,
+  type RuntimeEventFailure,
+  type RuntimeEventSource,
+} from './events.js'
 import { ServiceScope, type ServiceKey } from './services.js'
 
 export const GGAI_RUNTIME_API_VERSION = 1 as const
@@ -10,19 +16,35 @@ export interface CapabilityPluginManifest {
   readonly displayName?: string
 }
 
+export interface CapabilityRuntimeEventMap {
+  'plugin/activating': { readonly manifest: CapabilityPluginManifest }
+  'plugin/mounted': { readonly manifest: CapabilityPluginManifest }
+  'plugin/activation-failed': {
+    readonly manifest: CapabilityPluginManifest
+    readonly error: unknown
+  }
+  'plugin/unmounting': { readonly manifest: CapabilityPluginManifest }
+  'plugin/unmounted': {
+    readonly manifest: CapabilityPluginManifest
+    readonly error?: unknown
+  }
+}
+
 export interface CapabilityPluginContext {
   readonly pluginId: string
   readonly services: ServiceScope
   effect(disposer: Disposer): Disposer
   provide<T>(key: ServiceKey<T>, value: T): Disposer
   require<T>(key: ServiceKey<T>): T
+  onEvent<Name extends Extract<keyof CapabilityRuntimeEventMap, string>>(
+    event: Name,
+    listener: EventListener<CapabilityRuntimeEventMap[Name]>,
+  ): Disposer
 }
 
 export interface CapabilityPlugin {
   readonly manifest: CapabilityPluginManifest
-  activate(
-    context: CapabilityPluginContext,
-  ): void | Disposer | Promise<void | Disposer>
+  activate(context: CapabilityPluginContext): void | Disposer | Promise<void | Disposer>
 }
 
 export interface SynchronousCapabilityPlugin {
@@ -42,15 +64,14 @@ interface PendingMount {
   readonly effects: EffectScope
 }
 
+const MAX_RUNTIME_EVENT_FAILURES = 100
 const PLUGIN_ID = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u
 const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/u
 
-/**
- * Mounts capability plugins into lifecycle-owned contexts. Providers live in
- * the shared service scope but are removed when their owning plugin unloads.
- */
 export class CapabilityPluginHost {
   readonly #services: ServiceScope
+  readonly #events = new TypedEventBus<CapabilityRuntimeEventMap>()
+  readonly #eventFailures: RuntimeEventFailure[] = []
   readonly #effects = new EffectScope()
   readonly #plugins = new Map<string, MountedPlugin>()
   readonly #mounting = new Set<string>()
@@ -63,8 +84,16 @@ export class CapabilityPluginHost {
     return this.#services
   }
 
+  get events(): RuntimeEventSource<CapabilityRuntimeEventMap> {
+    return this.#events
+  }
+
   list(): CapabilityPluginManifest[] {
     return [...this.#plugins.values()].map(({ manifest }) => ({ ...manifest }))
+  }
+
+  drainEventFailures(): RuntimeEventFailure[] {
+    return this.#eventFailures.splice(0)
   }
 
   async mount(plugin: CapabilityPlugin): Promise<Disposer> {
@@ -74,6 +103,7 @@ export class CapabilityPluginHost {
       if (activationDisposer) pending.effects.add(activationDisposer)
       return this.#finishMount(pending)
     } catch (error) {
+      this.#emit('plugin/activation-failed', { manifest: pending.manifest, error })
       await pending.effects.dispose().catch(() => undefined)
       throw error
     } finally {
@@ -88,6 +118,7 @@ export class CapabilityPluginHost {
       if (activationDisposer) pending.effects.add(activationDisposer)
       return this.#finishMount(pending)
     } catch (error) {
+      this.#emit('plugin/activation-failed', { manifest: pending.manifest, error })
       void pending.effects.dispose().catch(() => undefined)
       throw error
     } finally {
@@ -102,23 +133,28 @@ export class CapabilityPluginHost {
     } catch (error) {
       errors.push(error)
     }
+    this.#events.dispose()
     try {
       await this.#services.dispose()
     } catch (error) {
       errors.push(error)
     }
     if (errors.length === 1) throw errors[0]
-    if (errors.length > 1) throw new AggregateError(errors, 'capability plugin host disposal failed')
+    if (errors.length > 1) {
+      throw new AggregateError(errors, 'capability plugin host disposal failed')
+    }
   }
 
   #beginMount(manifest: CapabilityPluginManifest): PendingMount {
     this.#assertManifest(manifest)
-    const { id } = manifest
+    const pinnedManifest = Object.freeze({ ...manifest })
+    const { id } = pinnedManifest
     if (this.#effects.disposed) throw new Error('capability plugin host is disposed')
     if (this.#plugins.has(id) || this.#mounting.has(id)) {
       throw new Error(`plugin is already mounted or mounting: ${id}`)
     }
     this.#mounting.add(id)
+    this.#emit('plugin/activating', { manifest: pinnedManifest })
 
     const lookupScope = this.#services.fork(`plugin:${id}`)
     const effects = new EffectScope()
@@ -137,8 +173,9 @@ export class CapabilityPluginHost {
         }
       },
       require: (key) => lookupScope.require(key),
+      onEvent: (event, listener) => effects.add(this.#events.on(event, listener)),
     }
-    return { id, manifest: { ...manifest }, context, effects }
+    return { id, manifest: pinnedManifest, context, effects }
   }
 
   #finishMount(pending: PendingMount): Disposer {
@@ -146,8 +183,19 @@ export class CapabilityPluginHost {
     const dispose: Disposer = async () => {
       if (!active) return
       active = false
+      this.#emit('plugin/unmounting', { manifest: pending.manifest })
       this.#plugins.delete(pending.id)
-      await pending.effects.dispose()
+      let disposalError: unknown
+      try {
+        await pending.effects.dispose()
+      } catch (error) {
+        disposalError = error
+      }
+      this.#emit('plugin/unmounted', {
+        manifest: pending.manifest,
+        ...(disposalError === undefined ? {} : { error: disposalError }),
+      })
+      if (disposalError !== undefined) throw disposalError
     }
     this.#plugins.set(pending.id, { manifest: pending.manifest, dispose })
     try {
@@ -157,7 +205,18 @@ export class CapabilityPluginHost {
       void pending.effects.dispose().catch(() => undefined)
       throw error
     }
+    this.#emit('plugin/mounted', { manifest: pending.manifest })
     return dispose
+  }
+
+  #emit<Name extends Extract<keyof CapabilityRuntimeEventMap, string>>(
+    event: Name,
+    payload: Readonly<CapabilityRuntimeEventMap[Name]>,
+  ): void {
+    this.#eventFailures.push(...this.#events.emit(event, payload))
+    if (this.#eventFailures.length > MAX_RUNTIME_EVENT_FAILURES) {
+      this.#eventFailures.splice(0, this.#eventFailures.length - MAX_RUNTIME_EVENT_FAILURES)
+    }
   }
 
   #assertManifest(manifest: CapabilityPluginManifest): void {
