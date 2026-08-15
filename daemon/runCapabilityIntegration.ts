@@ -10,11 +10,7 @@ import {
   BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
 } from './pluginCapabilities.js'
 import { resolveProjectDir } from './permissions.js'
-import type {
-  RunClosePayload,
-  RunStreamMessage,
-  RunSummary,
-} from './protocol.js'
+import type { RunStreamMessage, RunSummary } from './protocol.js'
 import {
   isResolvedTaskRunRequest,
   type RunExecutionRequest,
@@ -23,6 +19,12 @@ import type { RunCreationOptions } from './runs.js'
 
 const AGENT_SELECTION_DIGEST_DOMAIN = 'ggai.agent-selection.v1'
 
+export interface PreparedRunCapabilityRequest {
+  readonly request: RunExecutionRequest
+  readonly semanticCapabilities?: readonly SemanticCapabilityReceipt[]
+  readonly pin?: (projectDir: string) => Promise<void>
+}
+
 export interface RunCapabilityReceiptIntegrationOptions {
   readonly projectRoot: string
   readonly scopes: CapabilityExecutionScopes
@@ -30,6 +32,9 @@ export interface RunCapabilityReceiptIntegrationOptions {
   readonly agentProvider: (agentId: string) => string | undefined
   readonly projectionProvider?: string
   readonly skillProvider?: string
+  readonly prepareRequest?: (
+    request: RunExecutionRequest,
+  ) => PreparedRunCapabilityRequest | Promise<PreparedRunCapabilityRequest>
 }
 
 export interface CapabilityReceiptRunManager {
@@ -51,8 +56,8 @@ export interface CapabilityReceiptRunManager {
 
 /**
  * Decorates the existing RunManager acceptance seam without giving runtime
- * plugins access to Run internals. The receipt is generated and pinned while
- * the Run reservation is held, before transport execution can start.
+ * plugins access to Run internals. Receipts and prepared semantic snapshots are
+ * pinned while the Run reservation is held, before transport execution starts.
  */
 export function installRunCapabilityReceiptIntegration(
   runs: CapabilityReceiptRunManager,
@@ -68,7 +73,14 @@ export function installRunCapabilityReceiptIntegration(
   ) => {
     if (!installed) return originalCreate(request, creationOptions)
     const runId = request.runId ?? randomUUID()
-    const acceptedRequest = { ...request, runId } as RunExecutionRequest
+    const initialRequest = { ...request, runId } as RunExecutionRequest
+    const prepared = options.prepareRequest
+      ? await options.prepareRequest(initialRequest)
+      : { request: initialRequest }
+    if (prepared.request.runId !== runId) {
+      throw new TypeError('prepared Run capability request changed runId')
+    }
+    const acceptedRequest = prepared.request
     let runScope: RunCapabilityScope | undefined
     const priorValidation = creationOptions.validateReserved
 
@@ -81,10 +93,15 @@ export function installRunCapabilityReceiptIntegration(
             options.projectRoot,
             acceptedRequest.projectDir ?? '.',
           )
+          await prepared.pin?.(projectDir)
           runScope = options.scopes.workspace(projectDir).run(runId)
           const receipt = runScope.acceptCapabilities(
             options.profile,
-            semanticCapabilities(acceptedRequest, options),
+            semanticCapabilities(
+              acceptedRequest,
+              options,
+              prepared.semanticCapabilities ?? [],
+            ),
           )
           await new RunCapabilityReceiptStore(projectDir).pin(receipt)
         },
@@ -109,6 +126,7 @@ export function installRunCapabilityReceiptIntegration(
 function semanticCapabilities(
   request: RunExecutionRequest,
   options: RunCapabilityReceiptIntegrationOptions,
+  additional: readonly SemanticCapabilityReceipt[],
 ): SemanticCapabilityReceipt[] {
   const provider = options.agentProvider(request.agentId)
   if (!provider) {
@@ -133,6 +151,7 @@ function semanticCapabilities(
       digest: request.skillCapabilityDigest,
     })
   }
+  capabilities.push(...additional.map((capability) => ({ ...capability })))
   return capabilities
 }
 
@@ -160,10 +179,4 @@ function digestText(domain: string, value: string): string {
     .update(`${domain}\0`, 'utf8')
     .update(value, 'utf8')
     .digest('hex')
-}
-
-export function isRunCloseMessage(
-  message: RunStreamMessage,
-): message is { event: 'close'; data: RunClosePayload } {
-  return message.event === 'close'
 }
