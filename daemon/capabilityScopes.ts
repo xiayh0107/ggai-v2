@@ -1,5 +1,11 @@
 import path from 'node:path'
 import {
+  createRunCapabilityReceipt,
+  type RunCapabilityReceipt,
+  type SemanticCapabilityReceipt,
+} from './capabilityReceipt.js'
+import type { CapabilityProfileSnapshot } from './runtime/composition.js'
+import {
   defineService,
   type ServiceProviderSnapshot,
   ServiceScope,
@@ -163,6 +169,19 @@ export class RunCapabilityScope {
     return Object.freeze({
       runId: this.runId,
       services: Object.freeze(this.services.snapshot()),
+    })
+  }
+
+  acceptCapabilities(
+    profile: CapabilityProfileSnapshot,
+    semanticCapabilities: readonly SemanticCapabilityReceipt[] = [],
+  ): RunCapabilityReceipt {
+    this.#assertOpen()
+    return createRunCapabilityReceipt({
+      runId: this.runId,
+      profile,
+      services: this.services.snapshot(),
+      semanticCapabilities,
     })
   }
 
