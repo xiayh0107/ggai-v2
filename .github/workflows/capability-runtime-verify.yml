@@ -21,11 +21,16 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Use Node.js 22.22.0
+      - name: Use Node.js 22.22.3
         uses: actions/setup-node@v4
         with:
-          node-version: 22.22.0
+          node-version: 22.22.3
           cache: npm
+
+      - name: Configure deterministic Canvas Git identity
+        run: |
+          git config --global user.name GGAI
+          git config --global user.email ggai@local
 
       - name: Install locked dependencies
         run: npm ci
