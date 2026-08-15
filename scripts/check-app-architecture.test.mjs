@@ -12,4 +12,5 @@ test('current application modules respect the declared architecture boundaries',
   assert.match(result.stdout, /4 composition budgets clean/)
   assert.match(result.stdout, /7 capability runtime budgets clean/)
   assert.match(result.stdout, /6 capability runtime boundaries clean/)
+  assert.match(result.stdout, /1 provider conformance gate clean/)
 })

@@ -1,0 +1,73 @@
+name: Capability Runtime Verify
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: capability-runtime-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Capability Runtime verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22.22.3
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+          cache: npm
+
+      - name: Configure deterministic Canvas Git identity
+        run: |
+          git config --global user.name GGAI
+          git config --global user.email ggai@local
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Check dependency manifests
+        run: npm run deps:check
+
+      - name: Check architecture boundaries
+        run: npm run architecture:check
+
+      - name: Lint source
+        run: npm run lint
+
+      - name: Run startup and architecture-script tests
+        run: npm run test:startup
+
+      - name: Run daemon tests
+        shell: bash
+        run: |
+          set +e
+          npm run test:daemon > daemon-test.log 2>&1
+          status=$?
+          if [[ $status -ne 0 ]]; then
+            echo "::group::Daemon failing tests and stacks"
+            grep -n -B 20 -A 45 '^not ok' daemon-test.log || true
+            echo "::endgroup::"
+            echo "::group::Daemon test summary tail"
+            tail -n 120 daemon-test.log
+            echo "::endgroup::"
+          fi
+          exit $status
+
+      - name: Run UI regression tests
+        run: npm run test:ui
+
+      - name: Build production artifacts
+        run: npm run build
+
+      - name: Verify packaged daemon installation
+        run: npm run package:daemon:verify

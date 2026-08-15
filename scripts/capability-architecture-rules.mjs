@@ -126,7 +126,8 @@ function httpAdapterViolations(sourcePath, imports) {
 }
 
 function compositionOwnershipViolations(sourcePath, imports) {
-  if (/\.test\.[cm]?[jt]sx?$/u.test(sourcePath)) return []
+  if (/\.test\.[cm]?[jt]sx?$/u.test(sourcePath)
+    || sourcePath.startsWith('daemon/__tests__/')) return []
   const violations = []
   for (const specifier of imports) {
     const resolved = resolvedProjectModule(sourcePath, specifier)

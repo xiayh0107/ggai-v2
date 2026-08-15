@@ -102,7 +102,8 @@ function installAgentRuntime(
     '@ggai/agent-runtime',
   )
   const profileSnapshot = inspectCapabilityProfile(profile)
-  mountCapabilityProfileSync(host, profile)
+  const unmountProfile = mountCapabilityProfileSync(host, profile)
+  let disposePromise: Promise<void> | null = null
   return {
     host,
     services: host.services,
@@ -111,6 +112,30 @@ function installAgentRuntime(
       ...inspectCapabilityRuntime(host, profileSnapshot),
       agentTransports: Object.freeze(registry.snapshot()),
     }),
-    dispose: () => host.dispose(),
+    dispose() {
+      disposePromise ??= disposeAgentRuntime(unmountProfile, host)
+      return disposePromise
+    },
+  }
+}
+
+async function disposeAgentRuntime(
+  unmountProfile: () => void | Promise<void>,
+  host: CapabilityPluginHost,
+): Promise<void> {
+  const errors: unknown[] = []
+  try {
+    await unmountProfile()
+  } catch (error) {
+    errors.push(error)
+  }
+  try {
+    await host.dispose()
+  } catch (error) {
+    errors.push(error)
+  }
+  if (errors.length === 1) throw errors[0]
+  if (errors.length > 1) {
+    throw new AggregateError(errors, 'Agent runtime disposal failed')
   }
 }

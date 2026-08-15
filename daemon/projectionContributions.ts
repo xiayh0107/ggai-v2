@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto'
 import {
-  BUILTIN_ARTIFACT_PLUGIN_IDS,
+  BUILTIN_ARTIFACT_CLAIM_REGISTRY,
   canonicalArtifactClaimRegistrations,
   type ArtifactClaimRegistration,
 } from '../src/plugins/artifactContracts.js'
-import { BUILTIN_NODE_CONTEXT_PLUGIN_IDS } from '../src/plugins/contextContracts.js'
+import { BUILTIN_NODE_CONTEXT_POLICY_REGISTRY } from '../src/plugins/contextContracts.js'
 import type { Disposer } from './runtime/effects.js'
 import { defineService } from './runtime/services.js'
 
@@ -13,6 +13,10 @@ const SNAPSHOT_DIGEST_DOMAIN = 'ggai.projection-contributions.v1'
 const PROVIDER_ID = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u
 const MAX_PROVIDERS = 128
 const MAX_CONTRIBUTIONS = 512
+const RESERVED_PROJECTION_CAPABILITY_IDS = new Set([
+  ...BUILTIN_ARTIFACT_CLAIM_REGISTRY.map(({ id }) => id),
+  ...BUILTIN_NODE_CONTEXT_POLICY_REGISTRY.map(({ id }) => id),
+])
 
 export type ProjectionContribution = ArtifactClaimRegistration
 
@@ -188,6 +192,7 @@ function canonicalContributions(
   if (!Array.isArray(contributions) || contributions.length === 0) {
     throw new TypeError('projection contribution provider must declare at least one entry')
   }
+  for (const contribution of contributions) assertContributionAuthority(contribution)
   const canonical = canonicalArtifactClaimRegistrations(contributions)
   const ids = new Set<string>()
   for (const contribution of canonical) {
@@ -195,15 +200,20 @@ function canonicalContributions(
       throw new TypeError(`duplicate projection contribution id: ${contribution.id}`)
     }
     ids.add(contribution.id)
-    if (BUILTIN_ARTIFACT_PLUGIN_IDS.has(contribution.id)
-      || BUILTIN_NODE_CONTEXT_PLUGIN_IDS.has(contribution.id)) {
-      throw new TypeError(`runtime contribution cannot replace builtin capability: ${contribution.id}`)
-    }
-    if (contribution.acceptsUnknown) {
-      throw new TypeError(`runtime contribution cannot accept unknown artifacts: ${contribution.id}`)
-    }
+    assertContributionAuthority(contribution)
   }
   return canonical.map((contribution) => structuredClone(contribution))
+}
+
+function assertContributionAuthority(value: unknown): void {
+  if (!isRecord(value)) return
+  if (typeof value.id === 'string' && RESERVED_PROJECTION_CAPABILITY_IDS.has(value.id)) {
+    throw new TypeError(`runtime contribution cannot replace builtin capability: ${value.id}`)
+  }
+  if (value.acceptsUnknown === true) {
+    const label = typeof value.id === 'string' ? value.id : 'unknown contribution'
+    throw new TypeError(`runtime contribution cannot accept unknown artifacts: ${label}`)
+  }
 }
 
 function assertProviderId(providerId: string): void {
