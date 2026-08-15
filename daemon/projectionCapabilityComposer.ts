@@ -11,7 +11,6 @@ import {
   type ProjectionPluginCapabilitySnapshot,
 } from './pluginCapabilities.js'
 import {
-  createProjectionContributionSnapshot,
   inspectProjectionContributionSnapshot,
   type ProjectionContributionRecord,
   type ProjectionContributionSnapshot,
@@ -216,8 +215,9 @@ function projectionPluginToRegistration(
 function stripProvider(
   record: ProjectionContributionRecord,
 ): ArtifactClaimRegistration {
-  const { providerId: _providerId, ...registration } = record
-  return structuredClone(registration)
+  const registration = structuredClone(record) as ProjectionContributionRecord
+  delete (registration as Partial<ProjectionContributionRecord>).providerId
+  return registration
 }
 
 function requireCapabilitySnapshot(
