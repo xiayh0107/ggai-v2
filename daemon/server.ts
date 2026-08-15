@@ -1,5 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import {
+  createGenerationPreflightRoute,
+} from './http/routes/generationPreflight.js'
+import {
   createHealthRoute,
 } from './http/routes/health.js'
 import {
@@ -44,6 +47,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   const router = createHttpRouter([
     createHealthRoute(),
     createRuntimeRoute(),
+    createGenerationPreflightRoute(),
   ])
 
   daemon.server.on('request', (request, response) => {
