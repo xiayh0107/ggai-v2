@@ -1,13 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import {
-  createGenerationPreflightRoute,
-} from './http/routes/generationPreflight.js'
-import {
-  createHealthRoute,
-} from './http/routes/health.js'
-import {
-  createRuntimeRoute,
-} from './http/routes/runtime.js'
+import { createBoundedHttpRoutes } from './http/routes/index.js'
 import {
   createHttpRouter,
   setHttpSecurityHeaders,
@@ -18,6 +10,7 @@ import {
   installRunCapabilityReceiptIntegration,
   type RunCapabilityReceiptIntegrationOptions,
 } from './runCapabilityIntegration.js'
+import { closeWithRunCapabilityIntegration } from './runCapabilityLifecycle.js'
 import {
   createDaemonServer as createLegacyDaemonServer,
   type DaemonServer,
@@ -52,14 +45,11 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   const context: HttpRouteContext = {
     projectRoot: options.projectRoot,
     registry: daemon.registry,
+    runs: daemon.runs,
     allowedOrigins: new Set(options.allowedOrigins ?? []),
     lifecycle,
   }
-  const router = createHttpRouter([
-    createHealthRoute(),
-    createRuntimeRoute(),
-    createGenerationPreflightRoute(),
-  ])
+  const router = createHttpRouter(createBoundedHttpRoutes())
 
   daemon.server.on('request', (request, response) => {
     void Promise.resolve(router(request, response, context))
@@ -86,37 +76,11 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     ...daemon,
     close() {
       lifecycle.closing = true
-      closePromise ??= closeWithCapabilityReceipts(
+      closePromise ??= closeWithRunCapabilityIntegration(
         closeLegacy,
         uninstallRunCapabilityReceipts,
       )
       return closePromise
     },
   }
-}
-
-async function closeWithCapabilityReceipts(
-  closeLegacy: () => Promise<void>,
-  uninstall: () => void | Promise<void>,
-): Promise<void> {
-  let closeError: unknown
-  try {
-    await closeLegacy()
-  } catch (error) {
-    closeError = error
-  }
-  let uninstallError: unknown
-  try {
-    await uninstall()
-  } catch (error) {
-    uninstallError = error
-  }
-  if (closeError !== undefined && uninstallError !== undefined) {
-    throw new AggregateError(
-      [closeError, uninstallError],
-      'daemon close and Run capability integration cleanup failed',
-    )
-  }
-  if (closeError !== undefined) throw closeError
-  if (uninstallError !== undefined) throw uninstallError
 }
