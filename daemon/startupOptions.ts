@@ -1,6 +1,9 @@
 import path from 'node:path'
 
+export type DaemonOperation = 'serve' | 'dump-runtime' | 'runtime-doctor'
+
 export interface DaemonConfig {
+  operation: DaemonOperation
   host: '127.0.0.1'
   port: number
   projectRoot: string
@@ -15,16 +18,19 @@ export const DAEMON_HELP = [
   'Usage: ggai-daemon [--port 7380] [--project-root DIR] [--allow-origin ORIGIN]',
   '                   [--acpx-agent ID] [--acpx-approval approve-reads|deny-all|approve-all]',
   '                   [--codex-command FILE] [--acpx-command FILE]',
+  '                   [--dump-runtime | --runtime-doctor]',
   '',
   'The server always binds to 127.0.0.1 and runs Canvas.',
   'Workspace Projects are created and initialized through the daemon-owned catalog.',
   'acpx adapters are experimental and disabled until --acpx-agent is provided.',
+  'Runtime diagnostics are JSON and never include service instances or credentials.',
 ].join('\n')
 
 export function parseDaemonConfig(
   argv: readonly string[],
   environment: NodeJS.ProcessEnv = process.env,
 ): DaemonConfig | null {
+  let operation: DaemonOperation = 'serve'
   let port = Number(environment.GGAI_DAEMON_PORT ?? 7380)
   let projectRoot = environment.GGAI_PROJECT_ROOT ?? process.cwd()
   const allowedOrigins = (environment.GGAI_ALLOWED_ORIGINS ?? '')
@@ -63,6 +69,10 @@ export function parseDaemonConfig(
       codexCommand = parseCommand(argv[++index] ?? '', '--codex-command')
     } else if (argument === '--acpx-command') {
       acpxCommand = parseCommand(argv[++index] ?? '', '--acpx-command')
+    } else if (argument === '--dump-runtime') {
+      operation = selectOperation(operation, 'dump-runtime')
+    } else if (argument === '--runtime-doctor') {
+      operation = selectOperation(operation, 'runtime-doctor')
     } else if (argument === '--help' || argument === '-h') {
       return null
     } else {
@@ -76,6 +86,7 @@ export function parseDaemonConfig(
   codexCommand = parseCommand(codexCommand, 'Codex command')
   acpxCommand = parseCommand(acpxCommand, 'acpx command')
   return {
+    operation,
     host: '127.0.0.1',
     port,
     projectRoot: path.resolve(projectRoot),
@@ -85,6 +96,16 @@ export function parseDaemonConfig(
     codexCommand,
     acpxCommand,
   }
+}
+
+function selectOperation(
+  current: DaemonOperation,
+  requested: Exclude<DaemonOperation, 'serve'>,
+): DaemonOperation {
+  if (current !== 'serve' && current !== requested) {
+    throw new Error('--dump-runtime and --runtime-doctor cannot be combined')
+  }
+  return requested
 }
 
 function parseAcpxApprovalMode(value: string): DaemonConfig['acpxApprovalMode'] {

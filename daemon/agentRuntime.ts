@@ -2,10 +2,16 @@ import { createAcpxAgentTransportPlugin } from './plugins/agentTransport/acpx.js
 import { createCodexAgentTransportPlugin } from './plugins/agentTransport/codex.js'
 import {
   CAPABILITY_PROFILE_SCHEMA_VERSION,
+  inspectCapabilityProfile,
   mountCapabilityProfileSync,
   type CapabilityBundle,
   type CapabilityProfile,
+  type CapabilityProfileSnapshot,
 } from './runtime/composition.js'
+import {
+  inspectCapabilityRuntime,
+  type CapabilityRuntimeDiagnosticSnapshot,
+} from './runtime/diagnostics.js'
 import {
   CapabilityPluginHost,
   type SynchronousCapabilityPlugin,
@@ -13,6 +19,7 @@ import {
 import {
   AGENT_TRANSPORT_REGISTRY_SERVICE,
   AgentTransportRegistry,
+  type AgentTransportProviderSnapshot,
 } from './transport/registry.js'
 
 export interface AgentRuntimeOptions {
@@ -20,6 +27,17 @@ export interface AgentRuntimeOptions {
   codexCommand?: string
   acpxCommand?: string
   acpxApprovalMode?: 'approve-all' | 'approve-reads' | 'deny-all'
+}
+
+export interface AgentRuntimeDiagnosticSnapshot extends CapabilityRuntimeDiagnosticSnapshot {
+  readonly agentTransports: readonly AgentTransportProviderSnapshot[]
+}
+
+export interface AgentRuntimeInstallation {
+  readonly host: CapabilityPluginHost
+  readonly profile: CapabilityProfileSnapshot
+  diagnostics(): AgentRuntimeDiagnosticSnapshot
+  dispose(): Promise<void>
 }
 
 export function createBuiltinAgentRuntimeProfile(
@@ -52,13 +70,23 @@ export function createBuiltinAgentRuntimeProfile(
 export function installBuiltinAgentTransportPlugins(
   registry: AgentTransportRegistry,
   options: AgentRuntimeOptions = {},
-): CapabilityPluginHost {
+): AgentRuntimeInstallation {
   const host = new CapabilityPluginHost()
   host.services.provide(
     AGENT_TRANSPORT_REGISTRY_SERVICE,
     registry,
     '@ggai/agent-runtime',
   )
-  mountCapabilityProfileSync(host, createBuiltinAgentRuntimeProfile(options))
-  return host
+  const profile = createBuiltinAgentRuntimeProfile(options)
+  const profileSnapshot = inspectCapabilityProfile(profile)
+  mountCapabilityProfileSync(host, profile)
+  return {
+    host,
+    profile: profileSnapshot,
+    diagnostics: () => Object.freeze({
+      ...inspectCapabilityRuntime(host, profileSnapshot),
+      agentTransports: Object.freeze(registry.snapshot()),
+    }),
+    dispose: () => host.dispose(),
+  }
 }

@@ -1,5 +1,6 @@
 import {
   installBuiltinAgentTransportPlugins,
+  type AgentRuntimeDiagnosticSnapshot,
   type AgentRuntimeOptions,
 } from './agentRuntime.js'
 import { AgentTransportRegistry } from './transport/registry.js'
@@ -11,14 +12,18 @@ export type AgentRegistryOptions = AgentRuntimeOptions
  * built-in transports are mounted through the CapabilityPluginHost.
  */
 export class AgentRegistry extends AgentTransportRegistry {
-  readonly #plugins
+  readonly #runtime
 
   constructor(options: AgentRegistryOptions = {}) {
     super()
-    this.#plugins = installBuiltinAgentTransportPlugins(this, options)
+    this.#runtime = installBuiltinAgentTransportPlugins(this, options)
+  }
+
+  runtimeDiagnostics(): AgentRuntimeDiagnosticSnapshot {
+    return this.#runtime.diagnostics()
   }
 
   dispose(): Promise<void> {
-    return this.#plugins.dispose()
+    return this.#runtime.dispose()
   }
 }

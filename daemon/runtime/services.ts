@@ -15,6 +15,11 @@ export interface ServiceReader {
   ownerOf<T>(key: ServiceKey<T>): string | undefined
 }
 
+export interface ServiceProviderSnapshot {
+  readonly id: string
+  readonly owner: string
+}
+
 interface ServiceProvider {
   readonly owner: string
   readonly value: unknown
@@ -101,6 +106,20 @@ export class ServiceScope implements ServiceReader {
     const local = this.#providers.get(key.id)
     if (local) return local.owner
     return this.#parent?.ownerOf(key)
+  }
+
+  snapshot(): ServiceProviderSnapshot[] {
+    this.#assertActive()
+    const effective = new Map<string, ServiceProviderSnapshot>()
+    for (const provider of this.#parent?.snapshot() ?? []) {
+      effective.set(provider.id, provider)
+    }
+    for (const [id, provider] of this.#providers) {
+      effective.set(id, { id, owner: provider.owner })
+    }
+    return [...effective.values()]
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map((provider) => Object.freeze({ ...provider }))
   }
 
   async dispose(): Promise<void> {

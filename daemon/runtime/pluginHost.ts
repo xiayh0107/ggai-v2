@@ -133,6 +133,10 @@ export class CapabilityPluginHost {
     return [...this.#plugins.values()].map(({ manifest }) => ({ ...manifest }))
   }
 
+  eventFailures(): RuntimeEventFailure[] {
+    return this.#eventFailures.map((failure) => ({ ...failure }))
+  }
+
   drainEventFailures(): RuntimeEventFailure[] {
     return this.#eventFailures.splice(0)
   }
