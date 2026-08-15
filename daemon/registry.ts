@@ -4,6 +4,7 @@ import {
   type AgentRuntimeDiagnosticSnapshot,
   type AgentRuntimeOptions,
 } from './agentRuntime.js'
+import type { CapabilityProfileSnapshot } from './runtime/composition.js'
 import type { ServiceScope } from './runtime/services.js'
 import { AgentTransportRegistry } from './transport/registry.js'
 
@@ -26,6 +27,10 @@ export class AgentRegistry extends AgentTransportRegistry {
 
   get runtimeServices(): ServiceScope {
     return this.#runtime.services
+  }
+
+  get runtimeProfile(): CapabilityProfileSnapshot {
+    return this.#runtime.profile
   }
 
   runtimeDiagnostics(): AgentRuntimeDiagnosticSnapshot {
