@@ -6,6 +6,9 @@ import {
   createHealthRoute,
 } from './http/routes/health.js'
 import {
+  createProjectionPlanReadRoute,
+} from './http/routes/projectionPlans.js'
+import {
   createRuntimeRoute,
 } from './http/routes/runtime.js'
 import {
@@ -41,6 +44,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   const context: HttpRouteContext = {
     projectRoot: options.projectRoot,
     registry: daemon.registry,
+    runs: daemon.runs,
     allowedOrigins: new Set(options.allowedOrigins ?? []),
     lifecycle,
   }
@@ -48,6 +52,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     createHealthRoute(),
     createRuntimeRoute(),
     createGenerationPreflightRoute(),
+    createProjectionPlanReadRoute(),
   ])
 
   daemon.server.on('request', (request, response) => {
