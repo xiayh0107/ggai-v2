@@ -1,6 +1,10 @@
 import { readdir, readFile } from 'node:fs/promises'
-import { extname, join, relative } from 'node:path'
+import { extname, join, relative, sep } from 'node:path'
 import process from 'node:process'
+import {
+  CAPABILITY_BOUNDARY_GROUP_COUNT,
+  capabilityBoundaryViolations,
+} from './capability-architecture-rules.mjs'
 
 const ROOT = process.cwd()
 const CHECKED_ROOTS = [
@@ -31,7 +35,7 @@ const violations = []
 for (const root of CHECKED_ROOTS) {
   for (const file of await sourceFiles(join(ROOT, root))) {
     const source = await readFile(file, 'utf8')
-    const sourcePath = relative(ROOT, file)
+    const sourcePath = portablePath(relative(ROOT, file))
     if (VERSIONED_PRODUCT_LAYER.test(sourcePath)) {
       violations.push(`${sourcePath} restores a versioned product layer`)
     }
@@ -39,18 +43,19 @@ for (const root of CHECKED_ROOTS) {
       violations.push(`${sourcePath} restores a plugin component escape hatch`)
     }
     const imports = importedSpecifiers(source)
+    violations.push(...capabilityBoundaryViolations(sourcePath, imports))
     for (const specifier of imports) {
       if (LEGACY_IMPORTS.some((legacy) => specifier.startsWith(legacy))) {
-        violations.push(`${relative(ROOT, file)} imports legacy module ${specifier}`)
+        violations.push(`${sourcePath} imports legacy module ${specifier}`)
       }
       if (VERSIONED_PRODUCT_LAYER.test(specifier)) {
-        violations.push(`${relative(ROOT, file)} imports versioned product layer ${specifier}`)
+        violations.push(`${sourcePath} imports versioned product layer ${specifier}`)
       }
       if (specifier.startsWith('@/pages/')) {
-        violations.push(`${relative(ROOT, file)} imports composition layer ${specifier}`)
+        violations.push(`${sourcePath} imports composition layer ${specifier}`)
       }
       if (!/\.test\.[cm]?[jt]sx?$/u.test(file) && specifier === '@/agent/daemonClient') {
-        violations.push(`${relative(ROOT, file)} imports the legacy aggregate daemon client`)
+        violations.push(`${sourcePath} imports the legacy aggregate daemon client`)
       }
     }
   }
@@ -72,7 +77,8 @@ if (violations.length > 0) {
 } else {
   console.log(
     `Application architecture boundaries: ${CHECKED_ROOTS.length} roots clean; `
-    + `${FILE_LINE_BUDGETS.size} composition budgets clean`,
+    + `${FILE_LINE_BUDGETS.size} composition budgets clean; `
+    + `${CAPABILITY_BOUNDARY_GROUP_COUNT} capability runtime boundaries clean`,
   )
 }
 
@@ -92,4 +98,8 @@ function importedSpecifiers(source) {
   const pattern = /(?:import|export)\s+(?:type\s+)?(?:[\s\S]*?\s+from\s+)?['"]([^'"]+)['"]/g
   for (const match of source.matchAll(pattern)) imports.push(match[1])
   return imports
+}
+
+function portablePath(path) {
+  return path.split(sep).join('/')
 }
