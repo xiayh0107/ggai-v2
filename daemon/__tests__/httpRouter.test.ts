@@ -38,6 +38,27 @@ test('bounded HTTP routes preserve health and expose runtime diagnostics', async
   assert.equal((runtime.body as { profile?: { id?: string } }).profile?.id,
     '@ggai/default-agent-runtime')
 
+  const preflight = await getJson(port, '/generation/preflight?agentId=codex')
+  assert.equal(preflight.status, 200)
+  assert.deepEqual(preflight.body, {
+    schemaVersion: 1,
+    agentId: 'codex',
+    state: 'unavailable',
+    ready: false,
+    retryable: true,
+    issue: { code: 'generation_service_unavailable' },
+  })
+  assert.equal(JSON.stringify(preflight.body).includes('/definitely/missing/codex'), false)
+
+  const invalidPreflight = await getJson(port, '/generation/preflight?agentId=../codex')
+  assert.equal(invalidPreflight.status, 400)
+  assert.deepEqual(invalidPreflight.body, {
+    error: {
+      code: 'invalid_generation_preflight',
+      message: 'agentId is invalid',
+    },
+  })
+
   const delegated = await getJson(port, '/projects')
   assert.equal(delegated.status, 200)
   assert.deepEqual(delegated.body, {
