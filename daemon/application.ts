@@ -1,14 +1,20 @@
 import type { Server } from 'node:http'
 import { CapabilityExecutionScopes } from './capabilityScopes.js'
+import { createWorkspaceSkillResolverPlugin } from './plugins/skillResolver/workspace.js'
 import { AgentRegistry } from './registry.js'
 import { inspectRuntimeDoctor, type RuntimeDoctorReport } from './runtimeDoctor.js'
 import { createDaemonServer, type DaemonServer } from './server.js'
+import {
+  SKILL_CATALOG_READER_SERVICE,
+} from './skills/contracts.js'
+import { SkillAssetCatalog } from './skillAssets.js'
 import type { DaemonConfig } from './startupOptions.js'
 
 export class DaemonApplication {
   readonly config: DaemonConfig
   readonly registry: AgentRegistry
   readonly scopes: CapabilityExecutionScopes
+  readonly skillAssets: SkillAssetCatalog
   #daemon: DaemonServer | null = null
   #listenPromise: Promise<void> | null = null
   #closePromise: Promise<void> | null = null
@@ -22,6 +28,14 @@ export class DaemonApplication {
       acpxCommand: config.acpxCommand,
     })
     this.scopes = new CapabilityExecutionScopes(this.registry.runtimeServices)
+    this.skillAssets = new SkillAssetCatalog(config.projectRoot)
+    const workspace = this.scopes.workspace(config.projectRoot)
+    workspace.services.provide(
+      SKILL_CATALOG_READER_SERVICE,
+      this.skillAssets,
+      '@ggai/skill-catalog-authority',
+    )
+    workspace.mountSync(createWorkspaceSkillResolverPlugin())
   }
 
   get server(): Server {
@@ -89,6 +103,7 @@ export class DaemonApplication {
     this.#daemon ??= createDaemonServer({
       ...this.config,
       registry: this.registry,
+      skillAssetCatalog: this.skillAssets,
     })
     return this.#daemon
   }
