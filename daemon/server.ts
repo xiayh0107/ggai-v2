@@ -47,8 +47,8 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   ])
 
   daemon.server.on('request', (request, response) => {
-    void router(request, response, context)
-      .then((handled) => {
+    void Promise.resolve(router(request, response, context))
+      .then((handled: boolean) => {
         if (handled) return
         for (const listener of legacyListeners) {
           listener.call(daemon.server, request, response)
