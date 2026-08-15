@@ -16,6 +16,7 @@ import {
   CapabilityPluginHost,
   type SynchronousCapabilityPlugin,
 } from './runtime/pluginHost.js'
+import type { ServiceScope } from './runtime/services.js'
 import {
   AGENT_TRANSPORT_REGISTRY_SERVICE,
   AgentTransportRegistry,
@@ -35,6 +36,7 @@ export interface AgentRuntimeDiagnosticSnapshot extends CapabilityRuntimeDiagnos
 
 export interface AgentRuntimeInstallation {
   readonly host: CapabilityPluginHost
+  readonly services: ServiceScope
   readonly profile: CapabilityProfileSnapshot
   diagnostics(): AgentRuntimeDiagnosticSnapshot
   dispose(): Promise<void>
@@ -67,9 +69,31 @@ export function createBuiltinAgentRuntimeProfile(
   }
 }
 
+export function createEmptyAgentRuntimeProfile(): CapabilityProfile<SynchronousCapabilityPlugin> {
+  return {
+    schemaVersion: CAPABILITY_PROFILE_SCHEMA_VERSION,
+    id: '@ggai/empty-agent-runtime',
+    version: '1.0.0',
+    bundles: [],
+  }
+}
+
 export function installBuiltinAgentTransportPlugins(
   registry: AgentTransportRegistry,
   options: AgentRuntimeOptions = {},
+): AgentRuntimeInstallation {
+  return installAgentRuntime(registry, createBuiltinAgentRuntimeProfile(options))
+}
+
+export function installEmptyAgentRuntime(
+  registry: AgentTransportRegistry,
+): AgentRuntimeInstallation {
+  return installAgentRuntime(registry, createEmptyAgentRuntimeProfile())
+}
+
+function installAgentRuntime(
+  registry: AgentTransportRegistry,
+  profile: CapabilityProfile<SynchronousCapabilityPlugin>,
 ): AgentRuntimeInstallation {
   const host = new CapabilityPluginHost()
   host.services.provide(
@@ -77,11 +101,11 @@ export function installBuiltinAgentTransportPlugins(
     registry,
     '@ggai/agent-runtime',
   )
-  const profile = createBuiltinAgentRuntimeProfile(options)
   const profileSnapshot = inspectCapabilityProfile(profile)
   mountCapabilityProfileSync(host, profile)
   return {
     host,
+    services: host.services,
     profile: profileSnapshot,
     diagnostics: () => Object.freeze({
       ...inspectCapabilityRuntime(host, profileSnapshot),

@@ -1,4 +1,5 @@
 import type { Server } from 'node:http'
+import { CapabilityExecutionScopes } from './capabilityScopes.js'
 import { AgentRegistry } from './registry.js'
 import { inspectRuntimeDoctor, type RuntimeDoctorReport } from './runtimeDoctor.js'
 import { createDaemonServer, type DaemonServer } from './server.js'
@@ -7,6 +8,7 @@ import type { DaemonConfig } from './startupOptions.js'
 export class DaemonApplication {
   readonly config: DaemonConfig
   readonly registry: AgentRegistry
+  readonly scopes: CapabilityExecutionScopes
   #daemon: DaemonServer | null = null
   #listenPromise: Promise<void> | null = null
   #closePromise: Promise<void> | null = null
@@ -19,6 +21,7 @@ export class DaemonApplication {
       codexCommand: config.codexCommand,
       acpxCommand: config.acpxCommand,
     })
+    this.scopes = new CapabilityExecutionScopes(this.registry.runtimeServices)
   }
 
   get server(): Server {
@@ -60,10 +63,25 @@ export class DaemonApplication {
   }
 
   close(): Promise<void> {
-    this.#closePromise ??= this.#daemon
-      ? this.#daemon.close()
-      : this.registry.dispose()
+    this.#closePromise ??= this.#closeApplication()
     return this.#closePromise
+  }
+
+  async #closeApplication(): Promise<void> {
+    const errors: unknown[] = []
+    try {
+      await this.scopes.dispose()
+    } catch (error) {
+      errors.push(error)
+    }
+    try {
+      if (this.#daemon) await this.#daemon.close()
+      else await this.registry.dispose()
+    } catch (error) {
+      errors.push(error)
+    }
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1) throw new AggregateError(errors, 'daemon application close failed')
   }
 
   #server(): DaemonServer {
