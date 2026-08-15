@@ -15,12 +15,20 @@ import {
   type HttpRouteContext,
 } from './http/router.js'
 import {
+  installRunCapabilityReceiptIntegration,
+  type RunCapabilityReceiptIntegrationOptions,
+} from './runCapabilityIntegration.js'
+import {
   createDaemonServer as createLegacyDaemonServer,
   type DaemonServer,
-  type DaemonServerOptions,
+  type DaemonServerOptions as LegacyDaemonServerOptions,
 } from './serverLegacy.js'
 
-export type { DaemonServer, DaemonServerOptions } from './serverLegacy.js'
+export type { DaemonServer } from './serverLegacy.js'
+
+export interface DaemonServerOptions extends LegacyDaemonServerOptions {
+  readonly runCapabilityReceipts?: RunCapabilityReceiptIntegrationOptions
+}
 
 type RequestListener = (request: IncomingMessage, response: ServerResponse) => void
 
@@ -31,6 +39,9 @@ type RequestListener = (request: IncomingMessage, response: ServerResponse) => v
  */
 export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   const daemon = createLegacyDaemonServer(options)
+  const uninstallRunCapabilityReceipts = options.runCapabilityReceipts
+    ? installRunCapabilityReceiptIntegration(daemon.runs, options.runCapabilityReceipts)
+    : () => undefined
   const legacyListeners = daemon.server.listeners('request') as RequestListener[]
   if (legacyListeners.length === 0) {
     throw new Error('legacy daemon server did not install a request listener')
@@ -75,8 +86,37 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     ...daemon,
     close() {
       lifecycle.closing = true
-      closePromise ??= closeLegacy()
+      closePromise ??= closeWithCapabilityReceipts(
+        closeLegacy,
+        uninstallRunCapabilityReceipts,
+      )
       return closePromise
     },
   }
+}
+
+async function closeWithCapabilityReceipts(
+  closeLegacy: () => Promise<void>,
+  uninstall: () => void | Promise<void>,
+): Promise<void> {
+  let closeError: unknown
+  try {
+    await closeLegacy()
+  } catch (error) {
+    closeError = error
+  }
+  let uninstallError: unknown
+  try {
+    await uninstall()
+  } catch (error) {
+    uninstallError = error
+  }
+  if (closeError !== undefined && uninstallError !== undefined) {
+    throw new AggregateError(
+      [closeError, uninstallError],
+      'daemon close and Run capability integration cleanup failed',
+    )
+  }
+  if (closeError !== undefined) throw closeError
+  if (uninstallError !== undefined) throw uninstallError
 }
