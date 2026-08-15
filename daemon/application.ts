@@ -1,6 +1,8 @@
 import type { Server } from 'node:http'
 import { CapabilityExecutionScopes } from './capabilityScopes.js'
 import { createWorkspaceSkillResolverPlugin } from './plugins/skillResolver/workspace.js'
+import { ProjectionCapabilityComposer } from './projectionCapabilityComposer.js'
+import { ProjectionCapabilityProvenanceStore } from './projectionProvenanceStore.js'
 import {
   ProjectionContributionRegistry,
   PROJECTION_CONTRIBUTION_REGISTRY_SERVICE,
@@ -15,6 +17,7 @@ import {
 } from './skills/contracts.js'
 import { SkillAssetCatalog } from './skillAssets.js'
 import type { DaemonConfig } from './startupOptions.js'
+import { isResolvedTaskRunRequest } from './taskRunTypes.js'
 
 export class DaemonApplication {
   readonly config: DaemonConfig
@@ -23,6 +26,7 @@ export class DaemonApplication {
   readonly skillAssets: SkillAssetCatalog
   readonly runSkillAssets: CapabilitySkillAssetCatalog
   readonly projectionContributions: ProjectionContributionRegistry
+  readonly projectionCapabilities: ProjectionCapabilityComposer
   #daemon: DaemonServer | null = null
   #listenPromise: Promise<void> | null = null
   #closePromise: Promise<void> | null = null
@@ -38,6 +42,9 @@ export class DaemonApplication {
     this.scopes = new CapabilityExecutionScopes(this.registry.runtimeServices)
     this.skillAssets = new SkillAssetCatalog(config.projectRoot)
     this.projectionContributions = new ProjectionContributionRegistry()
+    this.projectionCapabilities = new ProjectionCapabilityComposer(
+      this.projectionContributions,
+    )
     const workspace = this.scopes.workspace(config.projectRoot)
     workspace.services.provide(
       SKILL_CATALOG_READER_SERVICE,
@@ -139,7 +146,28 @@ export class DaemonApplication {
         profile: this.registry.runtimeProfile,
         agentProvider: (agentId) => this.registry.snapshot()
           .find((provider) => provider.agentIds.includes(agentId))?.id,
+        projectionProvider: '@ggai/projection-capability-composer',
         skillProvider: '@ggai/workspace-skill-resolver',
+        prepareRequest: (request) => {
+          if (!isResolvedTaskRunRequest(request)) return { request }
+          const composition = this.projectionCapabilities.compose(
+            request.pluginCapabilities,
+          )
+          return {
+            request: {
+              ...request,
+              pluginCapabilities: composition.capabilities,
+            },
+            semanticCapabilities: [{
+              key: 'ggai.projection-provenance.v1',
+              provider: '@ggai/projection-capability-composer',
+              digest: composition.provenance.digest,
+            }],
+            pin: (projectDir) => new ProjectionCapabilityProvenanceStore(projectDir)
+              .pin(composition.provenance)
+              .then(() => undefined),
+          }
+        },
       },
     })
     return this.#daemon
