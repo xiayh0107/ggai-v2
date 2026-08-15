@@ -5,6 +5,16 @@ export interface ServiceKey<T> {
   readonly [serviceType]?: (value: T) => T
 }
 
+export interface ServiceKeyReference {
+  readonly id: string
+}
+
+export interface ServiceReader {
+  get<T>(key: ServiceKey<T>): T | undefined
+  require<T>(key: ServiceKey<T>): T
+  ownerOf<T>(key: ServiceKey<T>): string | undefined
+}
+
 interface ServiceProvider {
   readonly owner: string
   readonly value: unknown
@@ -13,17 +23,23 @@ interface ServiceProvider {
 const SERVICE_ID = /^ggai\.[a-z0-9][a-z0-9.-]*\.v[1-9][0-9]*$/u
 
 export function defineService<T>(id: string): ServiceKey<T> {
-  if (!SERVICE_ID.test(id)) {
-    throw new TypeError(`invalid service id: ${id}`)
-  }
+  assertServiceId(id)
   return Object.freeze({ id }) as ServiceKey<T>
+}
+
+export function inspectServiceKeyReference(key: ServiceKeyReference): string {
+  if (typeof key !== 'object' || key === null) {
+    throw new TypeError('service key must be an object')
+  }
+  assertServiceId(key.id)
+  return key.id
 }
 
 /**
  * A hierarchical service context. A child may shadow a parent provider, while
  * duplicate providers in the same scope are rejected.
  */
-export class ServiceScope {
+export class ServiceScope implements ServiceReader {
   readonly #parent: ServiceScope | null
   readonly #label: string
   readonly #providers = new Map<string, ServiceProvider>()
@@ -66,6 +82,7 @@ export class ServiceScope {
   }
 
   get<T>(key: ServiceKey<T>): T | undefined {
+    this.#assertActive()
     const local = this.#providers.get(key.id)
     if (local) return local.value as T
     return this.#parent?.get(key)
@@ -80,6 +97,7 @@ export class ServiceScope {
   }
 
   ownerOf<T>(key: ServiceKey<T>): string | undefined {
+    this.#assertActive()
     const local = this.#providers.get(key.id)
     if (local) return local.owner
     return this.#parent?.ownerOf(key)
@@ -98,4 +116,8 @@ export class ServiceScope {
   #assertActive(): void {
     if (this.#disposed) throw new Error(`service scope is disposed: ${this.#label}`)
   }
+}
+
+function assertServiceId(id: string): void {
+  if (!SERVICE_ID.test(id)) throw new TypeError(`invalid service id: ${id}`)
 }

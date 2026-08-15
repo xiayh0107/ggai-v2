@@ -5,7 +5,13 @@ import {
   type RuntimeEventFailure,
   type RuntimeEventSource,
 } from './events.js'
-import { ServiceScope, type ServiceKey } from './services.js'
+import {
+  inspectServiceKeyReference,
+  ServiceScope,
+  type ServiceKey,
+  type ServiceKeyReference,
+  type ServiceReader,
+} from './services.js'
 
 export const GGAI_RUNTIME_API_VERSION = 1 as const
 
@@ -32,7 +38,7 @@ export interface CapabilityRuntimeEventMap {
 
 export interface CapabilityPluginContext {
   readonly pluginId: string
-  readonly services: ServiceScope
+  readonly services: ServiceReader
   effect(disposer: Disposer): Disposer
   provide<T>(key: ServiceKey<T>, value: T): Disposer
   require<T>(key: ServiceKey<T>): T
@@ -44,11 +50,13 @@ export interface CapabilityPluginContext {
 
 export interface CapabilityPlugin {
   readonly manifest: CapabilityPluginManifest
+  readonly inject?: readonly ServiceKeyReference[]
   activate(context: CapabilityPluginContext): void | Disposer | Promise<void | Disposer>
 }
 
 export interface SynchronousCapabilityPlugin {
   readonly manifest: CapabilityPluginManifest
+  readonly inject?: readonly ServiceKeyReference[]
   activate(context: CapabilityPluginContext): void | Disposer
 }
 
@@ -64,6 +72,37 @@ interface PendingMount {
   readonly effects: EffectScope
 }
 
+class PluginServiceReader implements ServiceReader {
+  readonly #scope: ServiceScope
+  readonly #injectedIds: ReadonlySet<string>
+
+  constructor(scope: ServiceScope, injectedIds: ReadonlySet<string>) {
+    this.#scope = scope
+    this.#injectedIds = injectedIds
+  }
+
+  get<T>(key: ServiceKey<T>): T | undefined {
+    this.#assertInjected(key)
+    return this.#scope.get(key)
+  }
+
+  require<T>(key: ServiceKey<T>): T {
+    this.#assertInjected(key)
+    return this.#scope.require(key)
+  }
+
+  ownerOf<T>(key: ServiceKey<T>): string | undefined {
+    this.#assertInjected(key)
+    return this.#scope.ownerOf(key)
+  }
+
+  #assertInjected<T>(key: ServiceKey<T>): void {
+    if (!this.#injectedIds.has(key.id)) {
+      throw new Error(`plugin did not declare required service: ${key.id}`)
+    }
+  }
+}
+
 const MAX_RUNTIME_EVENT_FAILURES = 100
 const PLUGIN_ID = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u
 const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/u
@@ -75,6 +114,8 @@ export class CapabilityPluginHost {
   readonly #effects = new EffectScope()
   readonly #plugins = new Map<string, MountedPlugin>()
   readonly #mounting = new Set<string>()
+  readonly #pendingMounts = new Set<Promise<Disposer>>()
+  #disposePromise: Promise<void> | null = null
 
   constructor(services = new ServiceScope({ label: 'runtime' })) {
     this.#services = services
@@ -96,23 +137,24 @@ export class CapabilityPluginHost {
     return this.#eventFailures.splice(0)
   }
 
-  async mount(plugin: CapabilityPlugin): Promise<Disposer> {
-    const pending = this.#beginMount(plugin.manifest)
+  mount(plugin: CapabilityPlugin): Promise<Disposer> {
+    let pending: PendingMount
     try {
-      const activationDisposer = await plugin.activate(pending.context)
-      if (activationDisposer) pending.effects.add(activationDisposer)
-      return this.#finishMount(pending)
+      pending = this.#beginMount(plugin)
     } catch (error) {
-      this.#emit('plugin/activation-failed', { manifest: pending.manifest, error })
-      await pending.effects.dispose().catch(() => undefined)
-      throw error
-    } finally {
-      this.#mounting.delete(pending.id)
+      return Promise.reject(error)
     }
+    const operation = this.#completeMount(plugin, pending)
+    this.#pendingMounts.add(operation)
+    void operation.then(
+      () => this.#pendingMounts.delete(operation),
+      () => this.#pendingMounts.delete(operation),
+    )
+    return operation
   }
 
   mountSync(plugin: SynchronousCapabilityPlugin): Disposer {
-    const pending = this.#beginMount(plugin.manifest)
+    const pending = this.#beginMount(plugin)
     try {
       const activationDisposer = plugin.activate(pending.context)
       if (activationDisposer) pending.effects.add(activationDisposer)
@@ -126,8 +168,14 @@ export class CapabilityPluginHost {
     }
   }
 
-  async dispose(): Promise<void> {
+  dispose(): Promise<void> {
+    this.#disposePromise ??= this.#disposeHost()
+    return this.#disposePromise
+  }
+
+  async #disposeHost(): Promise<void> {
     const errors: unknown[] = []
+    await Promise.allSettled([...this.#pendingMounts])
     try {
       await this.#effects.dispose()
     } catch (error) {
@@ -145,22 +193,53 @@ export class CapabilityPluginHost {
     }
   }
 
-  #beginMount(manifest: CapabilityPluginManifest): PendingMount {
-    const pinnedManifest = inspectCapabilityPluginManifest(manifest)
+  async #completeMount(
+    plugin: CapabilityPlugin,
+    pending: PendingMount,
+  ): Promise<Disposer> {
+    try {
+      const activationDisposer = await plugin.activate(pending.context)
+      if (activationDisposer) pending.effects.add(activationDisposer)
+      return this.#finishMount(pending)
+    } catch (error) {
+      this.#emit('plugin/activation-failed', { manifest: pending.manifest, error })
+      try {
+        await pending.effects.dispose()
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          `plugin activation and rollback failed: ${pending.id}`,
+        )
+      }
+      throw error
+    } finally {
+      this.#mounting.delete(pending.id)
+    }
+  }
+
+  #beginMount(plugin: Pick<CapabilityPlugin, 'manifest' | 'inject'>): PendingMount {
+    const pinnedManifest = inspectCapabilityPluginManifest(plugin.manifest)
     const { id } = pinnedManifest
-    if (this.#effects.disposed) throw new Error('capability plugin host is disposed')
+    if (this.#disposePromise) throw new Error('capability plugin host is disposing or disposed')
     if (this.#plugins.has(id) || this.#mounting.has(id)) {
       throw new Error(`plugin is already mounted or mounting: ${id}`)
+    }
+    const injectedIds = inspectCapabilityPluginInjection(plugin.inject)
+    for (const serviceId of injectedIds) {
+      if (this.#services.get({ id: serviceId }) === undefined) {
+        throw new Error(`required service is unavailable for ${id}: ${serviceId}`)
+      }
     }
     this.#mounting.add(id)
     this.#emit('plugin/activating', { manifest: pinnedManifest })
 
     const lookupScope = this.#services.fork(`plugin:${id}`)
+    const services = new PluginServiceReader(lookupScope, new Set(injectedIds))
     const effects = new EffectScope()
     effects.add(() => lookupScope.dispose())
     const context: CapabilityPluginContext = {
       pluginId: id,
-      services: lookupScope,
+      services,
       effect: (disposer) => effects.add(disposer),
       provide: (key, value) => {
         const release = this.#services.provide(key, value, id)
@@ -171,7 +250,7 @@ export class CapabilityPluginHost {
           throw error
         }
       },
-      require: (key) => lookupScope.require(key),
+      require: (key) => services.require(key),
       onEvent: (event, listener) => effects.add(this.#events.on(event, listener)),
     }
     return { id, manifest: pinnedManifest, context, effects }
@@ -232,4 +311,16 @@ export function inspectCapabilityPluginManifest(
     )
   }
   return Object.freeze({ ...manifest })
+}
+
+export function inspectCapabilityPluginInjection(
+  injection: readonly ServiceKeyReference[] | undefined,
+): readonly string[] {
+  if (injection === undefined) return Object.freeze([])
+  if (!Array.isArray(injection)) throw new TypeError('plugin inject must be an array')
+  const ids = injection.map(inspectServiceKeyReference)
+  if (new Set(ids).size !== ids.length) {
+    throw new TypeError(`plugin inject contains duplicate service keys: ${ids.join(', ')}`)
+  }
+  return Object.freeze(ids)
 }

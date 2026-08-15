@@ -51,8 +51,6 @@ async function createSkillSource(parent: string, name: string, instruction: stri
 test('accepted Runs pin and expose effective type plus instance Node skills', async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-node-skills-run-')))
   const sources = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-node-skills-source-')))
-  t.after(() => rm(root, { recursive: true, force: true }))
-  t.after(() => rm(sources, { recursive: true, force: true }))
   await mkdir(path.join(root, '.gg'), { recursive: true })
   const typeSource = await createSkillSource(
     sources,
@@ -87,7 +85,13 @@ test('accepted Runs pin and expose effective type plus instance Node skills', as
     projectRoot: root,
     registry: new NodeSkillAgentRegistry(transport),
   })
-  t.after(() => daemon.close())
+  t.after(async () => {
+    await daemon.close()
+    await Promise.all([
+      rm(root, { recursive: true, force: true }),
+      rm(sources, { recursive: true, force: true }),
+    ])
+  })
 
   const typeAsset = await daemon.skillAssets.import({
     sourcePath: typeSource,

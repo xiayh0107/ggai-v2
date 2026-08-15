@@ -1,6 +1,10 @@
 import { readdir, readFile } from 'node:fs/promises'
-import { extname, join, relative } from 'node:path'
+import { extname, join, relative, sep } from 'node:path'
 import process from 'node:process'
+import {
+  CAPABILITY_BOUNDARY_GROUP_COUNT,
+  capabilityBoundaryViolations,
+} from './capability-architecture-rules.mjs'
 
 const ROOT = process.cwd()
 const CHECKED_ROOTS = [
@@ -26,12 +30,19 @@ const FILE_LINE_BUDGETS = new Map([
   ['src/pages/ResourceLibrary.tsx', 120],
   ['src/pages/Workspace.tsx', 500],
 ])
+const CAPABILITY_RUNTIME_LINE_BUDGETS = new Map([
+  ['daemon/registry.ts', 60],
+  ['daemon/agentRuntime.ts', 100],
+  ['daemon/runtime/composition.ts', 230],
+  ['daemon/runtime/pluginHost.ts', 360],
+  ['daemon/runtime/services.ts', 160],
+])
 
 const violations = []
 for (const root of CHECKED_ROOTS) {
   for (const file of await sourceFiles(join(ROOT, root))) {
     const source = await readFile(file, 'utf8')
-    const sourcePath = relative(ROOT, file)
+    const sourcePath = portablePath(relative(ROOT, file))
     if (VERSIONED_PRODUCT_LAYER.test(sourcePath)) {
       violations.push(`${sourcePath} restores a versioned product layer`)
     }
@@ -39,29 +50,37 @@ for (const root of CHECKED_ROOTS) {
       violations.push(`${sourcePath} restores a plugin component escape hatch`)
     }
     const imports = importedSpecifiers(source)
+    violations.push(...capabilityBoundaryViolations(sourcePath, imports))
     for (const specifier of imports) {
       if (LEGACY_IMPORTS.some((legacy) => specifier.startsWith(legacy))) {
-        violations.push(`${relative(ROOT, file)} imports legacy module ${specifier}`)
+        violations.push(`${sourcePath} imports legacy module ${specifier}`)
       }
       if (VERSIONED_PRODUCT_LAYER.test(specifier)) {
-        violations.push(`${relative(ROOT, file)} imports versioned product layer ${specifier}`)
+        violations.push(`${sourcePath} imports versioned product layer ${specifier}`)
       }
       if (specifier.startsWith('@/pages/')) {
-        violations.push(`${relative(ROOT, file)} imports composition layer ${specifier}`)
+        violations.push(`${sourcePath} imports composition layer ${specifier}`)
       }
       if (!/\.test\.[cm]?[jt]sx?$/u.test(file) && specifier === '@/agent/daemonClient') {
-        violations.push(`${relative(ROOT, file)} imports the legacy aggregate daemon client`)
+        violations.push(`${sourcePath} imports the legacy aggregate daemon client`)
       }
     }
   }
 }
 for (const [path, maximumLines] of FILE_LINE_BUDGETS) {
+  checkLineBudget(path, maximumLines, 'composition')
+}
+for (const [path, maximumLines] of CAPABILITY_RUNTIME_LINE_BUDGETS) {
+  checkLineBudget(path, maximumLines, 'capability runtime')
+}
+
+async function checkLineBudget(path, maximumLines, label) {
   const source = await readFile(join(ROOT, path), 'utf8')
   const lineCount = source.endsWith('\n')
     ? source.split(/\r?\n/u).length - 1
     : source.split(/\r?\n/u).length
   if (lineCount > maximumLines) {
-    violations.push(`${path} has ${lineCount} lines; composition budget is ${maximumLines}`)
+    violations.push(`${path} has ${lineCount} lines; ${label} budget is ${maximumLines}`)
   }
 }
 
@@ -72,7 +91,9 @@ if (violations.length > 0) {
 } else {
   console.log(
     `Application architecture boundaries: ${CHECKED_ROOTS.length} roots clean; `
-    + `${FILE_LINE_BUDGETS.size} composition budgets clean`,
+    + `${FILE_LINE_BUDGETS.size} composition budgets clean; `
+    + `${CAPABILITY_RUNTIME_LINE_BUDGETS.size} capability runtime budgets clean; `
+    + `${CAPABILITY_BOUNDARY_GROUP_COUNT} capability runtime boundaries clean`,
   )
 }
 
@@ -89,7 +110,13 @@ async function sourceFiles(directory) {
 
 function importedSpecifiers(source) {
   const imports = []
-  const pattern = /(?:import|export)\s+(?:type\s+)?(?:[\s\S]*?\s+from\s+)?['"]([^'"]+)['"]/g
-  for (const match of source.matchAll(pattern)) imports.push(match[1])
+  const staticPattern = /(?:import|export)\s+(?:type\s+)?(?:[\s\S]*?\s+from\s+)?['"]([^'"]+)['"]/g
+  const dynamicPattern = /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g
+  for (const match of source.matchAll(staticPattern)) imports.push(match[1])
+  for (const match of source.matchAll(dynamicPattern)) imports.push(match[1])
   return imports
+}
+
+function portablePath(path) {
+  return path.split(sep).join('/')
 }

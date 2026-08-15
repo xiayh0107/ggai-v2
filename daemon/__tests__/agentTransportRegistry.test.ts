@@ -77,3 +77,19 @@ test('a removed provider cannot repopulate the probe cache from an old flight', 
   assert.deepEqual((await stale).map(({ id }) => id), ['slow'])
   assert.deepEqual(await registry.probe(), [])
 })
+
+test('registration snapshots provider identity for reliable unload', async () => {
+  const registry = new AgentTransportRegistry()
+  const provider = {
+    id: '@test/mutable',
+    agentIds: ['mutable'],
+    async probe() { return [] },
+    resolve() { return transport },
+  }
+  const release = registry.register(provider)
+  provider.id = '@test/changed-after-registration'
+  release()
+
+  assert.equal(registry.resolve('mutable'), null)
+  assert.deepEqual(await registry.probe(), [])
+})

@@ -5,7 +5,8 @@ import type { LegacyCanvasEdge, LegacyCanvasNode } from './legacyCanvasContext.j
 import type { ArtifactManifest } from './artifactManifest.js'
 import type { ProjectionPlan } from './projectionPlan.js'
 
-export type AgentTransportKind = 'acpx' | 'codex'
+/** Stable provider-defined identifier; concrete transports are not a core protocol enum. */
+export type AgentTransportKind = string
 
 export interface AgentDescriptor {
   id: string

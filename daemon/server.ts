@@ -245,6 +245,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
         server,
         sockets,
         runs,
+        registry,
         versions,
         canvas,
         projects,
@@ -1723,6 +1724,7 @@ async function closeDaemonServer(
   server: Server,
   sockets: Set<Socket>,
   runs: RunManager,
+  registry: AgentRegistry,
   versions: WorkspaceVersionManager,
   canvas: CanvasCommandStoreManager,
   projects: ProjectCatalog,
@@ -1742,6 +1744,7 @@ async function closeDaemonServer(
   try {
     // Runs emit their final durable close before versioning and leases close.
     await runs.close()
+    await registry.dispose()
     await serverClosed
     await versions.close()
     await projects.close()
