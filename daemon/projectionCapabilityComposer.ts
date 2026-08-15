@@ -24,6 +24,7 @@ const PROVENANCE_DIGEST_DOMAIN = 'ggai.projection-capability-provenance.v1'
 const DIGEST = /^[0-9a-f]{64}$/u
 const PLUGIN_ID = /^@?[A-Za-z0-9][A-Za-z0-9._:@/-]{0,159}$/u
 const PROVIDER_ID = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u
+const PROJECTION_CORE_PROVIDER_ID = '@ggai/projection-core'
 const BUILTIN_PROJECTION_IDS = new Set([
   ...BUILTIN_ARTIFACT_PLUGIN_IDS,
   ...BUILTIN_NODE_CONTEXT_PLUGIN_IDS,
@@ -39,7 +40,7 @@ export interface ProjectionCapabilitySourceRecord {
 
 export interface ProjectionCapabilityProvenanceSnapshot {
   readonly schemaVersion: typeof PROJECTION_CAPABILITY_PROVENANCE_SCHEMA_VERSION
-  readonly classificationDigest: string
+  readonly classification: ProjectionPluginCapabilitySnapshot
   readonly runtimeContributions: ProjectionContributionSnapshot
   readonly sources: readonly ProjectionCapabilitySourceRecord[]
   readonly digest: string
@@ -100,7 +101,7 @@ export class ProjectionCapabilityComposer {
         return {
           pluginId: plugin.id,
           kind: 'builtin',
-          providerId: '@ggai/projection-core',
+          providerId: PROJECTION_CORE_PROVIDER_ID,
         }
       }
       const runtimeRecord = runtimeById.get(plugin.id)
@@ -116,7 +117,7 @@ export class ProjectionCapabilityComposer {
     return Object.freeze({
       capabilities,
       provenance: createProjectionCapabilityProvenanceSnapshot({
-        classificationDigest: capabilities.digest,
+        classification: capabilities,
         runtimeContributions: runtime,
         sources,
       }),
@@ -125,13 +126,11 @@ export class ProjectionCapabilityComposer {
 }
 
 export function createProjectionCapabilityProvenanceSnapshot(input: {
-  classificationDigest: string
+  classification: ProjectionPluginCapabilitySnapshot
   runtimeContributions: ProjectionContributionSnapshot
   sources: readonly ProjectionCapabilitySourceRecord[]
 }): ProjectionCapabilityProvenanceSnapshot {
-  if (!DIGEST.test(input.classificationDigest)) {
-    throw new TypeError('projection classification digest is invalid')
-  }
+  const classification = requireCapabilitySnapshot(input.classification)
   const runtimeInspection = inspectProjectionContributionSnapshot(input.runtimeContributions)
   if (runtimeInspection.status !== 'valid') {
     throw new TypeError(
@@ -140,10 +139,10 @@ export function createProjectionCapabilityProvenanceSnapshot(input: {
   }
   const runtimeContributions = runtimeInspection.snapshot
   const sources = canonicalSources(input.sources)
-  assertRuntimeSources(runtimeContributions.contributions, sources)
+  assertSourceCoverage(classification, runtimeContributions, sources)
   const body = {
     schemaVersion: PROJECTION_CAPABILITY_PROVENANCE_SCHEMA_VERSION,
-    classificationDigest: input.classificationDigest,
+    classification,
     runtimeContributions,
     sources,
   }
@@ -162,18 +161,18 @@ export function inspectProjectionCapabilityProvenanceSnapshot(
   try {
     if (!isRecord(value) || !hasExactKeys(value, [
       'schemaVersion',
-      'classificationDigest',
+      'classification',
       'runtimeContributions',
       'sources',
       'digest',
     ]) || value.schemaVersion !== PROJECTION_CAPABILITY_PROVENANCE_SCHEMA_VERSION
-      || typeof value.classificationDigest !== 'string'
+      || !isRecord(value.classification)
       || !Array.isArray(value.sources)
       || typeof value.digest !== 'string') {
       throw new TypeError('projection capability provenance envelope is invalid')
     }
     const expected = createProjectionCapabilityProvenanceSnapshot({
-      classificationDigest: value.classificationDigest,
+      classification: value.classification as unknown as ProjectionPluginCapabilitySnapshot,
       runtimeContributions: value.runtimeContributions as ProjectionContributionSnapshot,
       sources: value.sources as ProjectionCapabilitySourceRecord[],
     })
@@ -274,18 +273,47 @@ function canonicalSources(
   return [...byId.values()].sort((left, right) => left.pluginId.localeCompare(right.pluginId))
 }
 
-function assertRuntimeSources(
-  runtime: readonly ProjectionContributionRecord[],
+function assertSourceCoverage(
+  classification: ProjectionPluginCapabilitySnapshot,
+  runtime: ProjectionContributionSnapshot,
   sources: readonly ProjectionCapabilitySourceRecord[],
 ): void {
-  const byId = new Map(sources.map((source) => [source.pluginId, source]))
-  for (const contribution of runtime) {
-    const source = byId.get(contribution.id)
-    if (!source
-      || source.kind !== 'runtime'
-      || source.providerId !== contribution.providerId) {
+  const pluginsById = new Map(classification.plugins.map((plugin) => [plugin.id, plugin]))
+  const runtimeById = new Map(runtime.contributions.map((record) => [record.id, record]))
+  const sourcesById = new Map(sources.map((source) => [source.pluginId, source]))
+  if (pluginsById.size !== sourcesById.size) {
+    throw new TypeError('projection capability provenance does not cover the final classification')
+  }
+
+  for (const plugin of classification.plugins) {
+    const source = sourcesById.get(plugin.id)
+    if (!source) {
+      throw new TypeError(`projection capability source is missing: ${plugin.id}`)
+    }
+    const runtimeRecord = runtimeById.get(plugin.id)
+    if (BUILTIN_PROJECTION_IDS.has(plugin.id)) {
+      if (runtimeRecord
+        || source.kind !== 'builtin'
+        || source.providerId !== PROJECTION_CORE_PROVIDER_ID) {
+        throw new TypeError(`builtin projection capability provenance is invalid: ${plugin.id}`)
+      }
+      continue
+    }
+    if (runtimeRecord) {
+      if (source.kind !== 'runtime' || source.providerId !== runtimeRecord.providerId) {
+        throw new TypeError(`Runtime projection capability provenance is invalid: ${plugin.id}`)
+      }
+      continue
+    }
+    if (source.kind !== 'community' || source.providerId !== null) {
+      throw new TypeError(`community projection capability provenance is invalid: ${plugin.id}`)
+    }
+  }
+
+  for (const contribution of runtime.contributions) {
+    if (!pluginsById.has(contribution.id)) {
       throw new TypeError(
-        `Runtime projection contribution lacks matching provenance: ${contribution.id}`,
+        `Runtime projection contribution is absent from final classification: ${contribution.id}`,
       )
     }
   }
