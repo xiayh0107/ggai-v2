@@ -43,7 +43,17 @@ jobs:
         run: npm run test:startup
 
       - name: Run daemon tests
-        run: npm run test:daemon
+        shell: bash
+        run: |
+          set +e
+          npm run test:daemon > daemon-test.log 2>&1
+          status=$?
+          if [[ $status -ne 0 ]]; then
+            echo "::group::Daemon test failure tail"
+            tail -n 240 daemon-test.log
+            echo "::endgroup::"
+          fi
+          exit $status
 
       - name: Run UI regression tests
         run: npm run test:ui
