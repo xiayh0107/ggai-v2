@@ -25,7 +25,17 @@ export function createCodexAgentTransportPlugin(
     agentIds: ['codex'],
     async probe() {
       const version = await runProbe(command, ['--version'])
-      if (!version.found) return []
+      if (!version.found) {
+        return [{
+          id: 'codex',
+          label: 'Codex',
+          transport: 'codex' as const,
+          available: false,
+          authStatus: 'not-applicable' as const,
+          detail: 'Codex is not installed',
+          models: [],
+        }]
+      }
       const [login, execHelp, resumeHelp] = version.code === 0
         ? await Promise.all([
             runProbe(command, ['login', 'status']),

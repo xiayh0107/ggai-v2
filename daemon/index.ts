@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import process from 'node:process'
 import { AgentRegistry } from './registry.js'
+import { inspectRuntimeDoctor } from './runtimeDoctor.js'
 import { createDaemonServer } from './server.js'
 import { DAEMON_HELP, parseDaemonConfig } from './startupOptions.js'
 
@@ -16,8 +17,20 @@ async function main(): Promise<void> {
     codexCommand: config.codexCommand,
     acpxCommand: config.acpxCommand,
   })
-  const daemon = createDaemonServer({ ...config, registry })
+  if (config.operation === 'dump-runtime') {
+    console.log(JSON.stringify(registry.runtimeDiagnostics(), null, 2))
+    await registry.dispose()
+    return
+  }
+  if (config.operation === 'runtime-doctor') {
+    const report = await inspectRuntimeDoctor(registry)
+    console.log(JSON.stringify(report, null, 2))
+    await registry.dispose()
+    if (report.status !== 'ok') process.exitCode = 1
+    return
+  }
 
+  const daemon = createDaemonServer({ ...config, registry })
   daemon.server.listen(config.port, config.host, () => {
     console.log(`GGAI daemon listening on http://${config.host}:${config.port}`)
     console.log(`Project root: ${config.projectRoot}`)

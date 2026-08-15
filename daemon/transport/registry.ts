@@ -14,6 +14,11 @@ export interface AgentTransportProvider {
   resolve(agentId: string): AgentProcessTransport | null
 }
 
+export interface AgentTransportProviderSnapshot {
+  readonly id: string
+  readonly agentIds: readonly string[]
+}
+
 interface RegisteredProvider {
   readonly id: string
   readonly provider: AgentTransportProvider
@@ -65,6 +70,15 @@ export class AgentTransportRegistry {
       }
       this.#invalidateProbe()
     }
+  }
+
+  snapshot(): AgentTransportProviderSnapshot[] {
+    return [...this.#providers.values()]
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map(({ id, agentIds }) => Object.freeze({
+        id,
+        agentIds: Object.freeze([...agentIds].sort((left, right) => left.localeCompare(right))),
+      }))
   }
 
   async probe(): Promise<AgentDescriptor[]> {

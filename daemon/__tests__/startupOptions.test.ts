@@ -8,6 +8,7 @@ test('production daemon startup always exposes Canvas without a model selector',
   })
 
   assert.ok(config)
+  assert.equal(config.operation, 'serve')
   assert.equal('canvasModel' in config, false)
   assert.equal(config.projectRoot, '/tmp/ggai-v2-startup')
   assert.doesNotMatch(DAEMON_HELP, /V1|rollback|canvas-model/u)
@@ -47,4 +48,15 @@ test('daemon startup options remain strict and normalize repeated values', () =>
   assert.equal(config.codexCommand, '/opt/codex')
   assert.equal(parseDaemonConfig(['--help']), null)
   assert.throws(() => parseDaemonConfig(['--port', '0']), /invalid port/u)
+})
+
+test('runtime diagnostic operations are explicit and mutually exclusive', () => {
+  assert.equal(parseDaemonConfig(['--dump-runtime'])?.operation, 'dump-runtime')
+  assert.equal(parseDaemonConfig(['--runtime-doctor'])?.operation, 'runtime-doctor')
+  assert.throws(
+    () => parseDaemonConfig(['--dump-runtime', '--runtime-doctor']),
+    /cannot be combined/u,
+  )
+  assert.match(DAEMON_HELP, /--dump-runtime/u)
+  assert.match(DAEMON_HELP, /--runtime-doctor/u)
 })
