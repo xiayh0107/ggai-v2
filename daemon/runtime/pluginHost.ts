@@ -146,8 +146,7 @@ export class CapabilityPluginHost {
   }
 
   #beginMount(manifest: CapabilityPluginManifest): PendingMount {
-    this.#assertManifest(manifest)
-    const pinnedManifest = Object.freeze({ ...manifest })
+    const pinnedManifest = inspectCapabilityPluginManifest(manifest)
     const { id } = pinnedManifest
     if (this.#effects.disposed) throw new Error('capability plugin host is disposed')
     if (this.#plugins.has(id) || this.#mounting.has(id)) {
@@ -218,16 +217,19 @@ export class CapabilityPluginHost {
       this.#eventFailures.splice(0, this.#eventFailures.length - MAX_RUNTIME_EVENT_FAILURES)
     }
   }
+}
 
-  #assertManifest(manifest: CapabilityPluginManifest): void {
-    if (!PLUGIN_ID.test(manifest.id)) throw new TypeError(`invalid plugin id: ${manifest.id}`)
-    if (!VERSION.test(manifest.version)) {
-      throw new TypeError(`invalid plugin version for ${manifest.id}: ${manifest.version}`)
-    }
-    if (manifest.apiVersion !== GGAI_RUNTIME_API_VERSION) {
-      throw new TypeError(
-        `unsupported plugin apiVersion for ${manifest.id}: ${manifest.apiVersion}`,
-      )
-    }
+export function inspectCapabilityPluginManifest(
+  manifest: CapabilityPluginManifest,
+): CapabilityPluginManifest {
+  if (!PLUGIN_ID.test(manifest.id)) throw new TypeError(`invalid plugin id: ${manifest.id}`)
+  if (!VERSION.test(manifest.version)) {
+    throw new TypeError(`invalid plugin version for ${manifest.id}: ${manifest.version}`)
   }
+  if (manifest.apiVersion !== GGAI_RUNTIME_API_VERSION) {
+    throw new TypeError(
+      `unsupported plugin apiVersion for ${manifest.id}: ${manifest.apiVersion}`,
+    )
+  }
+  return Object.freeze({ ...manifest })
 }
