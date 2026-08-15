@@ -6,6 +6,7 @@ import test from 'node:test'
 import { ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION } from '../../src/plugins/artifactContracts.js'
 import {
   ProjectionCapabilityComposer,
+  createProjectionCapabilityProvenanceSnapshot,
   inspectProjectionCapabilityProvenanceSnapshot,
 } from '../projectionCapabilityComposer.js'
 import { ProjectionCapabilityProvenanceStore } from '../projectionProvenanceStore.js'
@@ -43,7 +44,7 @@ test('composer activates Runtime data contributions and records source provenanc
   assert.equal(first.capabilities.plugins.some(({ id }) => id === '@fixture/report'), true)
   assert.equal(first.capabilities.plugins.some(({ id }) => id === '@fixture/note'), true)
   assert.deepEqual(first, second)
-  assert.equal(first.provenance.classificationDigest, first.capabilities.digest)
+  assert.deepEqual(first.provenance.classification, first.capabilities)
   assert.equal(first.provenance.sources.find(({ pluginId }) =>
     pluginId === '@fixture/report')?.kind, 'runtime')
   assert.equal(first.provenance.sources.find(({ pluginId }) =>
@@ -72,6 +73,38 @@ test('Runtime and community declarations cannot silently disagree on one capabil
   )
 })
 
+test('provenance must cover the complete final classification exactly once', () => {
+  const runtime = new ProjectionContributionRegistry()
+  runtime.register('@fixture/report-provider', [{
+    id: '@fixture/report',
+    artifactClaims: [REPORT_RULE],
+  }])
+  const composition = new ProjectionCapabilityComposer(runtime).compose(undefined)
+  const incompleteSources = composition.provenance.sources.filter(({ pluginId }) =>
+    pluginId !== '@fixture/report')
+  assert.throws(
+    () => createProjectionCapabilityProvenanceSnapshot({
+      classification: composition.capabilities,
+      runtimeContributions: composition.provenance.runtimeContributions,
+      sources: incompleteSources,
+    }),
+    /does not cover|source is missing/u,
+  )
+
+  const forgedSources = composition.provenance.sources.map((source) =>
+    source.pluginId === '@fixture/report'
+      ? { ...source, providerId: '@fixture/other-provider' }
+      : source)
+  assert.throws(
+    () => createProjectionCapabilityProvenanceSnapshot({
+      classification: composition.capabilities,
+      runtimeContributions: composition.provenance.runtimeContributions,
+      sources: forgedSources,
+    }),
+    /Runtime projection capability provenance is invalid/u,
+  )
+})
+
 test('projection provenance is content-addressed and independently revalidated', async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-projection-provenance-')))
   t.after(() => rm(root, { recursive: true, force: true }))
@@ -85,6 +118,7 @@ test('projection provenance is content-addressed and independently revalidated',
 
   const pinned = await store.pin(composition.provenance)
   assert.equal(pinned.digest, composition.provenance.digest)
+  assert.deepEqual(pinned.classification, composition.capabilities)
   assert.deepEqual(await store.get(pinned.digest), pinned)
   assert.deepEqual(await store.pin(composition.provenance), pinned)
 })
