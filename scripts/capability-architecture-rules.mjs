@@ -30,7 +30,10 @@ const CONCRETE_AGENT_TRANSPORT_MODULES = new Set([
   'daemon/transport/acpx',
   'daemon/transport/codex',
 ])
-const CAPABILITY_COMPOSITION_ROOT = 'daemon/agentRuntime.ts'
+const CAPABILITY_COMPOSITION_ROOTS = new Set([
+  'daemon/agentRuntime.ts',
+  'daemon/application.ts',
+])
 const PLUGIN_HOST_MODULE = 'daemon/runtime/pluginHost'
 
 export function capabilityBoundaryViolations(sourcePath, imports) {
@@ -129,16 +132,17 @@ function compositionOwnershipViolations(sourcePath, imports) {
     const resolved = resolvedProjectModule(sourcePath, specifier)
     if (!resolved) continue
     const stem = stripModuleExtension(resolved)
-    if (stem.startsWith('daemon/plugins/') && sourcePath !== CAPABILITY_COMPOSITION_ROOT) {
+    if (stem.startsWith('daemon/plugins/') && !CAPABILITY_COMPOSITION_ROOTS.has(sourcePath)) {
       violations.push(
-        `${sourcePath} imports runtime plugin ${specifier}; only ${CAPABILITY_COMPOSITION_ROOT} composes plugins`,
+        `${sourcePath} imports runtime plugin ${specifier}; only composition roots may mount plugins`,
       )
     }
     if (
       stem === PLUGIN_HOST_MODULE
       && !sourcePath.startsWith('daemon/runtime/')
       && !sourcePath.startsWith('daemon/plugins/')
-      && sourcePath !== CAPABILITY_COMPOSITION_ROOT
+      && !CAPABILITY_COMPOSITION_ROOTS.has(sourcePath)
+      && sourcePath !== 'daemon/capabilityScopes.ts'
     ) {
       violations.push(
         `${sourcePath} imports PluginHost; kernel consumers must depend on capability services`,

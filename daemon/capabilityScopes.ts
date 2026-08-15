@@ -6,6 +6,10 @@ import {
 } from './capabilityReceipt.js'
 import type { CapabilityProfileSnapshot } from './runtime/composition.js'
 import {
+  CapabilityPluginHost,
+  type SynchronousCapabilityPlugin,
+} from './runtime/pluginHost.js'
+import {
   defineService,
   type ServiceProviderSnapshot,
   ServiceScope,
@@ -90,6 +94,7 @@ export class CapabilityExecutionScopes {
 export class WorkspaceCapabilityScope {
   readonly projectDir: string
   readonly services: ServiceScope
+  readonly #host: CapabilityPluginHost
   readonly #runs = new Map<string, RunCapabilityScope>()
   readonly #onDispose: () => void
   #disposePromise: Promise<void> | null = null
@@ -98,11 +103,17 @@ export class WorkspaceCapabilityScope {
     this.projectDir = projectDir
     this.#onDispose = onDispose
     this.services = parent.fork(`workspace:${projectDir}`)
+    this.#host = new CapabilityPluginHost(this.services)
     this.services.provide(
       WORKSPACE_CAPABILITY_IDENTITY_SERVICE,
       Object.freeze({ projectDir }),
       '@ggai/workspace-scope',
     )
+  }
+
+  mountSync(plugin: SynchronousCapabilityPlugin): () => void | Promise<void> {
+    this.#assertOpen()
+    return this.#host.mountSync(plugin)
   }
 
   run(runId: string): RunCapabilityScope {
@@ -136,7 +147,7 @@ export class WorkspaceCapabilityScope {
     const runs = [...this.#runs.values()].reverse()
     this.#runs.clear()
     for (const run of runs) await run.dispose()
-    await this.services.dispose()
+    await this.#host.dispose()
     this.#onDispose()
   }
 
