@@ -1,7 +1,10 @@
 import type { Server } from 'node:http'
 import { CapabilityExecutionScopes } from './capabilityScopes.js'
 import { createWorkspaceSkillResolverPlugin } from './plugins/skillResolver/workspace.js'
-import { ProjectionContributionRegistry, PROJECTION_CONTRIBUTION_REGISTRY_SERVICE } from './projectionContributions.js'
+import {
+  ProjectionContributionRegistry,
+  PROJECTION_CONTRIBUTION_REGISTRY_SERVICE,
+} from './projectionContributions.js'
 import { AgentRegistry } from './registry.js'
 import { inspectRuntimeDoctor, type RuntimeDoctorReport } from './runtimeDoctor.js'
 import { createDaemonServer, type DaemonServer } from './server.js'
@@ -89,6 +92,15 @@ export class DaemonApplication {
 
   async #closeApplication(): Promise<void> {
     const errors: unknown[] = []
+    if (this.#daemon) {
+      try {
+        // Run close events release Run scopes before the Workspace/Application
+        // capability tree is disposed.
+        await this.#daemon.runs.close()
+      } catch (error) {
+        errors.push(error)
+      }
+    }
     try {
       await this.scopes.dispose()
     } catch (error) {
@@ -110,6 +122,13 @@ export class DaemonApplication {
       ...this.config,
       registry: this.registry,
       skillAssetCatalog: this.skillAssets,
+      runCapabilityReceipts: {
+        projectRoot: this.config.projectRoot,
+        scopes: this.scopes,
+        profile: this.registry.runtimeProfile,
+        agentProvider: (agentId) => this.registry.snapshot()
+          .find((provider) => provider.agentIds.includes(agentId))?.id,
+      },
     })
     return this.#daemon
   }
