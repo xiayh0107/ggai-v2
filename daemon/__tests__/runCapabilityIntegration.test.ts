@@ -13,7 +13,10 @@ import {
 } from '../runCapabilityIntegration.js'
 import { CAPABILITY_PROFILE_SCHEMA_VERSION } from '../runtime/composition.js'
 import { ServiceScope } from '../runtime/services.js'
-import { EMPTY_SKILL_CAPABILITY_DIGEST, type RunExecutionRequest } from '../taskRunTypes.js'
+import {
+  EMPTY_SKILL_CAPABILITY_DIGEST,
+  type ResolvedTaskRunRequest,
+} from '../taskRunTypes.js'
 import type { RunCreationOptions } from '../runs.js'
 
 const profile = {
@@ -134,7 +137,7 @@ test('missing semantic provider fails before the wrapped Run is accepted', async
   assert.equal(scopes.snapshot().workspaces[0]?.runs.length, 0)
 })
 
-function resolvedTaskRequest(runId: string): RunExecutionRequest {
+function resolvedTaskRequest(runId: string): ResolvedTaskRunRequest {
   return {
     schemaVersion: 2,
     runId,
@@ -146,14 +149,22 @@ function resolvedTaskRequest(runId: string): RunExecutionRequest {
     attachments: [],
     materializationPolicy: 'auto',
     projectDir: '.',
-    canvasDocument: { schemaVersion: 2, revision: 1, tasks: [], nodes: [], edges: [], collections: [] },
+    canvasDocument: {
+      schemaVersion: 2,
+      tasks: [],
+      nodes: [],
+      edges: [],
+      collections: [],
+      receipts: [],
+      everCreated: false,
+    },
     resolvedArtifactAttachments: [],
     resolvedNodeAttachments: [],
     resolvedSkills: [],
     skillCapabilityDigest: EMPTY_SKILL_CAPABILITY_DIGEST,
     pluginCapabilities: BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
     automationMode: 'confirm',
-  } as RunExecutionRequest
+  }
 }
 
 function summary(runId: string, agentId: string): RunSummary {
