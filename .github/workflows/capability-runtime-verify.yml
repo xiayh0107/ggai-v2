@@ -54,8 +54,11 @@ jobs:
           npm run test:daemon > daemon-test.log 2>&1
           status=$?
           if [[ $status -ne 0 ]]; then
-            echo "::group::Daemon test failure tail"
-            tail -n 240 daemon-test.log
+            echo "::group::Daemon failing tests and stacks"
+            grep -n -B 20 -A 45 '^not ok' daemon-test.log || true
+            echo "::endgroup::"
+            echo "::group::Daemon test summary tail"
+            tail -n 120 daemon-test.log
             echo "::endgroup::"
           fi
           exit $status
