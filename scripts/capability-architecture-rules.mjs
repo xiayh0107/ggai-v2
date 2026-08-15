@@ -1,6 +1,6 @@
 import { posix } from 'node:path'
 
-export const CAPABILITY_BOUNDARY_GROUP_COUNT = 5
+export const CAPABILITY_BOUNDARY_GROUP_COUNT = 6
 
 const UI_PACKAGES = /^(?:react(?:-dom)?|lucide-react)(?:\/|$)/u
 const TRUSTED_KERNEL_MODULES = new Set([
@@ -19,6 +19,7 @@ const TRUSTED_KERNEL_MODULES = new Set([
   'daemon/runLogs',
   'daemon/runs',
   'daemon/server',
+  'daemon/serverLegacy',
   'daemon/skillAssets',
   'daemon/taskSessions',
   'daemon/workspaceVersioning',
@@ -43,6 +44,9 @@ export function capabilityBoundaryViolations(sourcePath, imports) {
   }
   if (path === 'daemon/transport/registry.ts') {
     violations.push(...transportRegistryViolations(path, imports))
+  }
+  if (path.startsWith('daemon/http/')) {
+    violations.push(...httpAdapterViolations(path, imports))
   }
   violations.push(...compositionOwnershipViolations(path, imports))
   return violations
@@ -97,6 +101,22 @@ function transportRegistryViolations(sourcePath, imports) {
     const stem = stripModuleExtension(resolved)
     if (stem.startsWith('daemon/plugins/') || CONCRETE_AGENT_TRANSPORT_MODULES.has(stem)) {
       violations.push(`${sourcePath} imports concrete transport/plugin module ${specifier}`)
+    }
+  }
+  return violations
+}
+
+function httpAdapterViolations(sourcePath, imports) {
+  const violations = []
+  for (const specifier of imports) {
+    if (specifier.startsWith('@/') || UI_PACKAGES.test(specifier)) {
+      violations.push(`${sourcePath} imports browser/UI module ${specifier}`)
+    }
+    const resolved = resolvedProjectModule(sourcePath, specifier)
+    if (!resolved) continue
+    const stem = stripModuleExtension(resolved)
+    if (stem === PLUGIN_HOST_MODULE || stem.startsWith('daemon/plugins/')) {
+      violations.push(`${sourcePath} imports runtime composition implementation ${specifier}`)
     }
   }
   return violations
