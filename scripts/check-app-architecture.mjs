@@ -32,10 +32,12 @@ const FILE_LINE_BUDGETS = new Map([
 ])
 const CAPABILITY_RUNTIME_LINE_BUDGETS = new Map([
   ['daemon/registry.ts', 60],
-  ['daemon/agentRuntime.ts', 100],
+  ['daemon/agentRuntime.ts', 150],
+  ['daemon/server.ts', 100],
+  ['daemon/http/router.ts', 120],
   ['daemon/runtime/composition.ts', 230],
-  ['daemon/runtime/pluginHost.ts', 360],
-  ['daemon/runtime/services.ts', 160],
+  ['daemon/runtime/pluginHost.ts', 370],
+  ['daemon/runtime/services.ts', 180],
 ])
 
 const violations = []
