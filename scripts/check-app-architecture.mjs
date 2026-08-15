@@ -5,6 +5,10 @@ import {
   CAPABILITY_BOUNDARY_GROUP_COUNT,
   capabilityBoundaryViolations,
 } from './capability-architecture-rules.mjs'
+import {
+  PROVIDER_CONFORMANCE_GATE_COUNT,
+  providerConformanceViolations,
+} from './provider-conformance-rules.mjs'
 
 const ROOT = process.cwd()
 const CHECKED_ROOTS = [
@@ -76,6 +80,15 @@ for (const [path, maximumLines] of CAPABILITY_RUNTIME_LINE_BUDGETS) {
   checkLineBudget(path, maximumLines, 'capability runtime')
 }
 
+const pluginFamilies = (await readdir(join(ROOT, 'daemon/plugins'), { withFileTypes: true }))
+  .filter((entry) => entry.isDirectory())
+  .map((entry) => entry.name)
+const providerConformanceSource = await readFile(
+  join(ROOT, 'daemon/__tests__/providerConformance.test.ts'),
+  'utf8',
+)
+violations.push(...providerConformanceViolations(pluginFamilies, providerConformanceSource))
+
 async function checkLineBudget(path, maximumLines, label) {
   const source = await readFile(join(ROOT, path), 'utf8')
   const lineCount = source.endsWith('\n')
@@ -95,7 +108,8 @@ if (violations.length > 0) {
     `Application architecture boundaries: ${CHECKED_ROOTS.length} roots clean; `
     + `${FILE_LINE_BUDGETS.size} composition budgets clean; `
     + `${CAPABILITY_RUNTIME_LINE_BUDGETS.size} capability runtime budgets clean; `
-    + `${CAPABILITY_BOUNDARY_GROUP_COUNT} capability runtime boundaries clean`,
+    + `${CAPABILITY_BOUNDARY_GROUP_COUNT} capability runtime boundaries clean; `
+    + `${PROVIDER_CONFORMANCE_GATE_COUNT} provider conformance gate clean`,
   )
 }
 
