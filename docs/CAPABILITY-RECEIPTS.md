@@ -33,7 +33,23 @@ capability 都会 canonicalize 后再计算 SHA-256；不同注册顺序产生�
 `O_NOFOLLOW`、canonical project root 和完整 digest 复验。Receipt 字节一旦写入，不随 provider 热更新
 改变。
 
-`RunCapabilityScope.acceptCapabilities()` 已能从实际 scope 生成 receipt。后续 RunManager 接线只需要
-在 acceptance lease 内调用该方法并 `pin()`，而不是重新从全局 registry 推断历史能力。
+## Run 接线
 
-该机制不修改 Canvas UI、样式、交互或 Node 持久模型。
+`installRunCapabilityReceiptIntegration()` 装饰现有 `RunManager.create()` 的 reservation validation
+seam。它不向 Runtime Plugin 暴露 RunManager：
+
+1. RunManager 完成 runId、Task lease 和请求身份预留；
+2. validation seam 创建真实 Workspace → Run scope；
+3. 从固定 Profile、有效 service owner 和本次语义 digest 生成 receipt；
+4. receipt 在 transport 启动前固定到项目内 durable store；
+5. Run close 事件释放 Run scope；daemon shutdown 先排空 Run，再销毁 Workspace/Application scope。
+
+当前语义记录包括所选 Agent、Node projection snapshot 和 Run skill set。后续 Skill Resolver 与
+Projection provenance 接线只需替换对应 provider/digest 来源，不改变 Receipt envelope。
+
+如果 receipt 创建或 provider 解析失败，Run 在进入 transport 前 fail closed。reservation 后发生的
+其他接受失败可能留下一个不可达的 immutable receipt；它不会出现在 Run 历史或 UI，后续 GC 应按
+Run log 可达性处理，不能将孤立 receipt 当作已执行事实。
+
+该机制不修改 Canvas UI、样式、交互或 Node 持久模型。未来“运行信息/复现信息”应通过单独的
+友好 read model 读取 receipt，不直接向用户显示原始 digest 或 provider id。
