@@ -38,9 +38,12 @@ test('bounded HTTP routes preserve health and expose runtime diagnostics', async
   assert.equal((runtime.body as { profile?: { id?: string } }).profile?.id,
     '@ggai/default-agent-runtime')
 
-  const delegated = await getJson(port, '/agents')
+  const delegated = await getJson(port, '/projects')
   assert.equal(delegated.status, 200)
-  assert.ok(Array.isArray((delegated.body as { agents?: unknown[] }).agents))
+  assert.deepEqual(delegated.body, {
+    schemaVersion: 1,
+    projects: [],
+  })
 })
 
 test('new routes preserve the localhost CORS boundary', async (t) => {
