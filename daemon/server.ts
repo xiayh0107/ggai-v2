@@ -18,6 +18,7 @@ import {
   installRunCapabilityReceiptIntegration,
   type RunCapabilityReceiptIntegrationOptions,
 } from './runCapabilityIntegration.js'
+import { closeWithRunCapabilityIntegration } from './runCapabilityLifecycle.js'
 import {
   createDaemonServer as createLegacyDaemonServer,
   type DaemonServer,
@@ -86,37 +87,11 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     ...daemon,
     close() {
       lifecycle.closing = true
-      closePromise ??= closeWithCapabilityReceipts(
+      closePromise ??= closeWithRunCapabilityIntegration(
         closeLegacy,
         uninstallRunCapabilityReceipts,
       )
       return closePromise
     },
   }
-}
-
-async function closeWithCapabilityReceipts(
-  closeLegacy: () => Promise<void>,
-  uninstall: () => void | Promise<void>,
-): Promise<void> {
-  let closeError: unknown
-  try {
-    await closeLegacy()
-  } catch (error) {
-    closeError = error
-  }
-  let uninstallError: unknown
-  try {
-    await uninstall()
-  } catch (error) {
-    uninstallError = error
-  }
-  if (closeError !== undefined && uninstallError !== undefined) {
-    throw new AggregateError(
-      [closeError, uninstallError],
-      'daemon close and Run capability integration cleanup failed',
-    )
-  }
-  if (closeError !== undefined) throw closeError
-  if (uninstallError !== undefined) throw uninstallError
 }
