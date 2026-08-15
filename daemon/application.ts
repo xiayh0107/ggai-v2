@@ -8,7 +8,11 @@ import {
 import { AgentRegistry } from './registry.js'
 import { inspectRuntimeDoctor, type RuntimeDoctorReport } from './runtimeDoctor.js'
 import { createDaemonServer, type DaemonServer } from './server.js'
-import { SKILL_CATALOG_READER_SERVICE } from './skills/contracts.js'
+import { CapabilitySkillAssetCatalog } from './skills/capabilityCatalog.js'
+import {
+  SKILL_CATALOG_READER_SERVICE,
+  SKILL_RESOLVER_SERVICE,
+} from './skills/contracts.js'
 import { SkillAssetCatalog } from './skillAssets.js'
 import type { DaemonConfig } from './startupOptions.js'
 
@@ -17,6 +21,7 @@ export class DaemonApplication {
   readonly registry: AgentRegistry
   readonly scopes: CapabilityExecutionScopes
   readonly skillAssets: SkillAssetCatalog
+  readonly runSkillAssets: CapabilitySkillAssetCatalog
   readonly projectionContributions: ProjectionContributionRegistry
   #daemon: DaemonServer | null = null
   #listenPromise: Promise<void> | null = null
@@ -45,6 +50,10 @@ export class DaemonApplication {
       '@ggai/projection-contribution-authority',
     )
     workspace.mountSync(createWorkspaceSkillResolverPlugin())
+    this.runSkillAssets = new CapabilitySkillAssetCatalog(
+      this.skillAssets,
+      workspace.services.require(SKILL_RESOLVER_SERVICE),
+    )
   }
 
   get server(): Server {
@@ -121,13 +130,16 @@ export class DaemonApplication {
     this.#daemon ??= createDaemonServer({
       ...this.config,
       registry: this.registry,
-      skillAssetCatalog: this.skillAssets,
+      // The compatibility facade delegates mutation and binding reads to the
+      // Core catalog, while immutable Run resolution crosses SKILL_RESOLVER_SERVICE.
+      skillAssetCatalog: this.runSkillAssets,
       runCapabilityReceipts: {
         projectRoot: this.config.projectRoot,
         scopes: this.scopes,
         profile: this.registry.runtimeProfile,
         agentProvider: (agentId) => this.registry.snapshot()
           .find((provider) => provider.agentIds.includes(agentId))?.id,
+        skillProvider: '@ggai/workspace-skill-resolver',
       },
     })
     return this.#daemon
