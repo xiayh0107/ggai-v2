@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 import process from 'node:process'
-import { AgentRegistry } from './registry.js'
-import { inspectRuntimeDoctor } from './runtimeDoctor.js'
-import { createDaemonServer } from './server.js'
+import { DaemonApplication } from './application.js'
 import { DAEMON_HELP, parseDaemonConfig } from './startupOptions.js'
 
 async function main(): Promise<void> {
@@ -11,37 +9,30 @@ async function main(): Promise<void> {
     console.log(DAEMON_HELP)
     return
   }
-  const registry = new AgentRegistry({
-    acpxAgents: config.acpxAgents,
-    acpxApprovalMode: config.acpxApprovalMode,
-    codexCommand: config.codexCommand,
-    acpxCommand: config.acpxCommand,
-  })
+  const application = new DaemonApplication(config)
   if (config.operation === 'dump-runtime') {
-    console.log(JSON.stringify(registry.runtimeDiagnostics(), null, 2))
-    await registry.dispose()
+    console.log(JSON.stringify(application.runtimeDiagnostics(), null, 2))
+    await application.close()
     return
   }
   if (config.operation === 'runtime-doctor') {
-    const report = await inspectRuntimeDoctor(registry)
+    const report = await application.runtimeDoctor()
     console.log(JSON.stringify(report, null, 2))
-    await registry.dispose()
+    await application.close()
     if (report.status !== 'ok') process.exitCode = 1
     return
   }
 
-  const daemon = createDaemonServer({ ...config, registry })
-  daemon.server.listen(config.port, config.host, () => {
-    console.log(`GGAI daemon listening on http://${config.host}:${config.port}`)
-    console.log(`Project root: ${config.projectRoot}`)
-    console.log('Canvas: ready')
-  })
+  await application.listen()
+  console.log(`GGAI daemon listening on http://${config.host}:${config.port}`)
+  console.log(`Project root: ${config.projectRoot}`)
+  console.log('Canvas: ready')
 
   let closing = false
   const shutdown = async () => {
     if (closing) return
     closing = true
-    await daemon.close()
+    await application.close()
   }
   process.once('SIGINT', () => void shutdown().finally(() => process.exit(0)))
   process.once('SIGTERM', () => void shutdown().finally(() => process.exit(0)))
