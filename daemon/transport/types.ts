@@ -44,7 +44,7 @@ export interface AgentTransportCatalog extends AgentTransportResolver {
 }
 
 /** @deprecated Prefer AgentTransportCatalog. */
-export interface AgentRegistryTransport extends AgentTransportCatalog {}
+export type AgentRegistryTransport = AgentTransportCatalog
 
 export class TransportError extends Error {
   readonly code: string
