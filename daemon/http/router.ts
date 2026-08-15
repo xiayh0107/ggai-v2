@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AgentRegistry } from '../registry.js'
+import type { RunManager } from '../runs.js'
 
 const DEFAULT_BROWSER_ORIGINS = new Set([
   'http://localhost:3000',
@@ -10,6 +11,7 @@ const DEFAULT_BROWSER_ORIGINS = new Set([
 export interface HttpRouteContext {
   readonly projectRoot: string
   readonly registry: AgentRegistry
+  readonly runs: Pick<RunManager, 'getProjectionPlanRecord'>
   readonly allowedOrigins: Set<string>
   readonly lifecycle: { closing: boolean }
 }
