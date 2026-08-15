@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { ArtifactClaimRegistration } from '../src/plugins/artifactContracts.js'
 import {
   ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION,
+  BUILTIN_ARTIFACT_PLUGIN_IDS,
 } from '../src/plugins/artifactContracts.js'
 import { BUILTIN_NODE_CONTEXT_PLUGIN_IDS } from '../src/plugins/contextContracts.js'
 import {
@@ -23,6 +24,10 @@ const PROVENANCE_DIGEST_DOMAIN = 'ggai.projection-capability-provenance.v1'
 const DIGEST = /^[0-9a-f]{64}$/u
 const PLUGIN_ID = /^@?[A-Za-z0-9][A-Za-z0-9._:@/-]{0,159}$/u
 const PROVIDER_ID = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u
+const BUILTIN_PROJECTION_IDS = new Set([
+  ...BUILTIN_ARTIFACT_PLUGIN_IDS,
+  ...BUILTIN_NODE_CONTEXT_PLUGIN_IDS,
+])
 
 export type ProjectionCapabilitySourceKind = 'builtin' | 'runtime' | 'community'
 
@@ -82,7 +87,7 @@ export class ProjectionCapabilityComposer {
     }
 
     const community = base.plugins
-      .filter((plugin) => !BUILTIN_NODE_CONTEXT_PLUGIN_IDS.has(plugin.id))
+      .filter((plugin) => !BUILTIN_PROJECTION_IDS.has(plugin.id))
       .filter((plugin) => !runtimeById.has(plugin.id))
       .map(projectionPluginToRegistration)
     const runtimeRegistrations = runtime.contributions.map(stripProvider)
@@ -91,7 +96,7 @@ export class ProjectionCapabilityComposer {
       plugins: [...community, ...runtimeRegistrations],
     })
     const sources = capabilities.plugins.map((plugin): ProjectionCapabilitySourceRecord => {
-      if (BUILTIN_NODE_CONTEXT_PLUGIN_IDS.has(plugin.id)) {
+      if (BUILTIN_PROJECTION_IDS.has(plugin.id)) {
         return {
           pluginId: plugin.id,
           kind: 'builtin',
@@ -215,9 +220,12 @@ function projectionPluginToRegistration(
 function stripProvider(
   record: ProjectionContributionRecord,
 ): ArtifactClaimRegistration {
-  const registration = structuredClone(record) as ProjectionContributionRecord
-  delete (registration as Partial<ProjectionContributionRecord>).providerId
-  return registration
+  return {
+    id: record.id,
+    artifactClaims: structuredClone(record.artifactClaims),
+    ...(record.nodeContext ? { nodeContext: structuredClone(record.nodeContext) } : {}),
+    ...(record.acceptsUnknown ? { acceptsUnknown: true } : {}),
+  }
 }
 
 function requireCapabilitySnapshot(
