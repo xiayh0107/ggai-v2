@@ -91,7 +91,9 @@ Profile 当前只负责**可信进程内组合**，不等于允许任意 npm 包
 
 默认 Agent 装配现已表示为 `@ggai/default-agent-runtime` Profile：Codex Bundle 始终存在；acpx
 Bundle 仍只有在显式配置 adapter 后才加入。因此组合方式升级，但 CLI 参数和安全默认值不变。
-daemon shutdown 会在 Run 完成收尾后释放 `AgentRegistry`，从而卸载 Profile 中的 provider。
+`AgentRegistry` 的空构造现在是 provider-neutral：它不会隐式安装 Codex。只有 Application 组合根
+显式传入 runtime options 时才挂载 builtin Profile；Run、HTTP 和测试 seam 因而不能意外决定
+进程应启动哪些 Agent。daemon shutdown 会在 Run 完成收尾后释放显式安装的 providers。
 
 ## 信任边界
 

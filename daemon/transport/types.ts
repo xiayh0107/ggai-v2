@@ -33,9 +33,18 @@ export interface AgentProcessTransport {
   cancel(runId: string): Promise<boolean>
 }
 
-export interface AgentRegistryTransport {
+/** Narrow capability consumed by Run execution; it does not own composition. */
+export interface AgentTransportResolver {
+  resolve(agentId: string): AgentProcessTransport | null
+}
+
+/** Read model used by HTTP diagnostics and preflight availability checks. */
+export interface AgentTransportCatalog extends AgentTransportResolver {
   probe(): Promise<AgentDescriptor[]>
 }
+
+/** @deprecated Prefer AgentTransportCatalog. */
+export interface AgentRegistryTransport extends AgentTransportCatalog {}
 
 export class TransportError extends Error {
   readonly code: string

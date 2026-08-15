@@ -1,7 +1,10 @@
 import type { AgentDescriptor } from '../protocol.js'
 import type { Disposer } from '../runtime/effects.js'
 import { defineService } from '../runtime/services.js'
-import type { AgentProcessTransport } from './types.js'
+import type {
+  AgentProcessTransport,
+  AgentTransportCatalog,
+} from './types.js'
 
 const PROBE_CACHE_MS = 5_000
 const PROVIDER_ID = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u
@@ -33,7 +36,7 @@ interface ProbeFlight {
 export const AGENT_TRANSPORT_REGISTRY_SERVICE =
   defineService<AgentTransportRegistry>('ggai.agent-transports.v1')
 
-export class AgentTransportRegistry {
+export class AgentTransportRegistry implements AgentTransportCatalog {
   readonly #providers = new Map<string, RegisteredProvider>()
   readonly #claims = new Map<string, RegisteredProvider>()
   #cachedProbe: { revision: number; expiresAt: number; descriptors: AgentDescriptor[] } | null = null
