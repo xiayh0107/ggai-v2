@@ -71,6 +71,7 @@ export function createCodexAgentTransportPlugin(
       apiVersion: 1,
       displayName: 'Codex transport',
     },
+    inject: [AGENT_TRANSPORT_REGISTRY_SERVICE],
     activate(context) {
       return context.require(AGENT_TRANSPORT_REGISTRY_SERVICE).register(provider)
     },

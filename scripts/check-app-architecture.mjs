@@ -30,6 +30,13 @@ const FILE_LINE_BUDGETS = new Map([
   ['src/pages/ResourceLibrary.tsx', 120],
   ['src/pages/Workspace.tsx', 500],
 ])
+const CAPABILITY_RUNTIME_LINE_BUDGETS = new Map([
+  ['daemon/registry.ts', 60],
+  ['daemon/agentRuntime.ts', 100],
+  ['daemon/runtime/composition.ts', 230],
+  ['daemon/runtime/pluginHost.ts', 360],
+  ['daemon/runtime/services.ts', 160],
+])
 
 const violations = []
 for (const root of CHECKED_ROOTS) {
@@ -61,12 +68,19 @@ for (const root of CHECKED_ROOTS) {
   }
 }
 for (const [path, maximumLines] of FILE_LINE_BUDGETS) {
+  checkLineBudget(path, maximumLines, 'composition')
+}
+for (const [path, maximumLines] of CAPABILITY_RUNTIME_LINE_BUDGETS) {
+  checkLineBudget(path, maximumLines, 'capability runtime')
+}
+
+async function checkLineBudget(path, maximumLines, label) {
   const source = await readFile(join(ROOT, path), 'utf8')
   const lineCount = source.endsWith('\n')
     ? source.split(/\r?\n/u).length - 1
     : source.split(/\r?\n/u).length
   if (lineCount > maximumLines) {
-    violations.push(`${path} has ${lineCount} lines; composition budget is ${maximumLines}`)
+    violations.push(`${path} has ${lineCount} lines; ${label} budget is ${maximumLines}`)
   }
 }
 
@@ -78,6 +92,7 @@ if (violations.length > 0) {
   console.log(
     `Application architecture boundaries: ${CHECKED_ROOTS.length} roots clean; `
     + `${FILE_LINE_BUDGETS.size} composition budgets clean; `
+    + `${CAPABILITY_RUNTIME_LINE_BUDGETS.size} capability runtime budgets clean; `
     + `${CAPABILITY_BOUNDARY_GROUP_COUNT} capability runtime boundaries clean`,
   )
 }
@@ -95,8 +110,10 @@ async function sourceFiles(directory) {
 
 function importedSpecifiers(source) {
   const imports = []
-  const pattern = /(?:import|export)\s+(?:type\s+)?(?:[\s\S]*?\s+from\s+)?['"]([^'"]+)['"]/g
-  for (const match of source.matchAll(pattern)) imports.push(match[1])
+  const staticPattern = /(?:import|export)\s+(?:type\s+)?(?:[\s\S]*?\s+from\s+)?['"]([^'"]+)['"]/g
+  const dynamicPattern = /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g
+  for (const match of source.matchAll(staticPattern)) imports.push(match[1])
+  for (const match of source.matchAll(dynamicPattern)) imports.push(match[1])
   return imports
 }
 

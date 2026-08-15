@@ -1,5 +1,6 @@
 import { EffectScope, type Disposer } from './effects.js'
 import {
+  inspectCapabilityPluginInjection,
   inspectCapabilityPluginManifest,
   type CapabilityPlugin,
   type CapabilityPluginHost,
@@ -31,8 +32,12 @@ export interface CapabilityProfileSnapshot {
   readonly bundles: readonly {
     readonly id: string
     readonly version: string
-    readonly plugins: readonly CapabilityPluginManifest[]
+    readonly plugins: readonly CapabilityPluginSnapshot[]
   }[]
+}
+
+export interface CapabilityPluginSnapshot extends CapabilityPluginManifest {
+  readonly inject: readonly string[]
 }
 
 interface PreparedCapabilityProfile<Plugin extends CapabilityPlugin> {
@@ -148,7 +153,10 @@ function prepareCapabilityProfile<Plugin extends CapabilityPlugin>(
         throw new TypeError(`duplicate capability plugin in ${profile.id}: ${manifest.id}`)
       }
       pluginIds.add(manifest.id)
-      return manifest
+      return Object.freeze({
+        ...manifest,
+        inject: inspectCapabilityPluginInjection(plugin.inject),
+      })
     })
     preparedBundles.push(Object.freeze({ plugins: Object.freeze(plugins) }))
     snapshotBundles.push(Object.freeze({

@@ -105,6 +105,7 @@ test('default Agent runtime is expressed as a data-inspectable profile', () => {
     base.bundles.flatMap(({ plugins }) => plugins.map(({ id }) => id)),
     ['@ggai/agent-transport-codex'],
   )
+  assert.deepEqual(base.bundles[0]?.plugins[0]?.inject, ['ggai.agent-transports.v1'])
 
   const withAcpx = inspectCapabilityProfile(createBuiltinAgentRuntimeProfile({
     acpxAgents: ['codex'],

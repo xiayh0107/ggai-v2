@@ -22,10 +22,10 @@ Runtime primitive 只能依赖：
 
 ## 原语职责
 
-- `services.ts`：按版本化 key 注册和解析能力；子 scope 可以收窄父级 provider。
+- `services.ts`：按版本化 key 注册和解析能力；子 scope 可以收窄父级 provider，关闭后撤销读取权限。
 - `effects.ts`：每项注册都对应 disposer；逆序、幂等地卸载。
 - `events.ts`：同步、类型化、仅观察的事件；监听失败不能接管生命周期。
-- `pluginHost.ts`：验证 manifest、拥有插件生命周期并在 activation 失败时回滚。
+- `pluginHost.ts`：验证 manifest 与显式注入、拥有插件生命周期、等待并发 activation，并在失败时回滚。
 - `composition.ts`：预检 Profile / Bundle，按序挂载并逆序卸载。
 
 需要产品数据或具体实现时，应在 `daemon/plugins/` 中实现 provider，通过 service seam 向 Runtime

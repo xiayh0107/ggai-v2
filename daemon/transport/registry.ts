@@ -15,6 +15,7 @@ export interface AgentTransportProvider {
 }
 
 interface RegisteredProvider {
+  readonly id: string
   readonly provider: AgentTransportProvider
   readonly agentIds: string[]
 }
@@ -36,8 +37,9 @@ export class AgentTransportRegistry {
 
   register(provider: AgentTransportProvider): Disposer {
     const agentIds = assertProvider(provider)
-    if (this.#providers.has(provider.id)) {
-      throw new Error(`agent transport provider is already registered: ${provider.id}`)
+    const providerId = provider.id
+    if (this.#providers.has(providerId)) {
+      throw new Error(`agent transport provider is already registered: ${providerId}`)
     }
     for (const agentId of agentIds) {
       const existing = this.#claims.get(agentId)
@@ -48,8 +50,8 @@ export class AgentTransportRegistry {
       }
     }
 
-    const registration: RegisteredProvider = { provider, agentIds }
-    this.#providers.set(provider.id, registration)
+    const registration: RegisteredProvider = { id: providerId, provider, agentIds }
+    this.#providers.set(providerId, registration)
     for (const agentId of agentIds) this.#claims.set(agentId, registration)
     this.#invalidateProbe()
 
@@ -57,7 +59,7 @@ export class AgentTransportRegistry {
     return () => {
       if (!active) return
       active = false
-      this.#providers.delete(provider.id)
+      if (this.#providers.get(providerId) === registration) this.#providers.delete(providerId)
       for (const agentId of agentIds) {
         if (this.#claims.get(agentId) === registration) this.#claims.delete(agentId)
       }
@@ -105,7 +107,7 @@ export class AgentTransportRegistry {
     const transport = registration.provider.resolve(agentId)
     if (!transport) {
       throw new Error(
-        `provider ${registration.provider.id} did not resolve claimed agent ${agentId}`,
+        `provider ${registration.id} did not resolve claimed agent ${agentId}`,
       )
     }
     return transport
@@ -130,7 +132,7 @@ export class AgentTransportRegistry {
       for (const descriptor of batch.descriptors) {
         if (!claims.has(descriptor.id)) {
           throw new Error(
-            `provider ${batch.registration.provider.id} reported undeclared agent ${descriptor.id}`,
+            `provider ${batch.registration.id} reported undeclared agent ${descriptor.id}`,
           )
         }
         if (seen.has(descriptor.id)) {

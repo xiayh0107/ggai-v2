@@ -7,9 +7,11 @@
 ## 插件可以做什么
 
 - 依赖 `daemon/runtime/` 的 plugin/context/service 契约；
+- 在 `inject` 中逐项声明所需 service；未声明或不可用的依赖不得进入 activation；
 - 实现并注册 Agent transport、importer、exporter、preview backend 等 provider；
 - 依赖其能力所需的窄实现模块，例如具体 transport；
 - 用 disposer 把 provider、listener、进程资源和临时注册归入插件生命周期。
+- 不保留卸载后的 service reader；scope 关闭后读取会被拒绝。
 
 ## 插件不能做什么
 

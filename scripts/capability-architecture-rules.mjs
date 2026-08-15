@@ -1,6 +1,6 @@
 import { posix } from 'node:path'
 
-export const CAPABILITY_BOUNDARY_GROUP_COUNT = 3
+export const CAPABILITY_BOUNDARY_GROUP_COUNT = 5
 
 const UI_PACKAGES = /^(?:react(?:-dom)?|lucide-react)(?:\/|$)/u
 const TRUSTED_KERNEL_MODULES = new Set([
@@ -29,6 +29,8 @@ const CONCRETE_AGENT_TRANSPORT_MODULES = new Set([
   'daemon/transport/acpx',
   'daemon/transport/codex',
 ])
+const CAPABILITY_COMPOSITION_ROOT = 'daemon/agentRuntime.ts'
+const PLUGIN_HOST_MODULE = 'daemon/runtime/pluginHost'
 
 export function capabilityBoundaryViolations(sourcePath, imports) {
   const path = portablePath(sourcePath)
@@ -42,6 +44,7 @@ export function capabilityBoundaryViolations(sourcePath, imports) {
   if (path === 'daemon/transport/registry.ts') {
     violations.push(...transportRegistryViolations(path, imports))
   }
+  violations.push(...compositionOwnershipViolations(path, imports))
   return violations
 }
 
@@ -94,6 +97,32 @@ function transportRegistryViolations(sourcePath, imports) {
     const stem = stripModuleExtension(resolved)
     if (stem.startsWith('daemon/plugins/') || CONCRETE_AGENT_TRANSPORT_MODULES.has(stem)) {
       violations.push(`${sourcePath} imports concrete transport/plugin module ${specifier}`)
+    }
+  }
+  return violations
+}
+
+function compositionOwnershipViolations(sourcePath, imports) {
+  if (/\.test\.[cm]?[jt]sx?$/u.test(sourcePath)) return []
+  const violations = []
+  for (const specifier of imports) {
+    const resolved = resolvedProjectModule(sourcePath, specifier)
+    if (!resolved) continue
+    const stem = stripModuleExtension(resolved)
+    if (stem.startsWith('daemon/plugins/') && sourcePath !== CAPABILITY_COMPOSITION_ROOT) {
+      violations.push(
+        `${sourcePath} imports runtime plugin ${specifier}; only ${CAPABILITY_COMPOSITION_ROOT} composes plugins`,
+      )
+    }
+    if (
+      stem === PLUGIN_HOST_MODULE
+      && !sourcePath.startsWith('daemon/runtime/')
+      && !sourcePath.startsWith('daemon/plugins/')
+      && sourcePath !== CAPABILITY_COMPOSITION_ROOT
+    ) {
+      violations.push(
+        `${sourcePath} imports PluginHost; kernel consumers must depend on capability services`,
+      )
     }
   }
   return violations

@@ -26,9 +26,9 @@ Interaction Kernel authority  <── never imported as a write shortcut by runt
 Browser src/** and UI          <── never imported by daemon runtime or runtime plugins
 ```
 
-## 三组自动门禁
+## 五组自动门禁
 
-`npm run architecture:check` 现在同时检查三组 Capability Runtime 规则。
+`npm run architecture:check` 现在同时检查五组 Capability Runtime 规则。
 
 ### 1. Runtime primitive 是纯机制层
 
@@ -49,6 +49,17 @@ Projection、具体 Agent 或浏览器 UI。新 primitive 一旦需要产品对�
 
 `daemon/transport/registry.ts` 不能导入 Codex、acpx、Agent runtime composition 或 plugin。否则每次
 新增 Agent 都会再次修改通用 registry，退化回硬编码分支。
+
+### 4. 只有组合根装配 runtime plugin
+
+`daemon/agentRuntime.ts` 是当前唯一可以 import `daemon/plugins/**` 实现的生产模块。具体 provider
+不会从 server、Run 或其他内核 consumer 被旁路装配。
+
+### 5. Interaction Kernel consumer 不控制 PluginHost
+
+server、Run、Canvas、projection 与 persistence 模块只能依赖 capability service，不得直接 import
+或操作 `CapabilityPluginHost`。此外，Registry facade、Agent composition、Profile composer、
+PluginHost 与 ServiceScope 都有行数预算，在职责重新聚合成大对象之前让门禁提前失败。
 
 ## 两套插件系统的关系
 

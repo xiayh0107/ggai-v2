@@ -20,7 +20,8 @@ permission 和 receipt。Capability Runtime 只负责把内核之外的可替换
 
 `defineService<T>('ggai.<capability>.v1')` 定义稳定、带版本的能力键。Provider 注册在共享
 scope；consumer 只依赖 key。子 scope 可以收窄或替换父 scope 的 provider，销毁后恢复父级
-解析结果。同一 scope 的重复 provider 会失败，而不是静默覆盖。
+解析结果。同一 scope 的重复 provider 会失败，而不是静默覆盖。已经销毁的 scope 会拒绝所有
+后续读取，因此插件即使保留旧 reader，也不能在卸载后继续解析父级能力。
 
 ### `EffectScope`
 
@@ -60,8 +61,11 @@ Host 验证 `id / version / apiVersion`，为每个插件建立独立生命周�
 - `effect(disposer)`：登记可逆副作用；
 - `onEvent(name, listener)`：登记随插件自动卸载的类型化生命周期监听器。
 
-插件 activation 抛错时，Host 会先广播失败事实，再回滚已经贡献的能力和监听器，把原始错误
-交给启动边界。正常卸载也使用同一清理路径。
+插件必须通过 `inject: [ServiceKey]` 显式声明依赖；Host 会在 activation 的第一个副作用发生前
+确认所有依赖可用，并只向插件暴露这些 key 的只读 reader。activation 抛错时，Host 会先广播
+失败事实，再回滚已经贡献的能力和监听器；activation 与 rollback 同时失败时保留两类错误。
+正常卸载也使用同一清理路径。Host 关闭时会先停止接收新插件并等待正在进行的 activation，
+再按逆序卸载，避免 shutdown 返回后仍有插件完成挂载。
 
 ### `CapabilityProfile` 与 `CapabilityBundle`
 
@@ -82,10 +86,12 @@ Profile 当前只负责**可信进程内组合**，不等于允许任意 npm 包
 
 `AgentTransportRegistry` 是第一个落到 Capability Runtime 的真实 seam。核心只认识
 `AgentTransportProvider` 和稳定 service key `ggai.agent-transports.v1`；Codex 与 acpx 的探测、
-兼容性判断和 transport 实例分别位于 builtin plugin。新增 Agent 不再需要修改通用 registry。
+兼容性判断和 transport 实例分别位于 builtin plugin。`AgentTransportKind` 是 provider-defined
+字符串而不是 Codex/acpx 封闭枚举，新增 Agent 不再需要修改通用 registry 或核心协议类型。
 
 默认 Agent 装配现已表示为 `@ggai/default-agent-runtime` Profile：Codex Bundle 始终存在；acpx
 Bundle 仍只有在显式配置 adapter 后才加入。因此组合方式升级，但 CLI 参数和安全默认值不变。
+daemon shutdown 会在 Run 完成收尾后释放 `AgentRegistry`，从而卸载 Profile 中的 provider。
 
 ## 信任边界
 

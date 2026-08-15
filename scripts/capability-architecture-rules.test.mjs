@@ -48,5 +48,27 @@ test('generic Agent transport registry cannot depend on concrete providers', () 
   assert.equal(capabilityBoundaryViolations(
     'daemon/transport/registry.ts',
     ['../plugins/agentTransport/acpx.js'],
+  ).length, 2)
+})
+
+test('only the composition root imports runtime plugin implementations', () => {
+  assert.deepEqual(capabilityBoundaryViolations(
+    'daemon/agentRuntime.ts',
+    ['./plugins/agentTransport/codex.js'],
+  ), [])
+  assert.equal(capabilityBoundaryViolations(
+    'daemon/runs.ts',
+    ['./plugins/agentTransport/codex.js'],
+  ).length, 1)
+})
+
+test('kernel consumers cannot control the plugin host directly', () => {
+  assert.deepEqual(capabilityBoundaryViolations(
+    'daemon/agentRuntime.ts',
+    ['./runtime/pluginHost.js'],
+  ), [])
+  assert.equal(capabilityBoundaryViolations(
+    'daemon/server.ts',
+    ['./runtime/pluginHost.js'],
   ).length, 1)
 })
