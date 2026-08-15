@@ -8,7 +8,9 @@ import {
   type ProjectionCapabilityProvenanceSnapshot,
 } from './projectionCapabilityComposer.js'
 
-const MAX_PROVENANCE_BYTES = 4 * 1024 * 1024
+// Provenance embeds the complete final classification plus the Runtime source
+// snapshot. Keep it bounded independently from either constituent format.
+const MAX_PROVENANCE_BYTES = 8 * 1024 * 1024
 const DIGEST = /^[0-9a-f]{64}$/u
 
 /** Immutable, project-local storage for projection provenance snapshots. */
