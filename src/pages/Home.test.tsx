@@ -28,6 +28,11 @@ afterAll(() => {
 })
 
 async function renderHome(health: unknown) {
+  window.history.replaceState(
+    null,
+    '',
+    '/canvas?project=project_0123456789abcdef0123456789abcdef',
+  )
   const fetch = vi.fn(async () => new Response(JSON.stringify(health), {
     status: 200,
     headers: { 'Content-Type': 'application/json' },
@@ -42,7 +47,21 @@ async function renderHome(health: unknown) {
   return { host: container, fetch }
 }
 
-describe('V2-only Home entry', () => {
+describe('Canvas Home entry', () => {
+  it('rejects a missing project id instead of opening the configured root', async () => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    window.history.replaceState(null, '', '/canvas')
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+
+    await act(async () => root?.render(<Home />))
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('项目地址无效')
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it('rejects a malformed project URL without probing or mounting another project', async () => {
     const fetch = vi.fn()
     vi.stubGlobal('fetch', fetch)
@@ -57,27 +76,14 @@ describe('V2-only Home entry', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
-  it('shows the exact reset command when the daemon reports a missing marker', async () => {
+  it('asks for an app restart when an obsolete daemon reports root initialization', async () => {
     const { host } = await renderHome({
-      capabilities: { canvasModelV1: false, canvasModelV2: true },
-      canvas: { model: 'v2', schemaVersion: 2, resetRequired: true },
+      capabilities: { canvas: true },
+      canvas: { schemaVersion: 2, initializationRequired: true },
     })
 
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain(
-      'npm run canvas:v2:reset -- --apply',
-    )
-    expect(host.textContent).toContain('缺少 Canvas V2 初始化标记')
-  })
-
-  it('blocks an explicitly selected V1 diagnostic daemon without rendering V1 UI', async () => {
-    const { host } = await renderHome({
-      capabilities: { canvasModelV1: true, canvasModelV2: false },
-      canvas: { model: 'v1', schemaVersion: 1, resetRequired: false },
-    })
-
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain('V1 归档诊断模式')
-    expect(host.textContent).not.toContain('正在恢复画布')
-    expect(host.textContent).not.toContain('版本的检查点恢复')
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain('重启应用')
+    expect(host.textContent).toContain('已退役的根项目启动协议')
   })
 })
 

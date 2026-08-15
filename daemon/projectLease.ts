@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import { link, lstat, mkdir, open, rm } from 'node:fs/promises'
 import path from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 
 import { isNodeError } from './atomic-file.js'
 import {
@@ -12,8 +13,14 @@ import {
 } from './permissions.js'
 import { ProtocolError } from './protocol.js'
 
-const CANVAS_MAINTENANCE_LOCK_RELATIVE = '.gg/canvas-maintenance.lock'
-const DAEMON_LEASE_RELATIVE = '.gg/runtime/canvas-daemon.lock'
+const PROJECT_MAINTENANCE_LOCK_RELATIVE = '.gg/canvas-maintenance.lock'
+const PROJECT_DAEMON_LEASE_RELATIVE = '.gg/runtime/canvas-daemon.lock'
+const PROJECT_DAEMON_LEASE_RECOVERY_RELATIVE = '.gg/runtime/canvas-daemon.recovery'
+const WORKSPACE_MAINTENANCE_LOCK_RELATIVE = '.gg/workspace/runtime/maintenance.lock'
+const WORKSPACE_DAEMON_LEASE_RELATIVE = '.gg/workspace/runtime/daemon.lock'
+const WORKSPACE_DAEMON_LEASE_RECOVERY_RELATIVE = '.gg/workspace/runtime/daemon.recovery'
+const LEASE_RECOVERY_RETRY_MS = 10
+const LEASE_RECOVERY_ATTEMPTS = 100
 
 export interface ProjectLeaseManagerOptions {
   projectRoot: string
@@ -29,6 +36,9 @@ interface ProjectLease {
 export class ProjectLeaseManager {
   readonly #projectRoot: string
   readonly #leases = new Map<string, Promise<ProjectLease>>()
+  readonly #maintenanceProjects = new Set<string>()
+  readonly #activeProjectOperations = new Map<string, number>()
+  readonly #projectIdleWaiters = new Map<string, Set<() => void>>()
   #closing = false
   #closePromise: Promise<void> | null = null
 
@@ -42,10 +52,97 @@ export class ProjectLeaseManager {
       projectRoot: this.#projectRoot,
       projectDir,
     })
-    await assertManagedPath(scope, DAEMON_LEASE_RELATIVE)
+    if (this.#maintenanceProjects.has(scope.projectDir)) {
+      throw new ProtocolError(
+        'workspace project is being deleted',
+        'project_busy',
+        409,
+      )
+    }
+    await assertManagedPath(scope, daemonLeaseRelative(scope))
     await this.#projectLease(scope)
     this.#assertOpen()
+    if (this.#maintenanceProjects.has(scope.projectDir)) {
+      throw new ProtocolError(
+        'workspace project is being deleted',
+        'project_busy',
+        409,
+      )
+    }
     return scope.projectDir
+  }
+
+  /**
+   * Fences new project-scoped work while an existing project's stores drain.
+   * The caller must pair this with endMaintenance, including on failure.
+   */
+  async beginMaintenance(projectDir: string): Promise<string> {
+    this.#assertOpen()
+    const scope = await createProjectScope({
+      projectRoot: this.#projectRoot,
+      projectDir,
+    })
+    if (this.#maintenanceProjects.has(scope.projectDir)) {
+      throw new ProtocolError('workspace project is busy', 'project_busy', 409)
+    }
+    this.#maintenanceProjects.add(scope.projectDir)
+    try {
+      await assertManagedPath(scope, daemonLeaseRelative(scope))
+      await this.#projectLease(scope)
+      await this.#waitForProjectIdle(scope.projectDir)
+      this.#assertOpen()
+      return scope.projectDir
+    } catch (error) {
+      this.#maintenanceProjects.delete(scope.projectDir)
+      throw error
+    }
+  }
+
+  /** Releases this daemon's child-project lease while maintenance remains fenced. */
+  async releaseForMaintenance(projectDir: string): Promise<void> {
+    const canonicalProjectDir = path.resolve(projectDir)
+    if (!this.#maintenanceProjects.has(canonicalProjectDir)) {
+      throw new TypeError('project maintenance must be active before releasing its lease')
+    }
+    const lease = this.#leases.get(canonicalProjectDir)
+    if (!lease) return
+    this.#leases.delete(canonicalProjectDir)
+    await releaseProjectLease(await lease)
+  }
+
+  endMaintenance(projectDir: string): void {
+    this.#maintenanceProjects.delete(path.resolve(projectDir))
+  }
+
+  /** Tracks a direct project-scoped operation that is not owned by a cached store. */
+  async withProjectOperation<T>(
+    projectDir: string,
+    operation: (canonicalProjectDir: string) => Promise<T>,
+  ): Promise<T> {
+    const canonicalProjectDir = await this.acquire(projectDir)
+    if (this.#maintenanceProjects.has(canonicalProjectDir)) {
+      throw new ProtocolError('workspace project is being deleted', 'project_busy', 409)
+    }
+    this.#activeProjectOperations.set(
+      canonicalProjectDir,
+      (this.#activeProjectOperations.get(canonicalProjectDir) ?? 0) + 1,
+    )
+    try {
+      if (this.#maintenanceProjects.has(canonicalProjectDir)) {
+        throw new ProtocolError('workspace project is being deleted', 'project_busy', 409)
+      }
+      return await operation(canonicalProjectDir)
+    } finally {
+      const remaining = (this.#activeProjectOperations.get(canonicalProjectDir) ?? 1) - 1
+      if (remaining <= 0) {
+        this.#activeProjectOperations.delete(canonicalProjectDir)
+        const waiters = this.#projectIdleWaiters.get(canonicalProjectDir)
+        this.#projectIdleWaiters.delete(canonicalProjectDir)
+        for (const resolve of waiters ?? []) resolve()
+      } else {
+        this.#activeProjectOperations.set(canonicalProjectDir, remaining)
+      }
+    }
   }
 
   close(): Promise<void> {
@@ -62,8 +159,9 @@ export class ProjectLeaseManager {
     this.#assertOpen()
     let lease = this.#leases.get(scope.projectDir)
     if (!lease) {
-      const filePath = path.resolve(scope.projectDir, DAEMON_LEASE_RELATIVE)
-      lease = assertManagedPath(scope, DAEMON_LEASE_RELATIVE)
+      const leaseRelative = daemonLeaseRelative(scope)
+      const filePath = path.resolve(scope.projectDir, leaseRelative)
+      lease = assertManagedPath(scope, leaseRelative)
         .then(() => acquireProjectLease(filePath, scope))
         .then(async (acquired) => {
           if (this.#closing) {
@@ -81,6 +179,20 @@ export class ProjectLeaseManager {
     return lease
   }
 
+  #waitForProjectIdle(projectDir: string): Promise<void> {
+    if ((this.#activeProjectOperations.get(projectDir) ?? 0) === 0) {
+      return Promise.resolve()
+    }
+    return new Promise<void>((resolve) => {
+      let waiters = this.#projectIdleWaiters.get(projectDir)
+      if (!waiters) {
+        waiters = new Set()
+        this.#projectIdleWaiters.set(projectDir, waiters)
+      }
+      waiters.add(resolve)
+    })
+  }
+
   #assertOpen(): void {
     if (this.#closing) {
       throw new ProtocolError('daemon is shutting down', 'daemon_shutting_down', 503)
@@ -93,7 +205,11 @@ async function acquireProjectLease(filePath: string, scope: ProjectScope): Promi
   await mkdir(directory, { recursive: true, mode: 0o700 })
   await assertManagedPath(scope, path.relative(scope.projectDir, filePath))
   await assertNoCanvasMaintenance(scope)
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < LEASE_RECOVERY_ATTEMPTS; attempt += 1) {
+    if (await leaseRecoveryActive(scope)) {
+      await delay(LEASE_RECOVERY_RETRY_MS)
+      continue
+    }
     const token = randomUUID()
     const temporary = `${filePath}.tmp-${process.pid}-${token}`
     let handle: Awaited<ReturnType<typeof open>> | null = null
@@ -105,11 +221,16 @@ async function acquireProjectLease(filePath: string, scope: ProjectScope): Promi
       handle = null
       await link(temporary, filePath)
       try {
+        await assertNoLeaseRecovery(scope)
         await assertNoCanvasMaintenance(scope)
       } catch (error) {
         const linkedOwner = await readLeaseOwner(filePath)
         if (linkedOwner?.token === token) await rm(filePath, { force: true })
         await syncDirectory(directory)
+        if (error instanceof ProtocolError && error.code === 'daemon_lease_recovery_active') {
+          await delay(LEASE_RECOVERY_RETRY_MS)
+          continue
+        }
         throw error
       }
       await syncDirectory(directory)
@@ -125,11 +246,8 @@ async function acquireProjectLease(filePath: string, scope: ProjectScope): Promi
         )
       }
       if (!await pathExistsNoFollow(filePath)) continue
-      throw new ProtocolError(
-        'stale daemon lease requires explicit removal: .gg/runtime/canvas-daemon.lock',
-        'daemon_lease_stale',
-        409,
-      )
+      if (await recoverStaleProjectLease(filePath, scope)) continue
+      await delay(LEASE_RECOVERY_RETRY_MS)
     } finally {
       await handle?.close().catch(() => undefined)
       await rm(temporary, { force: true }).catch(() => undefined)
@@ -139,9 +257,49 @@ async function acquireProjectLease(filePath: string, scope: ProjectScope): Promi
   throw new ProtocolError('could not acquire the canvas daemon lease', 'daemon_instance_active', 409)
 }
 
+/** Serializes stale-lock cleanup so a competing daemon can never remove a new owner's lease. */
+async function recoverStaleProjectLease(
+  filePath: string,
+  scope: ProjectScope,
+): Promise<boolean> {
+  const recoveryRelative = daemonLeaseRecoveryRelative(scope)
+  const recoveryPath = path.resolve(scope.projectDir, recoveryRelative)
+  await assertManagedPath(scope, recoveryRelative)
+  try {
+    await mkdir(recoveryPath, { mode: 0o700 })
+  } catch (error) {
+    if (isNodeError(error, 'EEXIST')) return false
+    throw error
+  }
+
+  try {
+    const owner = await readLeaseOwner(filePath)
+    if (owner && processIsAlive(owner.pid)) return false
+    await rm(filePath, { force: true })
+    await syncDirectory(path.dirname(filePath))
+    return true
+  } finally {
+    await rm(recoveryPath, { recursive: true, force: true })
+    await syncDirectory(path.dirname(recoveryPath)).catch(() => undefined)
+  }
+}
+
+async function assertNoLeaseRecovery(scope: ProjectScope): Promise<void> {
+  if (await leaseRecoveryActive(scope)) {
+    throw new ProtocolError('daemon lease recovery is active', 'daemon_lease_recovery_active', 409)
+  }
+}
+
+async function leaseRecoveryActive(scope: ProjectScope): Promise<boolean> {
+  const recoveryRelative = daemonLeaseRecoveryRelative(scope)
+  await assertManagedPath(scope, recoveryRelative)
+  return pathExistsNoFollow(path.resolve(scope.projectDir, recoveryRelative))
+}
+
 async function assertNoCanvasMaintenance(scope: ProjectScope): Promise<void> {
-  await assertManagedPath(scope, CANVAS_MAINTENANCE_LOCK_RELATIVE)
-  const filePath = path.resolve(scope.projectDir, CANVAS_MAINTENANCE_LOCK_RELATIVE)
+  const maintenanceRelative = maintenanceLockRelative(scope)
+  await assertManagedPath(scope, maintenanceRelative)
+  const filePath = path.resolve(scope.projectDir, maintenanceRelative)
   if (!await pathExistsNoFollow(filePath)) return
   const owner = await readLeaseOwner(filePath)
   const pid = owner?.pid
@@ -153,6 +311,28 @@ async function assertNoCanvasMaintenance(scope: ProjectScope): Promise<void> {
     active ? 'canvas_maintenance_active' : 'canvas_maintenance_stale',
     409,
   )
+}
+
+function isWorkspaceScope(scope: ProjectScope): boolean {
+  return scope.projectDir === scope.projectRoot
+}
+
+function daemonLeaseRelative(scope: ProjectScope): string {
+  return isWorkspaceScope(scope)
+    ? WORKSPACE_DAEMON_LEASE_RELATIVE
+    : PROJECT_DAEMON_LEASE_RELATIVE
+}
+
+function daemonLeaseRecoveryRelative(scope: ProjectScope): string {
+  return isWorkspaceScope(scope)
+    ? WORKSPACE_DAEMON_LEASE_RECOVERY_RELATIVE
+    : PROJECT_DAEMON_LEASE_RECOVERY_RELATIVE
+}
+
+function maintenanceLockRelative(scope: ProjectScope): string {
+  return isWorkspaceScope(scope)
+    ? WORKSPACE_MAINTENANCE_LOCK_RELATIVE
+    : PROJECT_MAINTENANCE_LOCK_RELATIVE
 }
 
 async function releaseProjectLease(lease: ProjectLease): Promise<void> {

@@ -1,20 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import {
-  ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION_V2,
-  BUILTIN_ARTIFACT_CLAIM_REGISTRY_V2,
-  MAX_ARTIFACT_CLAIM_MATCHERS_PER_RULE_V2,
-  MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN_V2,
-  artifactClaimsForBuiltinV2,
-  inspectArtifactCapabilitySnapshotRequestV2,
-  inspectArtifactClaimRegistryV2,
+  ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION,
+  BUILTIN_ARTIFACT_CLAIM_REGISTRY,
+  MAX_ARTIFACT_CLAIM_MATCHERS_PER_RULE,
+  MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN,
+  artifactClaimsForBuiltin,
+  inspectArtifactCapabilitySnapshotRequest,
+  inspectArtifactClaimRegistry,
 } from './artifactContracts'
 
-describe('V2 artifact claim registry', () => {
+describe('manifest-backed artifact claim registry', () => {
   it('keeps built-in claims serializable and gives R source to code', () => {
-    expect(structuredClone(BUILTIN_ARTIFACT_CLAIM_REGISTRY_V2)).toEqual(
-      BUILTIN_ARTIFACT_CLAIM_REGISTRY_V2,
+    expect(structuredClone(BUILTIN_ARTIFACT_CLAIM_REGISTRY)).toEqual(
+      BUILTIN_ARTIFACT_CLAIM_REGISTRY,
     )
-    expect(BUILTIN_ARTIFACT_CLAIM_REGISTRY_V2.map(({ id }) => id)).toEqual([
+    expect(BUILTIN_ARTIFACT_CLAIM_REGISTRY.map(({ id }) => id)).toEqual([
       'code',
       'image',
       'pdf',
@@ -22,9 +22,9 @@ describe('V2 artifact claim registry', () => {
       'text',
       'file',
     ])
-    expect(artifactClaimsForBuiltinV2('code').some((claim) =>
+    expect(artifactClaimsForBuiltin('code').some((claim) =>
       claim.extensions?.includes('.r'))).toBe(true)
-    expect(BUILTIN_ARTIFACT_CLAIM_REGISTRY_V2.find(({ id }) => id === 'file')).toMatchObject({
+    expect(BUILTIN_ARTIFACT_CLAIM_REGISTRY.find(({ id }) => id === 'file')).toMatchObject({
       artifactClaims: [],
       acceptsUnknown: true,
     })
@@ -36,7 +36,7 @@ describe('V2 artifact claim registry', () => {
       artifactClaims: [{ extensions: ['.png'], priority: 0 }],
       acceptsUnknown: false,
     }]
-    const inspection = inspectArtifactClaimRegistryV2(source)
+    const inspection = inspectArtifactClaimRegistry(source)
     expect(inspection).toEqual({
       status: 'valid',
       registrations: [{ id: 'image', artifactClaims: [{ extensions: ['.png'] }] }],
@@ -46,46 +46,51 @@ describe('V2 artifact claim registry', () => {
 
   it('rejects duplicate ids and malformed or excessive claims', () => {
     const valid = { id: 'image', artifactClaims: [{ extensions: ['.png'] }] }
-    expect(inspectArtifactClaimRegistryV2([valid, valid]).status).toBe('invalid')
-    expect(inspectArtifactClaimRegistryV2([{
+    expect(inspectArtifactClaimRegistry([valid, valid]).status).toBe('invalid')
+    expect(inspectArtifactClaimRegistry([{
       id: 'image',
       artifactClaims: [{ extensions: ['.PNG'] }],
     }]).status).toBe('invalid')
-    expect(inspectArtifactClaimRegistryV2([{
+    expect(inspectArtifactClaimRegistry([{
       id: 'image',
       artifactClaims: [{ extensions: ['.png'], priority: 1_001 }],
     }]).status).toBe('invalid')
-    expect(inspectArtifactClaimRegistryV2([{
+    expect(inspectArtifactClaimRegistry([{
       id: 'image',
       artifactClaims: Array.from(
-        { length: MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN_V2 + 1 },
+        { length: MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN + 1 },
         () => ({ extensions: ['.png'] }),
       ),
     }]).status).toBe('invalid')
-    expect(inspectArtifactClaimRegistryV2([{
+    expect(inspectArtifactClaimRegistry([{
       id: 'image',
       artifactClaims: [{
         extensions: Array.from(
-          { length: MAX_ARTIFACT_CLAIM_MATCHERS_PER_RULE_V2 + 1 },
+          { length: MAX_ARTIFACT_CLAIM_MATCHERS_PER_RULE + 1 },
           (_, index) => `.x${index}`,
         ),
       }],
     }]).status).toBe('invalid')
-    expect(inspectArtifactClaimRegistryV2([{
+    expect(inspectArtifactClaimRegistry([{
       ...valid,
       projectArtifact: () => null,
     }]).status).toBe('invalid')
   })
 
   it('strictly canonicalizes the serializable capability envelope', () => {
-    expect(inspectArtifactCapabilitySnapshotRequestV2({
-      schemaVersion: ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION_V2,
+    expect(inspectArtifactCapabilitySnapshotRequest({
+      schemaVersion: ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION,
       plugins: [{
         id: '@community/data-view',
         artifactClaims: [{
           mediaTypes: ['application/x-zeta', 'application/x-alpha'],
           extensions: ['.zeta', '.alpha'],
         }],
+        nodeContext: {
+          schemaVersion: 1,
+          summary: { textMaxChars: 200, payloadFields: ['zeta', 'alpha'] },
+          full: { textMaxChars: 2_000, payloadFields: ['zeta'], artifactRefs: 'none' },
+        },
       }],
     })).toEqual({
       status: 'valid',
@@ -97,15 +102,20 @@ describe('V2 artifact claim registry', () => {
             extensions: ['.alpha', '.zeta'],
             mediaTypes: ['application/x-alpha', 'application/x-zeta'],
           }],
+          nodeContext: {
+            schemaVersion: 1,
+            summary: { textMaxChars: 200, payloadFields: ['alpha', 'zeta'] },
+            full: { textMaxChars: 2_000, payloadFields: ['zeta'], artifactRefs: 'none' },
+          },
         }],
       },
     })
-    expect(inspectArtifactCapabilitySnapshotRequestV2({
+    expect(inspectArtifactCapabilitySnapshotRequest({
       schemaVersion: 2,
       plugins: [],
       projectArtifact: () => null,
     }).status).toBe('invalid')
-    expect(inspectArtifactCapabilitySnapshotRequestV2({
+    expect(inspectArtifactCapabilitySnapshotRequest({
       schemaVersion: 1,
       plugins: [],
     }).status).toBe('invalid')

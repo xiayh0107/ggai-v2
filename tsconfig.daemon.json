@@ -23,8 +23,9 @@
     "daemon/**/*.ts",
     "src/agent/context.ts",
     "src/agent/types.ts",
-    "src/canvas-v2/commands.ts",
-    "src/canvas-v2/model.ts",
+    "src/canvas/commands.ts",
+    "src/canvas/model.ts",
+    "src/node-studio/model.ts",
     "src/types/canvas.ts"
   ],
   "exclude": ["daemon/**/__tests__/**"]

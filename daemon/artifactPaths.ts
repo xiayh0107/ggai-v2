@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { canvasBranchStorageId } from './canvasStore.js'
+import { canvasBranchStorageId } from './canvasBranch.js'
 import { parseCanvasBranch, parseNodeId, parseRunId } from './protocol.js'
 
 export const ARTIFACT_CONTROL_DIRECTORY = '.ggai'

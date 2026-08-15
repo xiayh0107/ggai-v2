@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, open, readdir, rename, unlink } from 'node:fs/promises'
+import { mkdir, open, readdir, rename, unlink, type FileHandle } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 
 export interface FileQuarantine {
@@ -31,6 +31,30 @@ export async function atomicWriteText(filePath: string, contents: string): Promi
     await unlink(temporaryPath).catch(() => undefined)
     throw error
   }
+}
+
+/** Reads exactly the size established by a prior fstat and rejects concurrent growth/shrink. */
+export async function readExactFileBytes(
+  handle: FileHandle,
+  expectedSize: number,
+  maximumSize: number,
+): Promise<Buffer> {
+  if (!Number.isSafeInteger(expectedSize)
+    || expectedSize < 0
+    || expectedSize > maximumSize) {
+    throw new TypeError('file size exceeds the supported bound')
+  }
+  const buffer = Buffer.allocUnsafe(expectedSize + 1)
+  let offset = 0
+  while (offset < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset)
+    if (bytesRead === 0) break
+    offset += bytesRead
+  }
+  if (offset !== expectedSize) {
+    throw new Error('file size changed while it was being read')
+  }
+  return buffer.subarray(0, expectedSize)
 }
 
 /** Moves an invalid persistent file aside without deleting its contents. */

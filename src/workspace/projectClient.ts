@@ -19,6 +19,7 @@ export interface WorkspaceProjectApi {
   list(signal?: AbortSignal): Promise<WorkspaceProject[]>
   create(title: string, signal?: AbortSignal): Promise<WorkspaceProject>
   open(projectId: string, signal?: AbortSignal): Promise<WorkspaceProject>
+  delete(projectId: string, signal?: AbortSignal): Promise<string>
 }
 
 export class WorkspaceProjectProtocolError extends Error {
@@ -45,7 +46,6 @@ export interface WorkspaceProjectClientOptions {
   fetch?: typeof globalThis.fetch
 }
 
-export const ROOT_WORKSPACE_PROJECT_ID = 'project_root'
 export const MAX_WORKSPACE_PROJECT_TITLE_LENGTH = 120
 
 const MANAGED_WORKSPACE_PROJECT_ID_PATTERN = /^project_[0-9a-f]{32}$/u
@@ -102,6 +102,24 @@ export class WorkspaceProjectClient implements WorkspaceProjectApi {
     return project
   }
 
+  async delete(projectId: string, signal?: AbortSignal): Promise<string> {
+    const id = parseProjectId(projectId, 'projectId')
+    const response = await this.#fetch(
+      this.#url(`/projects/${encodeURIComponent(id)}`),
+      {
+        method: 'DELETE',
+        headers: { Accept: 'application/json' },
+        signal,
+      },
+    )
+    const value = await readJson(response, '删除项目')
+    const { deletedProjectId } = parseProjectDeletionEnvelope(value)
+    if (deletedProjectId !== id) {
+      throw new WorkspaceProjectProtocolError('删除项目响应与请求的项目不匹配')
+    }
+    return deletedProjectId
+  }
+
   #url(pathname: string): string {
     return new URL(pathname, this.#baseUrl).toString()
   }
@@ -139,6 +157,27 @@ export function parseProjectEnvelope(value: unknown): {
   return { schemaVersion: 1, project: parseProject(record.project, '项目响应.project') }
 }
 
+export function parseProjectDeletionEnvelope(value: unknown): {
+  schemaVersion: 1
+  deletedProjectId: string
+} {
+  const record = exactRecord(
+    value,
+    ['schemaVersion', 'deletedProjectId'],
+    '删除项目响应',
+  )
+  if (record.schemaVersion !== 1) {
+    throw protocol('删除项目响应.schemaVersion 必须为 1')
+  }
+  return {
+    schemaVersion: 1,
+    deletedProjectId: parseProjectId(
+      record.deletedProjectId,
+      '删除项目响应.deletedProjectId',
+    ),
+  }
+}
+
 function parseProject(value: unknown, context: string): WorkspaceProject {
   const record = exactRecord(value, [
     'id',
@@ -159,9 +198,7 @@ function parseProject(value: unknown, context: string): WorkspaceProject {
     : timestamp(record.lastOpenedAt, `${context}.lastOpenedAt`)
   const id = parseProjectId(record.id, `${context}.id`)
   const projectDir = nonEmptyString(record.projectDir, `${context}.projectDir`)
-  const expectedProjectDir = id === ROOT_WORKSPACE_PROJECT_ID
-    ? '.'
-    : `.gg/workspace/projects/${id}`
+  const expectedProjectDir = `.gg/workspace/projects/${id}`
   if (projectDir !== expectedProjectDir) {
     throw protocol(`${context}.projectDir 与项目 id 不匹配`)
   }
@@ -243,13 +280,14 @@ function nonEmptyString(value: unknown, context: string): string {
 }
 
 function parseProjectId(value: unknown, context: string): string {
-  if (
-    value !== ROOT_WORKSPACE_PROJECT_ID
-    && (typeof value !== 'string' || !MANAGED_WORKSPACE_PROJECT_ID_PATTERN.test(value))
-  ) {
+  if (typeof value !== 'string' || !isManagedWorkspaceProjectId(value)) {
     throw protocol(`${context}必须为有效的项目标识`)
   }
   return value
+}
+
+export function isManagedWorkspaceProjectId(value: string): boolean {
+  return MANAGED_WORKSPACE_PROJECT_ID_PATTERN.test(value)
 }
 
 function projectTitle(value: unknown, context: string): string {

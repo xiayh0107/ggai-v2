@@ -54,18 +54,28 @@ function artifactName(artifactPath: string): string {
   return artifactPath.split('/').at(-1) || '结果文件'
 }
 
+/** 工具名 → 面向用户的友好动作文案。 */
+export function friendlyToolLabel(name: string): string {
+  const normalized = name.trim().toLowerCase()
+  if (/read|context|list|cat|open/u.test(normalized)) return '读取节点上下文'
+  if (/search|web|fetch|lookup/u.test(normalized)) return '检索相关信息'
+  if (/write|edit|patch|create|save/u.test(normalized)) return '写入生成内容'
+  return '执行处理步骤'
+}
+
 function friendlyToolActivity(name: string): GenerationActivity {
+  const label = friendlyToolLabel(name)
   const normalized = name.trim().toLowerCase()
   if (/read|context|list|cat|open/u.test(normalized)) {
-    return { key: 'tool:read', kind: 'tool', label: '正在读取节点上下文' }
+    return { key: 'tool:read', kind: 'tool', label: `正在${label}` }
   }
   if (/search|web|fetch|lookup/u.test(normalized)) {
-    return { key: 'tool:search', kind: 'tool', label: '正在检索相关信息' }
+    return { key: 'tool:search', kind: 'tool', label: `正在${label}` }
   }
   if (/write|edit|patch|create|save/u.test(normalized)) {
-    return { key: 'tool:write', kind: 'tool', label: '正在写入生成内容' }
+    return { key: 'tool:write', kind: 'tool', label: `正在${label}` }
   }
-  return { key: 'tool:run', kind: 'tool', label: '正在执行处理步骤' }
+  return { key: 'tool:run', kind: 'tool', label: `正在${label}` }
 }
 
 function clipLogLine(text: string): string {

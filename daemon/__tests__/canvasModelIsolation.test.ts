@@ -8,7 +8,7 @@ import { test } from 'node:test'
 import { createDaemonServer } from '../server.js'
 
 async function withDaemon(run: (baseUrl: string) => Promise<void>): Promise<void> {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-model-v2-'))
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-canvas-contract-'))
   const daemon = createDaemonServer({ projectRoot: root })
   try {
     await new Promise<void>((resolve, reject) => {
@@ -23,28 +23,27 @@ async function withDaemon(run: (baseUrl: string) => Promise<void>): Promise<void
   }
 }
 
-test('daemon health and version routes have one fixed Canvas V2 contract', async () => {
+test('daemon health and version routes have one fixed Canvas contract', async () => {
   await withDaemon(async (baseUrl) => {
     const health = await (await fetch(`${baseUrl}/health`)).json() as {
       capabilities: {
-        canvasModelV1: boolean
-        canvasModelV2: boolean
-        pluginArtifactCapabilitiesV2: boolean
+        canvas: boolean
+        pluginArtifactCapabilities: boolean
+        nodeSkills: boolean
       }
-      canvas: { model: string; schemaVersion: number; resetRequired: boolean }
+      canvas: { schemaVersion: number; initializationRequired: boolean }
     }
     assert.deepEqual(health.capabilities, {
-      canvasModelV1: false,
-      canvasModelV2: true,
-      pluginArtifactCapabilitiesV2: true,
+      canvas: true,
+      pluginArtifactCapabilities: true,
+      nodeSkills: true,
     })
     assert.deepEqual(health.canvas, {
-      model: 'v2',
       schemaVersion: 2,
-      resetRequired: false,
+      initializationRequired: false,
     })
 
-    const canvas = await fetch(`${baseUrl}/canvas/v2?branch=main`)
+    const canvas = await fetch(`${baseUrl}/canvas?branch=main`)
     assert.equal(canvas.status, 200)
     assert.equal((await canvas.json() as { document: { schemaVersion: number } })
       .document.schemaVersion, 2)
@@ -55,10 +54,9 @@ test('daemon health and version routes have one fixed Canvas V2 contract', async
   })
 })
 
-test('legacy Canvas, artifact, source, preference, and session routes stay absent', async () => {
+test('retired write, artifact path, source, preference, and session routes stay absent', async () => {
   await withDaemon(async (baseUrl) => {
     const requests: Array<[string, RequestInit | undefined]> = [
-      ['/canvas', undefined],
       ['/canvas', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },

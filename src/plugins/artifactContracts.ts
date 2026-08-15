@@ -1,46 +1,52 @@
 /**
- * Serializable V2 artifact capabilities shared by browser plugin registration
+ * Serializable manifest-backed artifact capabilities shared by browser plugin registration
  * and the local daemon. Keep this module data-only: it must never import a
  * renderer, React, canvas commands, or executable plugin hooks.
  */
+import {
+  inspectNodeContextPolicy,
+  type NodeContextPolicy,
+} from './contextContracts.js'
 
-export const MAX_ARTIFACT_PLUGIN_REGISTRATIONS_V2 = 500
-export const MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN_V2 = 32
-export const MAX_ARTIFACT_CLAIM_MATCHERS_PER_RULE_V2 = 64
+export const MAX_ARTIFACT_PLUGIN_REGISTRATIONS = 500
+export const MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN = 32
+export const MAX_ARTIFACT_CLAIM_MATCHERS_PER_RULE = 64
 
-export interface ArtifactClaimRuleV2 {
+export interface ArtifactClaimRule {
   extensions?: string[]
   mediaTypes?: string[]
   priority?: number
 }
 
-export interface ArtifactClaimRegistrationV2 {
+export interface ArtifactClaimRegistration {
   id: string
-  artifactClaims: ArtifactClaimRuleV2[]
+  artifactClaims: ArtifactClaimRule[]
+  /** Optional deterministic Node-to-Agent projection. */
+  nodeContext?: NodeContextPolicy
   /** Explicit generic-file opt-in. It never outranks a typed claim. */
   acceptsUnknown?: boolean
 }
 
-export const ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION_V2 = 2
+export const ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION = 2
 
 /**
  * Browser-to-daemon data contract. It contains claims only; executable hooks,
  * renderers and canvas authority can never be represented by this shape.
  */
-export interface ArtifactCapabilitySnapshotRequestV2 {
+export interface ArtifactCapabilitySnapshotRequest {
   schemaVersion: 2
-  plugins: ArtifactClaimRegistrationV2[]
+  plugins: ArtifactClaimRegistration[]
 }
 
-export type ArtifactCapabilitySnapshotRequestInspectionV2 =
-  | { status: 'valid'; snapshot: ArtifactCapabilitySnapshotRequestV2 }
+export type ArtifactCapabilitySnapshotRequestInspection =
+  | { status: 'valid'; snapshot: ArtifactCapabilitySnapshotRequest }
   | { status: 'invalid'; reason: string }
 
-export type ArtifactClaimRegistryInspectionV2 =
-  | { status: 'valid'; registrations: ArtifactClaimRegistrationV2[] }
+export type ArtifactClaimRegistryInspection =
+  | { status: 'valid'; registrations: ArtifactClaimRegistration[] }
   | { status: 'invalid'; reason: string }
 
-export type BuiltinArtifactPluginIdV2 =
+export type BuiltinArtifactPluginId =
   | 'code'
   | 'image'
   | 'pdf'
@@ -48,9 +54,9 @@ export type BuiltinArtifactPluginIdV2 =
   | 'text'
   | 'file'
 
-export function inspectArtifactClaimRegistryV2(
+export function inspectArtifactClaimRegistry(
   value: unknown,
-): ArtifactClaimRegistryInspectionV2 {
+): ArtifactClaimRegistryInspection {
   try {
     return { status: 'valid', registrations: parseRegistrations(value) }
   } catch (error) {
@@ -61,40 +67,40 @@ export function inspectArtifactClaimRegistryV2(
   }
 }
 
-export function defineArtifactClaimRegistryV2(
+export function defineArtifactClaimRegistry(
   value: unknown,
-): readonly ArtifactClaimRegistrationV2[] {
-  const inspection = inspectArtifactClaimRegistryV2(value)
+): readonly ArtifactClaimRegistration[] {
+  const inspection = inspectArtifactClaimRegistry(value)
   if (inspection.status !== 'valid') {
     throw new TypeError(`artifact claim registry is invalid: ${inspection.reason}`)
   }
   return inspection.registrations
 }
 
-export function inspectArtifactCapabilitySnapshotRequestV2(
+export function inspectArtifactCapabilitySnapshotRequest(
   value: unknown,
-): ArtifactCapabilitySnapshotRequestInspectionV2 {
+): ArtifactCapabilitySnapshotRequestInspection {
   if (!isRecord(value)
     || !hasOnlyKeys(value, ['schemaVersion', 'plugins'])
-    || value.schemaVersion !== ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION_V2) {
+    || value.schemaVersion !== ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION) {
     return { status: 'invalid', reason: 'artifact capability snapshot envelope is invalid' }
   }
-  const inspection = inspectArtifactClaimRegistryV2(value.plugins)
+  const inspection = inspectArtifactClaimRegistry(value.plugins)
   if (inspection.status !== 'valid') return inspection
   return {
     status: 'valid',
     snapshot: {
-      schemaVersion: ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION_V2,
-      plugins: canonicalArtifactClaimRegistrationsV2(inspection.registrations),
+      schemaVersion: ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION,
+      plugins: canonicalArtifactClaimRegistrations(inspection.registrations),
     },
   }
 }
 
 /** Stable ordering keeps capability digests independent from plugin load order. */
-export function canonicalArtifactClaimRegistrationsV2(
-  registrations: readonly ArtifactClaimRegistrationV2[],
-): ArtifactClaimRegistrationV2[] {
-  const inspection = inspectArtifactClaimRegistryV2(registrations)
+export function canonicalArtifactClaimRegistrations(
+  registrations: readonly ArtifactClaimRegistration[],
+): ArtifactClaimRegistration[] {
+  const inspection = inspectArtifactClaimRegistry(registrations)
   if (inspection.status !== 'valid') {
     throw new TypeError(`artifact claim registry is invalid: ${inspection.reason}`)
   }
@@ -112,19 +118,22 @@ export function canonicalArtifactClaimRegistrationsV2(
           ...(claim.priority !== undefined ? { priority: claim.priority } : {}),
         }))
         .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+      ...(registration.nodeContext
+        ? { nodeContext: structuredClone(registration.nodeContext) }
+        : {}),
       ...(registration.acceptsUnknown ? { acceptsUnknown: true } : {}),
     }))
     .sort((left, right) => left.id.localeCompare(right.id))
 }
 
-function parseRegistrations(value: unknown): ArtifactClaimRegistrationV2[] {
-  if (!Array.isArray(value) || value.length > MAX_ARTIFACT_PLUGIN_REGISTRATIONS_V2) {
+function parseRegistrations(value: unknown): ArtifactClaimRegistration[] {
+  if (!Array.isArray(value) || value.length > MAX_ARTIFACT_PLUGIN_REGISTRATIONS) {
     throw new TypeError('artifact claim registrations exceed the supported bound')
   }
   const ids = new Set<string>()
   return value.map((candidate, pluginIndex) => {
     if (!isRecord(candidate)
-      || !hasOnlyKeys(candidate, ['id', 'artifactClaims', 'acceptsUnknown'])) {
+      || !hasOnlyKeys(candidate, ['id', 'artifactClaims', 'nodeContext', 'acceptsUnknown'])) {
       throw new TypeError(`registrations[${pluginIndex}] has unsupported properties`)
     }
     if (!isPluginId(candidate.id) || ids.has(candidate.id)) {
@@ -132,16 +141,23 @@ function parseRegistrations(value: unknown): ArtifactClaimRegistrationV2[] {
     }
     ids.add(candidate.id)
     if (!Array.isArray(candidate.artifactClaims)
-      || candidate.artifactClaims.length > MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN_V2) {
+      || candidate.artifactClaims.length > MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN) {
       throw new TypeError(`registrations[${pluginIndex}].artifactClaims is invalid`)
     }
     if (candidate.acceptsUnknown !== undefined && typeof candidate.acceptsUnknown !== 'boolean') {
       throw new TypeError(`registrations[${pluginIndex}].acceptsUnknown is invalid`)
     }
+    const nodeContext = candidate.nodeContext === undefined
+      ? undefined
+      : inspectNodeContextPolicy(candidate.nodeContext)
+    if (nodeContext?.status === 'invalid') {
+      throw new TypeError(`registrations[${pluginIndex}].nodeContext is invalid: ${nodeContext.reason}`)
+    }
     return {
       id: candidate.id,
       artifactClaims: candidate.artifactClaims.map((claim, claimIndex) =>
         parseClaim(claim, pluginIndex, claimIndex)),
+      ...(nodeContext?.status === 'valid' ? { nodeContext: nodeContext.policy } : {}),
       ...(candidate.acceptsUnknown ? { acceptsUnknown: true } : {}),
     }
   })
@@ -151,7 +167,7 @@ function parseClaim(
   value: unknown,
   pluginIndex: number,
   claimIndex: number,
-): ArtifactClaimRuleV2 {
+): ArtifactClaimRule {
   const label = `registrations[${pluginIndex}].artifactClaims[${claimIndex}]`
   if (!isRecord(value)) throw new TypeError(`${label} is invalid`)
   if (!hasOnlyKeys(value, ['extensions', 'mediaTypes', 'priority'])) {
@@ -165,8 +181,8 @@ function parseClaim(
   }
   const extensions = (value.extensions ?? []) as unknown[]
   const mediaTypes = (value.mediaTypes ?? []) as unknown[]
-  if (extensions.length > MAX_ARTIFACT_CLAIM_MATCHERS_PER_RULE_V2
-    || mediaTypes.length > MAX_ARTIFACT_CLAIM_MATCHERS_PER_RULE_V2
+  if (extensions.length > MAX_ARTIFACT_CLAIM_MATCHERS_PER_RULE
+    || mediaTypes.length > MAX_ARTIFACT_CLAIM_MATCHERS_PER_RULE
     || extensions.length + mediaTypes.length === 0
     || !extensions.every((extension) =>
       typeof extension === 'string' && /^\.[a-z0-9][a-z0-9.+_-]{0,31}$/u.test(extension))
@@ -211,7 +227,7 @@ function hasOnlyKeys(value: Record<string, unknown>, allowedKeys: readonly strin
   return Object.keys(value).every((key) => allowedKeys.includes(key))
 }
 
-export const BUILTIN_ARTIFACT_CLAIM_REGISTRY_V2 = defineArtifactClaimRegistryV2([
+export const BUILTIN_ARTIFACT_CLAIM_REGISTRY = defineArtifactClaimRegistry([
   {
     id: 'code',
     artifactClaims: [{
@@ -277,15 +293,15 @@ export const BUILTIN_ARTIFACT_CLAIM_REGISTRY_V2 = defineArtifactClaimRegistryV2(
   },
 ])
 
-export const BUILTIN_ARTIFACT_PLUGIN_IDS_V2: ReadonlySet<string> = new Set(
-  BUILTIN_ARTIFACT_CLAIM_REGISTRY_V2.map(({ id }) => id),
+export const BUILTIN_ARTIFACT_PLUGIN_IDS: ReadonlySet<string> = new Set(
+  BUILTIN_ARTIFACT_CLAIM_REGISTRY.map(({ id }) => id),
 )
 
 /** Returns a mutable copy suitable for one browser-side NodePlugin declaration. */
-export function artifactClaimsForBuiltinV2(
-  id: BuiltinArtifactPluginIdV2,
-): ArtifactClaimRuleV2[] {
-  const registration = BUILTIN_ARTIFACT_CLAIM_REGISTRY_V2.find((candidate) => candidate.id === id)
+export function artifactClaimsForBuiltin(
+  id: BuiltinArtifactPluginId,
+): ArtifactClaimRule[] {
+  const registration = BUILTIN_ARTIFACT_CLAIM_REGISTRY.find((candidate) => candidate.id === id)
   if (!registration) throw new TypeError(`unknown built-in artifact plugin: ${id}`)
   return registration.artifactClaims.map((claim) => ({
     ...(claim.extensions ? { extensions: [...claim.extensions] } : {}),

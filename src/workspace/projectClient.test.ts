@@ -57,11 +57,50 @@ describe('WorkspaceProjectClient', () => {
     await expect(client.open(requestedId)).rejects.toBeInstanceOf(WorkspaceProjectProtocolError)
   })
 
+  it('deletes a validated project and strictly decodes the returned identity', async () => {
+    const id = 'project_22222222222222222222222222222222'
+    const controller = new AbortController()
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new URL(String(input)).pathname).toBe(`/projects/${id}`)
+      expect(init?.method).toBe('DELETE')
+      expect(init?.signal).toBe(controller.signal)
+      return json({ schemaVersion: 1, deletedProjectId: id })
+    })
+    const client = new WorkspaceProjectClient({ baseUrl: 'http://daemon.test', fetch })
+
+    await expect(client.delete(id, controller.signal)).resolves.toBe(id)
+  })
+
+  it('fails closed when a delete response drifts or belongs to another project', async () => {
+    const requestedId = 'project_22222222222222222222222222222222'
+    const returnedId = 'project_33333333333333333333333333333333'
+    const mismatched = new WorkspaceProjectClient({
+      baseUrl: 'http://daemon.test',
+      fetch: async () => json({ schemaVersion: 1, deletedProjectId: returnedId }),
+    })
+    const extraField = new WorkspaceProjectClient({
+      baseUrl: 'http://daemon.test',
+      fetch: async () => json({
+        schemaVersion: 1,
+        deletedProjectId: requestedId,
+        deleted: true,
+      }),
+    })
+
+    await expect(mismatched.delete(requestedId))
+      .rejects.toBeInstanceOf(WorkspaceProjectProtocolError)
+    await expect(extraField.delete(requestedId))
+      .rejects.toBeInstanceOf(WorkspaceProjectProtocolError)
+  })
+
   it('rejects forged ids and id/path mismatches before they can scope a Canvas', async () => {
     const fetch = vi.fn()
     const client = new WorkspaceProjectClient({ baseUrl: 'http://daemon.test', fetch })
 
     await expect(client.open('../other-project')).rejects.toBeInstanceOf(Error)
+    await expect(client.delete('../other-project')).rejects.toBeInstanceOf(Error)
+    await expect(client.open('project_root')).rejects.toBeInstanceOf(Error)
+    await expect(client.delete('project_root')).rejects.toBeInstanceOf(Error)
     expect(fetch).not.toHaveBeenCalled()
 
     const mismatched = new WorkspaceProjectClient({
@@ -75,6 +114,15 @@ describe('WorkspaceProjectClient', () => {
       }),
     })
     await expect(mismatched.list()).rejects.toBeInstanceOf(Error)
+
+    const internalRoot = new WorkspaceProjectClient({
+      baseUrl: 'http://daemon.test',
+      fetch: async () => json({
+        schemaVersion: 1,
+        projects: [project({ id: 'project_root', projectDir: '.' })],
+      }),
+    })
+    await expect(internalRoot.list()).rejects.toBeInstanceOf(WorkspaceProjectProtocolError)
   })
 
   it('preserves a structured daemon error', async () => {

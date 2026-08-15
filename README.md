@@ -11,13 +11,6 @@ npm ci
 npm run deps:doctor
 ```
 
-新 checkout 第一次启动前先预览并执行 Canvas V2 初始化。该操作不会迁移 V1，也不会删除旧状态；旧 `.gg/runtime`、Canvas V1 历史/worktree 与 `artifacts` 会整体归档到 `.gg/legacy-v1/<timestamp>/`：
-
-```bash
-npm run canvas:v2:reset -- --project-root "$PWD"
-npm run canvas:v2:reset -- --project-root "$PWD" --apply
-```
-
 日常开发只需一个终端：
 
 ```bash
@@ -38,7 +31,6 @@ npm run dev -- --host localhost --port 7100 --strictPort
 
 - `VITE_GGAI_DAEMON_URL`：daemon 地址，默认 `http://127.0.0.1:7380`
 - `VITE_GGAI_AGENT_ID`：后台 Agent id，默认 `codex`
-- `VITE_GGAI_PROJECT_DIR`：相对 daemon `project-root` 的目录，默认 `.`
 
 daemon 参数：
 
@@ -53,7 +45,7 @@ npm run daemon -- --port 7380 --project-root /path/to/project \
 npm run daemon -- --project-root "$PWD" --acpx-agent codex --acpx-approval approve-all
 ```
 
-这会把 acpx 自身在该项目目录中的 permission 策略放开；默认 Codex transport 的 cwd 仍隔离在本 Run 的 `.gg/runs/<runId>/`，项目根只作为只读引用，另以 `--add-dir` 授权 `artifacts/.branches/<branch-hash>/<runId>/files/`。Canvas V2 不提供旧 `/canvas/source` 绑定协议。
+这会把 acpx 自身在该项目目录中的 permission 策略放开；默认 Codex transport 的 cwd 仍隔离在本 Run 的 `.gg/runs/<runId>/`，项目根只作为只读引用，另以 `--add-dir` 授权 `artifacts/.branches/<branch-hash>/<runId>/files/`。Canvas 不提供旧 `/canvas/source` 绑定协议。
 
 Electron、LaunchAgent 等环境的 PATH 与交互式终端不同时，应显式传入 CLI 路径：
 

@@ -1,25 +1,25 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
-import { lstat, mkdir, open, realpath, rename, rm } from 'node:fs/promises'
+import { lstat, mkdir, open, readdir, realpath, rename, rm } from 'node:fs/promises'
 import path from 'node:path'
 
 import {
-  blankProjectCanvasModelMarker,
-  assertCanvasModelReady,
-} from './canvasModelMode.js'
+  blankProjectCanvasInitializationMarker,
+  assertCanvasReady,
+} from './canvasInitialization.js'
 import {
-  parseCanvasEnvelopeV2Snapshot,
-  type CanvasEnvelopeV2,
-} from './canvasCommandStoreV2.js'
-import { canvasBranchStorageId } from './canvasStore.js'
+  parseCanvasEnvelopeSnapshot,
+  type CanvasEnvelope,
+} from './canvasCommandStore.js'
+import { canvasBranchStorageId } from './canvasBranch.js'
 import { atomicWriteText, isNodeError } from './atomic-file.js'
 import { canonicalizePotentialPath, isPathWithin } from './permissions.js'
 
-export const ROOT_WORKSPACE_PROJECT_ID = 'project_root'
 export const PROJECT_CATALOG_SCHEMA_VERSION = 1
 export const MAX_PROJECT_TITLE_LENGTH = 120
 
 const PROJECT_ID_PATTERN = /^project_[0-9a-f]{32}$/u
+const PROJECT_DELETE_TOMBSTONE_PATTERN = /^\.deleting-(project_[0-9a-f]{32})$/u
 const MAX_PROJECT_RECORDS = 10_000
 const MAX_PROJECT_CATALOG_BYTES = 4 * 1024 * 1024
 const MAX_CANVAS_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -49,7 +49,7 @@ export interface WorkspaceProjectDescriptor extends ProjectCatalogRecord {
   summary: WorkspaceProjectSummary | null
 }
 
-interface ProjectCatalogDocumentV1 {
+interface ProjectCatalogDocument {
   schemaVersion: 1
   projects: ProjectCatalogRecord[]
 }
@@ -86,7 +86,7 @@ export interface ProjectCatalogOptions {
  *
  * It never discovers directories. Registry mutations are serialized in-process,
  * fsynced, and atomically replaced. The server additionally fences mutations
- * with the root project lease so separate daemon processes cannot overwrite it.
+ * with the workspace control lease so separate daemon processes cannot overwrite it.
  */
 export class ProjectCatalog {
   readonly projectRoot: string
@@ -155,14 +155,14 @@ export class ProjectCatalog {
         const markerPath = path.join(stagingPath, '.gg', 'canvas-model.json')
         await atomicWriteText(
           markerPath,
-          `${JSON.stringify(blankProjectCanvasModelMarker(id, timestamp), null, 2)}\n`,
+          `${JSON.stringify(blankProjectCanvasInitializationMarker(id, timestamp), null, 2)}\n`,
         )
-        await assertCanvasModelReady(stagingPath, 'v2')
+        await assertCanvasReady(stagingPath)
         await rename(stagingPath, finalPath)
         moved = true
         await this.#requireReadyProjectDirectory(record)
 
-        const next: ProjectCatalogDocumentV1 = {
+        const next: ProjectCatalogDocument = {
           schemaVersion: PROJECT_CATALOG_SCHEMA_VERSION,
           projects: [...document.projects, record],
         }
@@ -176,6 +176,69 @@ export class ProjectCatalog {
         if (!moved) await rm(stagingPath, { recursive: true, force: true }).catch(() => undefined)
         throw error
       }
+    })
+  }
+
+  delete(idInput: unknown): Promise<ProjectCatalogRecord> {
+    return this.#runExclusive(async () => {
+      const id = parseProjectId(idInput)
+      const document = await this.#readDocument()
+      const record = requiredRecord(document, id)
+      const projectPath = path.join(this.projectRoot, ...record.projectDir.split('/'))
+      const tombstonePath = this.#deleteTombstonePath(id)
+
+      try {
+        await this.#requireReadyProjectDirectory(record)
+        await assertPathMissing(tombstonePath)
+      } catch (error) {
+        throw new ProjectCatalogError(
+          'project_unavailable',
+          `Workspace project ${id} cannot be deleted safely`,
+          409,
+          error,
+        )
+      }
+
+      try {
+        await rename(projectPath, tombstonePath)
+      } catch (error) {
+        throw new ProjectCatalogError(
+          'project_unavailable',
+          `Workspace project ${id} cannot be moved into deletion quarantine`,
+          409,
+          error,
+        )
+      }
+      let catalogPersisted = false
+      try {
+        await this.#requireReadyManagedProjectDirectory(id, tombstonePath)
+        const next: ProjectCatalogDocument = {
+          schemaVersion: PROJECT_CATALOG_SCHEMA_VERSION,
+          projects: document.projects.filter((candidate) => candidate.id !== id),
+        }
+        await this.#writeDocument(next)
+        catalogPersisted = true
+      } catch (error) {
+        try {
+          await rename(tombstonePath, projectPath)
+          await this.#requireReadyProjectDirectory(record)
+        } catch (rollbackError) {
+          throw new ProjectCatalogError(
+            'project_unavailable',
+            `Workspace project ${id} deletion failed and could not be rolled back immediately`,
+            409,
+            new AggregateError([error, rollbackError]),
+          )
+        }
+        throw error
+      }
+
+      if (catalogPersisted) {
+        // Once the catalog no longer contains the record, cleanup is
+        // restart-safe: #readDocument will retry a leftover tombstone.
+        await rm(tombstonePath, { recursive: true, force: false }).catch(() => undefined)
+      }
+      return structuredClone(record)
     })
   }
 
@@ -207,7 +270,7 @@ export class ProjectCatalog {
         ...existing,
         lastOpenedAt: this.#timestamp(),
       }
-      const next: ProjectCatalogDocumentV1 = {
+      const next: ProjectCatalogDocument = {
         schemaVersion: PROJECT_CATALOG_SCHEMA_VERSION,
         projects: document.projects.map((record) => record.id === id ? opened : record),
       }
@@ -240,7 +303,7 @@ export class ProjectCatalog {
     }
   }
 
-  async #readDocument(): Promise<ProjectCatalogDocumentV1> {
+  async #readDocument(): Promise<ProjectCatalogDocument> {
     await this.#prepareWorkspace(true)
     let source: string
     try {
@@ -264,11 +327,13 @@ export class ProjectCatalog {
       }
       const initial = this.#initialDocument()
       await this.#writeDocument(initial)
+      await this.#recoverInterruptedDeletes(initial)
       return initial
     }
 
+    let document: ProjectCatalogDocument
     try {
-      return parseCatalogDocument(JSON.parse(source) as unknown)
+      document = parseCatalogDocument(JSON.parse(source) as unknown)
     } catch (error) {
       throw new ProjectCatalogError(
         'project_catalog_corrupt',
@@ -277,9 +342,11 @@ export class ProjectCatalog {
         error,
       )
     }
+    await this.#recoverInterruptedDeletes(document)
+    return document
   }
 
-  async #writeDocument(document: ProjectCatalogDocumentV1): Promise<void> {
+  async #writeDocument(document: ProjectCatalogDocument): Promise<void> {
     const canonical = parseCatalogDocument(structuredClone(document))
     await this.#prepareWorkspace(true)
     await assertOptionalRegularFile(this.filePath)
@@ -287,22 +354,14 @@ export class ProjectCatalog {
     await assertOptionalRegularFile(this.filePath)
   }
 
-  #initialDocument(): ProjectCatalogDocumentV1 {
-    const timestamp = this.#timestamp()
+  #initialDocument(): ProjectCatalogDocument {
     return {
       schemaVersion: PROJECT_CATALOG_SCHEMA_VERSION,
-      projects: [{
-        id: ROOT_WORKSPACE_PROJECT_ID,
-        title: rootProjectTitle(this.projectRoot),
-        projectDir: '.',
-        createdAt: timestamp,
-        updatedAt: timestamp,
-        lastOpenedAt: null,
-      }],
+      projects: [],
     }
   }
 
-  async #newProjectId(document: ProjectCatalogDocumentV1): Promise<string> {
+  async #newProjectId(document: ProjectCatalogDocument): Promise<string> {
     const existing = new Set(document.projects.map((record) => record.id))
     for (let attempt = 0; attempt < 32; attempt += 1) {
       const id = parseManagedProjectId(this.#idFactory())
@@ -323,24 +382,63 @@ export class ProjectCatalog {
   }
 
   async #requireReadyProjectDirectory(record: ProjectCatalogRecord): Promise<string> {
-    const expected = record.id === ROOT_WORKSPACE_PROJECT_ID
-      ? this.projectRoot
-      : path.join(this.projectRoot, ...record.projectDir.split('/'))
-    await assertRealDirectory(expected, this.projectRoot)
-    const marker = await assertCanvasModelReady(expected, 'v2')
-    if (record.id === ROOT_WORKSPACE_PROJECT_ID) {
-      if (marker && 'initializedFrom' in marker && marker.projectId !== record.id) {
-        throw new TypeError('Root project marker identity does not match the catalog')
-      }
-    } else if (
-      !marker
-      || !('initializedFrom' in marker)
-      || marker.initializedFrom !== 'blank-project'
-      || marker.projectId !== record.id
-    ) {
-      throw new TypeError('Managed project marker identity does not match the catalog')
-    }
+    const expected = path.join(this.projectRoot, ...record.projectDir.split('/'))
+    await assertRealDirectory(expected, this.projectsDir)
+    const marker = await assertCanvasReady(expected)
+    assertManagedProjectMarker(record.id, marker)
     return expected
+  }
+
+  async #requireReadyManagedProjectDirectory(id: string, candidate: string): Promise<void> {
+    await assertRealDirectory(candidate, this.projectsDir)
+    const marker = await assertCanvasReady(candidate)
+    assertManagedProjectMarker(id, marker)
+  }
+
+  #deleteTombstonePath(id: string): string {
+    return path.join(this.projectsDir, `.deleting-${parseManagedProjectId(id)}`)
+  }
+
+  async #recoverInterruptedDeletes(document: ProjectCatalogDocument): Promise<void> {
+    const records = new Map(document.projects.map((record) => [record.id, record]))
+    const entries = await readdir(this.projectsDir, { withFileTypes: true })
+    const tombstones = entries
+      .map((entry) => ({ entry, match: PROJECT_DELETE_TOMBSTONE_PATTERN.exec(entry.name) }))
+      .filter((candidate): candidate is {
+        entry: (typeof entries)[number]
+        match: RegExpExecArray
+      } => candidate.match !== null)
+      .sort((left, right) => left.entry.name.localeCompare(right.entry.name))
+
+    for (const { entry, match } of tombstones) {
+      const id = parseManagedProjectId(match[1])
+      const tombstonePath = path.join(this.projectsDir, entry.name)
+      const record = records.get(id)
+      try {
+        await this.#requireReadyManagedProjectDirectory(id, tombstonePath)
+        if (!record) {
+          await rm(tombstonePath, { recursive: true, force: false })
+          continue
+        }
+
+        const projectPath = path.join(this.projectRoot, ...record.projectDir.split('/'))
+        await assertPathMissing(projectPath)
+        await rename(tombstonePath, projectPath)
+        try {
+          await this.#requireReadyProjectDirectory(record)
+        } catch (error) {
+          await rename(projectPath, tombstonePath).catch(() => undefined)
+          throw error
+        }
+      } catch (error) {
+        throw new ProjectCatalogError(
+          'unsafe_workspace_catalog',
+          `Interrupted deletion for workspace project ${id} cannot be recovered safely`,
+          403,
+          error,
+        )
+      }
+    }
   }
 
   async #prepareWorkspace(create: boolean): Promise<void> {
@@ -405,7 +503,7 @@ export class ProjectCatalog {
 
 export function projectDescriptorFromCanvasEnvelope(
   record: ProjectCatalogRecord,
-  envelope: CanvasEnvelopeV2,
+  envelope: CanvasEnvelope,
 ): WorkspaceProjectDescriptor {
   return {
     ...structuredClone(record),
@@ -419,7 +517,7 @@ export function projectDescriptorFromCanvasEnvelope(
   }
 }
 
-function parseCatalogDocument(value: unknown): ProjectCatalogDocumentV1 {
+function parseCatalogDocument(value: unknown): ProjectCatalogDocument {
   if (!isExactRecord(value, ['schemaVersion', 'projects']) || value.schemaVersion !== 1) {
     throw new TypeError('workspace project catalog envelope is invalid')
   }
@@ -436,10 +534,6 @@ function parseCatalogDocument(value: unknown): ProjectCatalogDocumentV1 {
     ids.add(record.id)
     directories.add(record.projectDir)
   }
-  const root = projects.find((record) => record.id === ROOT_WORKSPACE_PROJECT_ID)
-  if (!root || root.projectDir !== '.' || projects.filter((record) => record.projectDir === '.').length !== 1) {
-    throw new TypeError('workspace project catalog must contain the fixed root project')
-  }
   return {
     schemaVersion: PROJECT_CATALOG_SCHEMA_VERSION,
     projects: projects.map((record) => structuredClone(record)),
@@ -455,11 +549,11 @@ function parseCatalogRecord(value: unknown): ProjectCatalogRecord {
     'updatedAt',
     'lastOpenedAt',
   ])) throw new TypeError('workspace project record has an invalid shape')
-  const id = parseProjectId(value.id)
+  const id = parseManagedProjectId(value.id)
   const title = parseProjectTitle(value.title)
   if (value.title !== title) throw new TypeError('workspace project title is not canonical')
   const projectDir = value.projectDir
-  const expected = id === ROOT_WORKSPACE_PROJECT_ID ? '.' : managedProjectDir(id)
+  const expected = managedProjectDir(id)
   if (projectDir !== expected) throw new TypeError('workspace project path does not match its id')
   const createdAt = parseTimestamp(value.createdAt, 'createdAt')
   const updatedAt = parseTimestamp(value.updatedAt, 'updatedAt')
@@ -473,7 +567,7 @@ function parseCatalogRecord(value: unknown): ProjectCatalogRecord {
   return { id, title, projectDir, createdAt, updatedAt, lastOpenedAt }
 }
 
-function requiredRecord(document: ProjectCatalogDocumentV1, id: string): ProjectCatalogRecord {
+function requiredRecord(document: ProjectCatalogDocument, id: string): ProjectCatalogRecord {
   const record = document.projects.find((candidate) => candidate.id === id)
   if (!record) {
     throw new ProjectCatalogError(
@@ -505,7 +599,6 @@ function parseProjectTitle(value: unknown): string {
 }
 
 function parseProjectId(value: unknown): string {
-  if (value === ROOT_WORKSPACE_PROJECT_ID) return value
   try {
     return parseManagedProjectId(value)
   } catch (error) {
@@ -535,12 +628,6 @@ function parseTimestamp(value: unknown, label: string): string {
   return value
 }
 
-function rootProjectTitle(projectRoot: string): string {
-  const candidate = path.basename(projectRoot).trim().normalize('NFC')
-  if (!candidate || hasControlCharacter(candidate)) return 'Project'
-  return candidate.slice(0, MAX_PROJECT_TITLE_LENGTH)
-}
-
 function sameTitle(left: string, right: string): boolean {
   return left.localeCompare(right, undefined, { sensitivity: 'accent' }) === 0
 }
@@ -564,23 +651,23 @@ async function readMainCanvasSummary(projectDir: string): Promise<{
     projectDir,
     '.gg',
     'runtime',
-    'canvas-v2',
+    'canvas',
     canvasBranchStorageId('main'),
     'snapshot.json',
   )
   const canonical = await canonicalizePotentialPath(filePath)
   if (canonical !== filePath || !isPathWithin(projectDir, filePath)) {
-    throw new TypeError('Canvas V2 main snapshot path is unsafe')
+    throw new TypeError('Canvas main snapshot path is unsafe')
   }
   let source: string
   try {
     const info = await lstat(filePath)
     if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_CANVAS_SNAPSHOT_BYTES) {
-      throw new TypeError('Canvas V2 main snapshot is not a bounded regular file')
+      throw new TypeError('Canvas main snapshot is not a bounded regular file')
     }
     source = await readTextNoFollow(filePath)
     if (Buffer.byteLength(source, 'utf8') > MAX_CANVAS_SNAPSHOT_BYTES) {
-      throw new TypeError('Canvas V2 main snapshot exceeds the supported size')
+      throw new TypeError('Canvas main snapshot exceeds the supported size')
     }
   } catch (error) {
     if (isNodeError(error, 'ENOENT')) {
@@ -588,7 +675,7 @@ async function readMainCanvasSummary(projectDir: string): Promise<{
     }
     throw error
   }
-  const envelope = parseCanvasEnvelopeV2Snapshot(source, 'main')
+  const envelope = parseCanvasEnvelopeSnapshot(source, 'main')
   return {
     updatedAt: envelope.updatedAt,
     summary: {
@@ -623,6 +710,30 @@ async function assertOptionalRegularFile(filePath: string): Promise<void> {
   } catch (error) {
     if (isNodeError(error, 'ENOENT')) return
     throw error
+  }
+}
+
+async function assertPathMissing(candidate: string): Promise<void> {
+  try {
+    await lstat(candidate)
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) return
+    throw error
+  }
+  throw new TypeError(`Expected path to be absent: ${candidate}`)
+}
+
+function assertManagedProjectMarker(
+  id: string,
+  marker: Awaited<ReturnType<typeof assertCanvasReady>>,
+): void {
+  if (
+    !marker
+    || !('initializedFrom' in marker)
+    || marker.initializedFrom !== 'blank-project'
+    || marker.projectId !== id
+  ) {
+    throw new TypeError('Managed project marker identity does not match the catalog')
   }
 }
 

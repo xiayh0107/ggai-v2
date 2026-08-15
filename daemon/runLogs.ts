@@ -4,10 +4,10 @@ import { link, lstat, mkdir, open, readdir, rename, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { inspectRunOutcome } from '../src/agent/outcome.js'
-import { inspectRunOutcomeV2 } from '../src/agent/outcomeV2.js'
-import { inspectArtifactManifestV1 } from './artifactManifestV2.js'
+import { inspectLegacyRunOutcome } from './legacyOutcome.js'
+import { inspectArtifactManifest } from './artifactManifest.js'
 import { canonicalizePotentialPath, isPathWithin } from './permissions.js'
-import { inspectProjectionPlanV2 } from './projectionPlanV2.js'
+import { inspectProjectionPlan } from './projectionPlan.js'
 import {
   parseCanvasBranch,
   type RunClosePayload,
@@ -29,6 +29,22 @@ export interface RunLogPage {
 
 export interface InterruptedRunRecoveryCandidate {
   summary: RunSummary & { taskId: string }
+}
+
+export interface RunHistoryCursor {
+  startedAt: number
+  runId: string
+}
+
+export interface RunHistoryFilter {
+  nodeId?: string
+  taskId?: string
+  taskOwned?: boolean
+  canvasBranch?: string
+  limit?: number
+  /** Stable history boundary in `(startedAt desc, runId asc)` order. */
+  before?: RunHistoryCursor
+  includeBefore?: boolean
 }
 
 const DEFAULT_PAGE_SIZE = 500
@@ -109,14 +125,12 @@ export class RunLogStore {
   }
 
   async list(
-    filter: {
-      nodeId?: string
-      taskId?: string
-      taskOwned?: boolean
-      canvasBranch?: string
-      limit?: number
-    } = {},
+    filter: RunHistoryFilter = {},
   ): Promise<RunSummary[]> {
+    if (filter.includeBefore !== undefined && filter.before === undefined) {
+      throw new TypeError('includeBefore requires a Run history cursor')
+    }
+    if (filter.before !== undefined) validateRunHistoryCursor(filter.before)
     const summaries = await this.#readAllSummaries()
     const limit = Math.max(1, Math.min(filter.limit ?? 200, 2_000))
     return summaries
@@ -125,7 +139,11 @@ export class RunLogStore {
       .filter((entry) => filter.taskOwned === undefined
         || (entry.taskId !== undefined) === filter.taskOwned)
       .filter((entry) => !filter.canvasBranch || entry.canvasBranch === filter.canvasBranch)
-      .sort((left, right) => right.startedAt - left.startedAt)
+      .filter((entry) => !filter.before
+        || (filter.includeBefore
+          ? compareRunHistoryEntry(entry, filter.before) >= 0
+          : compareRunHistoryEntry(entry, filter.before) > 0))
+      .sort(compareRunHistoryEntry)
       .slice(0, limit)
   }
 
@@ -242,7 +260,7 @@ export class RunLogStore {
   }
 
   /**
-   * Marks every unfinished summary interrupted and returns Task-owned V2 runs
+   * Marks every unfinished summary interrupted and returns Task-owned runs
    * that may need their terminal artifacts and close record reconstructed.
    *
    * Already-interrupted Task runs remain candidates. This intentionally
@@ -592,19 +610,21 @@ function decodeTerminalClose(value: unknown, expectedRunId: string): RunClosePay
   }
   const artifactManifest = value.artifactManifest === undefined
     ? undefined
-    : inspectArtifactManifestV1(value.artifactManifest)
+    : inspectArtifactManifest(value.artifactManifest)
   if (artifactManifest?.status === 'invalid'
     || (artifactManifest?.status === 'valid'
       && artifactManifest.manifest.runId !== expectedRunId)) {
     throw new Error('run log contains an invalid terminal artifact manifest')
   }
-  const outcome = value.outcome === undefined ? undefined : inspectRunOutcome(value.outcome)
+  const outcome = value.outcome === undefined
+    ? undefined
+    : inspectLegacyRunOutcome(value.outcome)
   if (outcome?.status !== undefined && outcome.status !== 'valid') {
     throw new Error('run log contains an invalid terminal outcome')
   }
   const projectionPlan = value.projectionPlan === undefined
     ? undefined
-    : inspectProjectionPlanV2(value.projectionPlan)
+    : inspectProjectionPlan(value.projectionPlan)
   if (projectionPlan?.status === 'invalid'
     || (projectionPlan?.status === 'valid'
       && projectionPlan.plan.runId !== expectedRunId)) {
@@ -615,7 +635,7 @@ function decodeTerminalClose(value: unknown, expectedRunId: string): RunClosePay
     if (projectionPlan?.status !== 'valid') {
       throw new Error('run log terminal close has actions without a projection plan')
     }
-    const inspection = inspectRunOutcomeV2({
+    const inspection = inspectRunOutcome({
       schemaVersion: 2,
       suggestedActions: value.suggestedActions,
       outputs: [],
@@ -709,6 +729,22 @@ async function inspectEventLogTail(filePath: string): Promise<{
   }
 }
 
+function compareRunHistoryEntry(
+  left: Pick<RunSummary, 'startedAt' | 'runId'>,
+  right: RunHistoryCursor,
+): number {
+  if (left.startedAt !== right.startedAt) return left.startedAt > right.startedAt ? -1 : 1
+  return left.runId.localeCompare(right.runId)
+}
+
+function validateRunHistoryCursor(cursor: RunHistoryCursor): void {
+  if (!Number.isFinite(cursor.startedAt)
+    || cursor.startedAt < 0
+    || !isRunId(cursor.runId)) {
+    throw new TypeError('Run history cursor is invalid')
+  }
+}
+
 function assertRunId(runId: string): void {
   if (!isRunId(runId)) {
     throw new Error('runId contains unsupported characters')
@@ -740,6 +776,7 @@ function decodeSummary(source: string, expectedRunId: string): RunSummary {
   const record = decoded as Record<string, unknown>
   const hasBaseRevision = record.baseRevision !== undefined
   const hasPrompt = record.prompt !== undefined
+  const nodeStudioOwned = record.runKind === 'node-studio'
   if (
     record.runId !== expectedRunId
     || typeof record.nodeId !== 'string'
@@ -757,6 +794,17 @@ function decodeSummary(source: string, expectedRunId: string): RunSummary {
     || (record.pluginCapabilityDigest !== undefined
       && (typeof record.pluginCapabilityDigest !== 'string'
         || !/^[0-9a-f]{64}$/u.test(record.pluginCapabilityDigest)))
+    || (record.skillCapabilityDigest !== undefined
+      && (typeof record.skillCapabilityDigest !== 'string'
+        || !/^[0-9a-f]{64}$/u.test(record.skillCapabilityDigest)))
+    || (record.runKind !== undefined && record.runKind !== 'node-studio')
+    || (nodeStudioOwned
+      ? record.taskId !== undefined
+        || typeof record.baseDefinitionId !== 'string'
+        || !/^@local\/[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(record.baseDefinitionId)
+        || !Number.isSafeInteger(record.baseDefinitionRevision)
+        || Number(record.baseDefinitionRevision) < 0
+      : record.baseDefinitionId !== undefined || record.baseDefinitionRevision !== undefined)
     || !isRunId(record.agentId)
     || !isRunStatus(record.status)
     || typeof record.startedAt !== 'number'
@@ -789,6 +837,14 @@ function decodeSummary(source: string, expectedRunId: string): RunSummary {
     ...(record.pluginCapabilityDigest === undefined
       ? {}
       : { pluginCapabilityDigest: record.pluginCapabilityDigest }),
+    ...(record.skillCapabilityDigest === undefined
+      ? {}
+      : { skillCapabilityDigest: record.skillCapabilityDigest }),
+    ...(nodeStudioOwned ? {
+      runKind: 'node-studio' as const,
+      baseDefinitionId: record.baseDefinitionId,
+      baseDefinitionRevision: record.baseDefinitionRevision,
+    } : {}),
     status: record.status,
     startedAt: record.startedAt,
     ...(record.finishedAt === undefined ? {} : { finishedAt: record.finishedAt }),

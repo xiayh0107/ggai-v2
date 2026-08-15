@@ -93,6 +93,41 @@ test('task-owned history filtering happens before pagination', async () => {
   }
 })
 
+test('run history cursor is stable across timestamp ties and continues strictly before its boundary', async () => {
+  const subject = await fixture()
+  try {
+    await subject.store.start({ ...summary('run-b', 'done'), startedAt: 300 })
+    await subject.store.start({ ...summary('run-a', 'done'), startedAt: 300 })
+    await subject.store.start({ ...summary('run-c', 'done'), startedAt: 200 })
+
+    assert.deepEqual(
+      (await subject.store.list({ limit: 2 })).map((entry) => entry.runId),
+      ['run-a', 'run-b'],
+    )
+    assert.deepEqual(
+      (await subject.store.list({
+        before: { startedAt: 300, runId: 'run-b' },
+        limit: 2,
+      })).map((entry) => entry.runId),
+      ['run-c'],
+    )
+    assert.deepEqual(
+      (await subject.store.list({
+        before: { startedAt: 300, runId: 'run-b' },
+        includeBefore: true,
+        limit: 2,
+      })).map((entry) => entry.runId),
+      ['run-b', 'run-c'],
+    )
+    await assert.rejects(
+      subject.store.list({ includeBefore: true }),
+      /includeBefore requires a Run history cursor/u,
+    )
+  } finally {
+    await subject.close()
+  }
+})
+
 test('legacy summaries without a canvas branch normalize to main', async () => {
   const subject = await fixture()
   try {
@@ -152,7 +187,7 @@ test('Task-owned intent metadata rejects malformed or legacy-owned fields', asyn
       { ...taskSummary('run-missing-prompt'), prompt: undefined },
       { ...taskSummary('run-missing-revision'), baseRevision: undefined },
       { ...taskSummary('run-oversized-prompt'), prompt: 'x'.repeat(250_001) },
-      { ...summary('run-legacy-intent'), baseRevision: 1, prompt: 'not a V1 field' },
+      { ...summary('run-legacy-intent'), baseRevision: 1, prompt: 'not an archived field' },
     ]
     for (const entry of invalid) {
       await writeRawSummary(subject.root, entry as RunSummary)
@@ -269,7 +304,7 @@ test('startup recovery marks unfinished runs interrupted without deleting logs',
   }
 })
 
-test('V2 startup recovery returns durable Task identity and appends one replayable close', async () => {
+test('startup recovery returns durable Task identity and appends one replayable close', async () => {
   const subject = await fixture()
   try {
     await subject.store.start({
@@ -377,7 +412,7 @@ test('terminal close uses the indexed tail and rejects stale or truncated audit 
   }
 })
 
-test('V2 recovery candidates exclude legacy and explicitly deleted logs', async () => {
+test('recovery candidates exclude archived and explicitly deleted logs', async () => {
   const subject = await fixture()
   try {
     await subject.store.start(summary('run-v1-active'))

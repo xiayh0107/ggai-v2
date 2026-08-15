@@ -2,52 +2,86 @@ import path from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 
 import {
-  CanvasGitError,
+  applyCanvasCommand,
+  CanvasCommandError,
+  type CanvasCommand,
+} from '../src/canvas/commands.js'
+import type { CanvasDocument } from '../src/canvas/model.js'
+import {
+  CanvasMutationReuseError,
+  CanvasRevisionConflictError,
+  CanvasSnapshotError,
+  type CanvasEnvelope,
+} from './canvasCommandStore.js'
+import {
   CanvasGitStore,
+  CanvasGitError,
   type CanvasGitBranch,
   type CanvasGitCheckpointResult,
   type CanvasGitHistoryOptions,
   type CanvasGitHistoryPage,
   type CanvasGitRestoreInput,
-  type CanvasGitSourceMetadata,
   type CanvasGitStatus,
 } from './canvasGit.js'
-import {
-  CanvasCorruptionError,
-  CanvasRevisionConflictError,
-  CanvasStoreManager,
-} from './canvasStore.js'
-import { buildCheckpointMetadata } from './checkpointMetadata.js'
 import type { GitMergeExecution, GitMergePreview, GitMergeState } from './mergeTypes.js'
-import {
-  parseCanvasDocument,
-  ProtocolError,
-  type CanvasEnvelope,
-  type PutCanvasRequest,
-} from './protocol.js'
-import { RunLogStore } from './runLogs.js'
-import {
-  SourceGitError,
-  SourceGitManager,
-  type SourceBranchBinding,
-  type SourceCheckpointResult,
-  type SourceGitStatus,
-  type SourceGitStore,
-} from './sourceGit.js'
+import { createProjectScope } from './permissions.js'
+import { parseCanvasBranch, ProtocolError } from './protocol.js'
 
 const DEFAULT_CHECKPOINT_DELAY_MS = 3_000
 
+/** Minimal runtime boundary required by the version coordinator. */
+export interface WorkspaceCanvasStoreManager {
+  acquireProjectLease(projectDir: string): Promise<string>
+  hasSnapshot(projectDir: string, branch: string): Promise<boolean>
+  get(projectDir: string, branch: string): Promise<CanvasEnvelope>
+  readRevision(
+    projectDir: string,
+    branch: string,
+    revision: number,
+  ): Promise<CanvasDocument | null>
+  commit(
+    projectDir: string,
+    branch: string,
+    baseRevision: number,
+    mutationId: string,
+    command: CanvasCommand,
+  ): Promise<CanvasEnvelope>
+  commitLatest(
+    projectDir: string,
+    branch: string,
+    mutationId: string,
+    command: CanvasCommand,
+  ): Promise<CanvasEnvelope>
+  setLastCheckpoint(
+    projectDir: string,
+    branch: string,
+    expectedRevision: number,
+    commit: string,
+  ): Promise<CanvasEnvelope>
+  materialize(
+    projectDir: string,
+    branch: string,
+    document: CanvasDocument,
+    checkpoint: string,
+  ): Promise<CanvasEnvelope>
+  applyCheckpoint(
+    projectDir: string,
+    branch: string,
+    document: CanvasDocument,
+    checkpoint: string,
+    expectedRevision: number,
+  ): Promise<CanvasEnvelope>
+}
+
 export interface WorkspaceVersionManagerOptions {
   projectRoot: string
+  canvasStoreManager: WorkspaceCanvasStoreManager
   checkpointDelayMs?: number
-  canvasStoreManager?: CanvasStoreManager
-  sourceGitManager?: SourceGitManager
   canvasGitFactory?: (canonicalProjectDir: string) => CanvasGitStore
 }
 
 export interface WorkspaceStatuses {
   versioning: CanvasGitStatus
-  source: SourceGitStatus
 }
 
 export interface WorkspaceCanvasResult extends WorkspaceStatuses {
@@ -63,13 +97,11 @@ export type WorkspaceOperationResult<T> =
   | (WorkspaceStatuses & {
       ok: true
       partial: false
-      sourceDegraded: false
       value: T
     })
   | (WorkspaceStatuses & {
       ok: false
       partial: boolean
-      sourceDegraded: boolean
       error: WorkspaceOperationError
       value?: T
     })
@@ -84,17 +116,27 @@ export interface WorkspaceCreateBranchInput {
   fromBranch?: string
 }
 
+export interface WorkspaceConflictMutation {
+  mutationId: string
+  command: CanvasCommand
+}
+
+export interface WorkspaceSaveConflictBranchInput {
+  sourceBranch: string
+  newBranch: string
+  baseRevision: number
+  mutations: WorkspaceConflictMutation[]
+}
+
+export interface WorkspaceConflictBranch extends WorkspaceBranch {
+  sourceBranch: string
+  baseRevision: number
+  mutationIds: string[]
+}
+
 export interface WorkspaceBranch {
   branch: CanvasGitBranch
   canvas: CanvasEnvelope
-  sourceBranch: SourceBranchBinding | null
-}
-
-export interface WorkspaceDeleteBranch {
-  branch: string
-  canvasDeleted: boolean
-  sourceDeleted: boolean
-  runtimeDeleted: boolean
 }
 
 export interface WorkspaceMergeInput {
@@ -103,24 +145,15 @@ export interface WorkspaceMergeInput {
 }
 
 export interface WorkspaceMergeExpectation {
-  canvas: {
-    sourceCommit: string
-    targetCommit: string
-    sourceRevision: number
-    targetRevision: number
-  }
-  /** Null when source Git was not bound when the preview was created. */
-  source: {
-    sourceCommit: string
-    targetCommit: string
-  } | null
+  sourceCommit: string
+  targetCommit: string
+  sourceRevision: number
+  targetRevision: number
 }
 
 export interface WorkspaceMergePreview {
   state: GitMergeState
   canvas: GitMergePreview
-  /** Null when source Git has not been explicitly bound. */
-  source: GitMergePreview | null
   /** Must be returned unchanged when explicitly executing this preview. */
   expectation: WorkspaceMergeExpectation
 }
@@ -133,18 +166,13 @@ export interface WorkspaceMergeExecutionInput extends WorkspaceMergeInput {
 export interface WorkspaceMergeExecution {
   state: 'merged' | 'conflicts' | 'up-to-date' | 'partial'
   canvas: GitMergeExecution
-  /** Null when source Git has not been explicitly bound. */
-  source: GitMergeExecution | null
   canvasEnvelope?: CanvasEnvelope
 }
 
 interface ProjectVersionState {
   projectDir: string
   canvasGit: CanvasGitStore
-  runLogs: RunLogStore
-  sourceGit: SourceGitStore
   versioning: CanvasGitStatus | null
-  source: SourceGitStatus | null
 }
 
 interface ScheduledCheckpoint {
@@ -159,20 +187,13 @@ interface PreparedWorkspaceMerge {
   targetCanvas: CanvasEnvelope
 }
 
-interface SourceBranchLayers {
-  status: SourceGitStatus
-  from: SourceBranchBinding | null
-  target: SourceBranchBinding | null
-}
-
 /**
- * Coordinates authoritative canvas snapshots with best-effort Git history.
- * Canvas saves are durable before any Git work is scheduled and never fail
- * because checkpointing is unavailable.
+ * Coordinates authoritative Canvas commands with normalized Canvas-only Git
+ * history. Source files, Run runtime, logs, sessions, and view state never enter
+ * this history layer.
  */
 export class WorkspaceVersionManager {
-  readonly canvases: CanvasStoreManager
-  readonly sources: SourceGitManager
+  readonly canvases: WorkspaceCanvasStoreManager
 
   readonly #projectRoot: string
   readonly #checkpointDelayMs: number
@@ -181,6 +202,8 @@ export class WorkspaceVersionManager {
   readonly #scheduled = new Map<string, ScheduledCheckpoint>()
   readonly #checkpointTasks = new Set<Promise<void>>()
   readonly #branchTails = new Map<string, Promise<void>>()
+  readonly #projectDeletionReservations = new Set<string>()
+  readonly #deletedProjects = new Set<string>()
   #closing = false
   #closePromise: Promise<void> | null = null
 
@@ -190,34 +213,69 @@ export class WorkspaceVersionManager {
     if (!Number.isFinite(this.#checkpointDelayMs) || this.#checkpointDelayMs < 0) {
       throw new TypeError('checkpointDelayMs must be a non-negative finite number')
     }
-    this.canvases = options.canvasStoreManager ?? new CanvasStoreManager({
-      projectRoot: this.#projectRoot,
-    })
-    this.sources = options.sourceGitManager ?? new SourceGitManager(this.#projectRoot)
+    this.canvases = options.canvasStoreManager
     this.#canvasGitFactory = options.canvasGitFactory
       ?? ((projectDir) => new CanvasGitStore(projectDir))
   }
 
-  async getCanvas(projectDir = '.', branch = 'main'): Promise<WorkspaceCanvasResult> {
-    const project = await this.#project(projectDir)
-    const [canvas, statuses] = await Promise.all([
-      this.canvases.get(project.projectDir, branch),
-      this.#refreshStatuses(project),
-    ])
-    return { canvas, ...statuses }
-  }
-
-  async saveCanvas(
-    projectDir: string,
-    branch: string,
-    request: PutCanvasRequest,
-  ): Promise<WorkspaceCanvasResult> {
+  async getCanvas(projectDir = '.', branchRequest = 'main'): Promise<WorkspaceCanvasResult> {
+    const branch = parseCanvasBranch(branchRequest)
     const project = await this.#project(projectDir)
     return this.#withBranchLocks(project, [branch], async () => {
-      const canvas = await this.canvases.put(project.projectDir, branch, request)
-      this.#scheduleCheckpoint(project, branch, request.changeKind)
-      const statuses = await this.#cachedStatuses(project)
-      return { canvas, ...statuses }
+      const canvas = await this.#loadBranchCanvas(project, branch)
+      return { canvas, ...await this.#refreshStatuses(project) }
+    })
+  }
+
+  async commitCanvas(
+    projectDir: string,
+    branchRequest: string,
+    baseRevision: number,
+    mutationId: string,
+    command: CanvasCommand,
+  ): Promise<WorkspaceCanvasResult> {
+    const branch = parseCanvasBranch(branchRequest)
+    const project = await this.#project(projectDir)
+    return this.#withBranchLocks(project, [branch], async () => {
+      const current = await this.#loadBranchCanvas(project, branch)
+      if (isDestructiveCanvasCommand(command) && current.revision === baseRevision) {
+        // Validate before touching Git, then make the exact pre-delete state
+        // recoverable even when the normal debounced checkpoint has not fired.
+        applyCanvasCommand(current.document, command)
+        this.#cancelScheduled(project, branch)
+        await this.#checkpoint(project, branch, `before-${command.type}`)
+      }
+      const canvas = await this.canvases.commit(
+        project.projectDir,
+        branch,
+        baseRevision,
+        mutationId,
+        command,
+      )
+      this.#scheduleCheckpoint(project, branch, `command-${command.type}`)
+      return { canvas, ...await this.#cachedStatuses(project) }
+    })
+  }
+
+  /** Daemon-only command path for trusted projection settlement. */
+  async commitLatestCanvas(
+    projectDir: string,
+    branchRequest: string,
+    mutationId: string,
+    command: CanvasCommand,
+  ): Promise<WorkspaceCanvasResult> {
+    const branch = parseCanvasBranch(branchRequest)
+    const project = await this.#project(projectDir)
+    return this.#withBranchLocks(project, [branch], async () => {
+      await this.#loadBranchCanvas(project, branch)
+      const canvas = await this.canvases.commitLatest(
+        project.projectDir,
+        branch,
+        mutationId,
+        command,
+      )
+      this.#scheduleCheckpoint(project, branch, `trusted-${command.type}`)
+      return { canvas, ...await this.#cachedStatuses(project) }
     })
   }
 
@@ -227,13 +285,15 @@ export class WorkspaceVersionManager {
 
   async manualCheckpoint(
     projectDir: string,
-    branch: string,
+    branchRequest: string,
     reason = 'manual',
   ): Promise<WorkspaceOperationResult<WorkspaceCheckpoint>> {
+    const branch = parseCanvasBranch(branchRequest)
     const project = await this.#project(projectDir)
     return this.#withBranchLocks(project, [branch], async () => {
       this.#cancelScheduled(project, branch)
       try {
+        await this.#loadBranchCanvas(project, branch)
         const value = await this.#checkpoint(project, branch, reason)
         return this.#success(value, await this.#refreshStatuses(project))
       } catch (error) {
@@ -277,68 +337,204 @@ export class WorkspaceVersionManager {
     projectDir: string,
     input: WorkspaceCreateBranchInput,
   ): Promise<WorkspaceOperationResult<WorkspaceBranch>> {
+    const name = parseCanvasBranch(input.name)
+    const fromBranch = parseCanvasBranch(input.fromBranch ?? 'main')
     const project = await this.#project(projectDir)
-    const fromBranch = input.fromBranch ?? 'main'
-    return this.#withBranchLocks(project, [fromBranch, input.name], async () => {
+    return this.#withBranchLocks(project, [fromBranch, name], async () => {
       let branch: CanvasGitBranch | null = null
       let canvas: CanvasEnvelope | null = null
-      let sourceBranch: SourceBranchBinding | null = null
       let partial = false
       try {
-        if (input.name === fromBranch) {
+        if (name === fromBranch) {
           throw new WorkspaceVersioningError(
             'invariant_conflict',
-            'new canvas branch must differ from its source branch',
+            'new Canvas branch must differ from its source branch',
           )
         }
-        canvas = await this.canvases.get(project.projectDir, input.name)
-        branch = await this.#canvasBranch(project, input.name)
+        this.#cancelScheduled(project, name)
+        await this.#reconcileCommittedCanvasMerge(project, name)
+        branch = await this.#canvasBranch(project, name)
+        canvas = await this.canvases.get(project.projectDir, name)
         partial = branch !== null || canvas.revision > 0
-        const source = await this.#sourceBranchLayers(project, fromBranch, input.name)
-        sourceBranch = source.target
-        partial ||= sourceBranch !== null
-        this.#assertBranchLayerConsistency(input.name, branch, canvas, sourceBranch)
+        this.#assertBranchLayerConsistency(name, branch, canvas)
 
         if (!branch) {
           this.#cancelScheduled(project, fromBranch)
-          await this.#checkpoint(project, fromBranch, 'branch-created')
+          await this.#loadBranchCanvas(project, fromBranch)
+          const source = await this.#checkpoint(project, fromBranch, 'branch-created')
           branch = await project.canvasGit.createBranch({
-            name: input.name,
-            startPoint: fromBranch,
+            name,
+            startPoint: source.checkpoint.commit,
           })
           partial = true
         }
-        this.#assertManagedCanvasBranch(input.name, branch)
+        this.#assertManagedBranch(name, branch)
         if (canvas.revision === 0) {
-          const document = parseCanvasDocument(await project.canvasGit.readDocument(input.name))
+          const document = await project.canvasGit.readDocument(branch.commit)
           canvas = await this.canvases.materialize(
             project.projectDir,
-            input.name,
+            name,
             document,
             branch.commit,
           )
           partial = true
         } else {
-          this.#assertRuntimeMatchesCanvasBranch(input.name, branch, canvas)
+          canvas = await this.#alignRuntimeAnchor(project, branch, canvas)
         }
-        if (source.status.status === 'ready' && !sourceBranch) {
-          sourceBranch = await project.sourceGit.createBranch(input.name, fromBranch)
-          partial = true
-        }
-        return this.#success(
-          { branch, canvas, sourceBranch },
-          await this.#refreshStatuses(project),
-        )
+        return this.#success({ branch, canvas }, await this.#refreshStatuses(project))
       } catch (error) {
-        const value = branch && canvas?.revision
-          ? { branch, canvas, sourceBranch }
-          : undefined
+        const value = branch && canvas ? { branch, canvas } : undefined
         return this.#failure(
           error,
           await this.#refreshStatuses(project),
           partial,
           value,
-          partial && sourceBranch === null,
+        )
+      }
+    })
+  }
+
+  async switchBranch(
+    projectDir: string,
+    branchRequest: string,
+  ): Promise<WorkspaceOperationResult<WorkspaceBranch>> {
+    const branchName = parseCanvasBranch(branchRequest)
+    const project = await this.#project(projectDir)
+    return this.#withBranchLocks(project, [branchName], async () => {
+      try {
+        this.#cancelScheduled(project, branchName)
+        const branch = await this.#requireCanvasBranch(project, branchName)
+        const canvas = await this.#loadBranchCanvas(project, branchName)
+        return this.#success({ branch, canvas }, await this.#refreshStatuses(project))
+      } catch (error) {
+        return this.#failure(error, await this.#refreshStatuses(project))
+      }
+    })
+  }
+
+  /**
+   * Replays a browser command journal from its daemon-owned historical base
+   * into a new branch. The browser never supplies a Canvas snapshot.
+   */
+  async saveConflictBranch(
+    projectDir: string,
+    input: WorkspaceSaveConflictBranchInput,
+  ): Promise<WorkspaceOperationResult<WorkspaceConflictBranch>> {
+    const sourceBranch = parseCanvasBranch(input.sourceBranch)
+    const newBranch = parseCanvasBranch(input.newBranch)
+    if (!Number.isSafeInteger(input.baseRevision) || input.baseRevision < 0) {
+      throw new TypeError('conflict baseRevision must be a non-negative safe integer')
+    }
+    if (!Array.isArray(input.mutations)
+      || input.mutations.length === 0
+      || input.mutations.length > 500) {
+      throw new TypeError('conflict recovery requires 1 to 500 mutations')
+    }
+    const mutationIds = input.mutations.map((mutation) => mutation.mutationId)
+    if (new Set(mutationIds).size !== mutationIds.length) {
+      throw new TypeError('conflict recovery mutation ids must be unique')
+    }
+    const project = await this.#project(projectDir)
+    return this.#withBranchLocks(project, [sourceBranch, newBranch], async () => {
+      let branch: CanvasGitBranch | null = null
+      let canvas: CanvasEnvelope | null = null
+      let partial = false
+      try {
+        if (newBranch === sourceBranch) {
+          throw new WorkspaceVersioningError(
+            'invariant_conflict',
+            'conflict recovery branch must differ from its source branch',
+          )
+        }
+        const baseDocument = await this.canvases.readRevision(
+          project.projectDir,
+          sourceBranch,
+          input.baseRevision,
+        )
+        if (!baseDocument) {
+          throw new WorkspaceVersioningError(
+            'conflict_base_unavailable',
+            `Canvas revision ${input.baseRevision} is unavailable on ${sourceBranch}`,
+          )
+        }
+        let recoveredDocument = baseDocument
+        for (const mutation of input.mutations) {
+          recoveredDocument = applyCanvasCommand(recoveredDocument, mutation.command)
+        }
+
+        this.#cancelScheduled(project, newBranch)
+        await this.#reconcileCommittedCanvasMerge(project, newBranch)
+        branch = await this.#canvasBranch(project, newBranch)
+        canvas = await this.canvases.get(project.projectDir, newBranch)
+        partial = branch !== null || canvas.revision > 0
+        this.#assertBranchLayerConsistency(newBranch, branch, canvas)
+
+        if (!branch) {
+          this.#cancelScheduled(project, sourceBranch)
+          await this.#loadBranchCanvas(project, sourceBranch)
+          const source = await this.#checkpoint(project, sourceBranch, 'before-conflict-recovery')
+          branch = await project.canvasGit.createBranch({
+            name: newBranch,
+            startPoint: source.checkpoint.commit,
+          })
+          partial = true
+        }
+        this.#assertManagedBranch(newBranch, branch)
+
+        const gitDocument = await project.canvasGit.readDocument(branch.commit)
+        if (!isDeepStrictEqual(gitDocument, recoveredDocument)) {
+          if (canvas.revision > 0 && !isDeepStrictEqual(canvas.document, recoveredDocument)) {
+            throw new WorkspaceVersioningError(
+              'invariant_conflict',
+              `existing conflict branch contains another recovery: ${newBranch}`,
+            )
+          }
+          await project.canvasGit.checkpoint({
+            branch: newBranch,
+            document: recoveredDocument,
+            reason: `conflict-recovery-${input.baseRevision}`,
+          })
+          branch = await this.#requireCanvasBranch(project, newBranch)
+        }
+
+        if (canvas.revision === 0) {
+          canvas = await this.canvases.materialize(
+            project.projectDir,
+            newBranch,
+            recoveredDocument,
+            branch.commit,
+          )
+          partial = true
+        } else {
+          if (!isDeepStrictEqual(canvas.document, recoveredDocument)) {
+            throw new WorkspaceVersioningError(
+              'invariant_conflict',
+              `existing conflict branch contains another recovery: ${newBranch}`,
+            )
+          }
+          canvas = await this.#alignRuntimeAnchor(project, branch, canvas)
+        }
+
+        return this.#success({
+          sourceBranch,
+          baseRevision: input.baseRevision,
+          mutationIds,
+          branch,
+          canvas,
+        }, await this.#refreshStatuses(project))
+      } catch (error) {
+        const value = branch && canvas ? {
+          sourceBranch,
+          baseRevision: input.baseRevision,
+          mutationIds,
+          branch,
+          canvas,
+        } : undefined
+        return this.#failure(
+          error,
+          await this.#refreshStatuses(project),
+          partial,
+          value,
         )
       }
     })
@@ -348,197 +544,66 @@ export class WorkspaceVersionManager {
     projectDir: string,
     input: CanvasGitRestoreInput,
   ): Promise<WorkspaceOperationResult<WorkspaceBranch>> {
-    const restoreInput = {
-      ...input,
-      checkpoint: canonicalFullGitCommit(input.checkpoint),
-    }
+    const sourceBranch = parseCanvasBranch(input.sourceBranch)
+    const newBranch = parseCanvasBranch(input.newBranch)
+    const checkpoint = canonicalFullGitCommit(input.checkpoint)
     const project = await this.#project(projectDir)
-    return this.#withBranchLocks(project, [input.sourceBranch, input.newBranch], async () => {
+    return this.#withBranchLocks(project, [sourceBranch, newBranch], async () => {
       let branch: CanvasGitBranch | null = null
       let canvas: CanvasEnvelope | null = null
-      let sourceBranch: SourceBranchBinding | null = null
       let partial = false
       try {
-        if (input.newBranch === input.sourceBranch) {
+        if (newBranch === sourceBranch) {
           throw new WorkspaceVersioningError(
             'invariant_conflict',
-            'restored canvas branch must differ from its history branch',
+            'restored Canvas branch must differ from its history branch',
           )
         }
-        const sourceMetadata = await project.canvasGit.readSourceMetadata(restoreInput.checkpoint)
-        canvas = await this.canvases.get(project.projectDir, input.newBranch)
-        branch = await this.#canvasBranch(project, input.newBranch)
+        this.#cancelScheduled(project, newBranch)
+        await this.#reconcileCommittedCanvasMerge(project, newBranch)
+        branch = await this.#canvasBranch(project, newBranch)
+        canvas = await this.canvases.get(project.projectDir, newBranch)
         partial = branch !== null || canvas.revision > 0
-        const source = await this.#sourceBranchLayers(
-          project,
-          input.sourceBranch,
-          input.newBranch,
-          { requireFromWhenTargetMissing: sourceMetadata !== null },
-        )
-        sourceBranch = source.target
-        partial ||= sourceBranch !== null
-        this.#assertBranchLayerConsistency(input.newBranch, branch, canvas, sourceBranch)
-        if (!sourceMetadata && sourceBranch) {
+        this.#assertBranchLayerConsistency(newBranch, branch, canvas)
+        if (branch && branch.commit !== checkpoint) {
           throw new WorkspaceVersioningError(
             'invariant_conflict',
-            `legacy canvas checkpoint cannot be paired with an existing source branch: ${input.newBranch}`,
-          )
-        }
-        if (
-          sourceMetadata
-          && sourceBranch
-          && !(await project.sourceGit.containsCommit(input.newBranch, sourceMetadata.commit))
-        ) {
-          throw new WorkspaceVersioningError(
-            'invariant_conflict',
-            `restored source branch is unrelated to its recorded commit: ${input.newBranch}`,
-          )
-        }
-        if (branch && branch.commit !== restoreInput.checkpoint) {
-          throw new WorkspaceVersioningError(
-            'invariant_conflict',
-            `existing restore branch points at a different checkpoint: ${input.newBranch}`,
+            `existing restore branch points at another checkpoint: ${newBranch}`,
           )
         }
 
         if (!branch) {
-          this.#cancelScheduled(project, input.sourceBranch)
-          try {
-            await this.#checkpoint(project, input.sourceBranch, 'before-restore')
-          } catch (error) {
-            // A quarantined runtime snapshot must not make its last known-good Git
-            // history unrecoverable. Restore remains non-destructive because it
-            // always materializes into a different branch.
-            if (!(error instanceof CanvasCorruptionError)) throw error
-          }
-          branch = await project.canvasGit.restoreAsNewBranch(restoreInput)
+          this.#cancelScheduled(project, sourceBranch)
+          await this.#loadBranchCanvas(project, sourceBranch)
+          await this.#checkpoint(project, sourceBranch, 'before-restore')
+          branch = await project.canvasGit.restoreAsNewBranch({
+            sourceBranch,
+            checkpoint,
+            newBranch,
+          })
           partial = true
         }
-        this.#assertManagedCanvasBranch(input.newBranch, branch)
+        this.#assertManagedBranch(newBranch, branch)
         if (canvas.revision === 0) {
-          const document = parseCanvasDocument(await project.canvasGit.readDocument(input.newBranch))
+          const document = await project.canvasGit.readDocument(branch.commit)
           canvas = await this.canvases.materialize(
             project.projectDir,
-            input.newBranch,
+            newBranch,
             document,
             branch.commit,
           )
           partial = true
         } else {
-          this.#assertRuntimeMatchesCanvasBranch(input.newBranch, branch, canvas)
+          canvas = await this.#alignRuntimeAnchor(project, branch, canvas)
         }
-        if (sourceMetadata && source.status.status !== 'ready') {
-          throw new WorkspaceVersioningError(
-            'source_restore_unavailable',
-            `canvas was restored, but its recorded source commit is unavailable because source Git is ${source.status.status}`,
-          )
-        }
-        if (sourceMetadata && !sourceBranch) {
-          sourceBranch = await project.sourceGit.createBranchAt(
-            input.newBranch,
-            input.sourceBranch,
-            sourceMetadata.commit,
-          )
-          partial = true
-        }
-        return this.#success(
-          { branch, canvas, sourceBranch },
-          await this.#refreshStatuses(project),
-        )
+        return this.#success({ branch, canvas }, await this.#refreshStatuses(project))
       } catch (error) {
-        const value = branch && canvas?.revision
-          ? { branch, canvas, sourceBranch }
-          : undefined
+        const value = branch && canvas ? { branch, canvas } : undefined
         return this.#failure(
           error,
           await this.#refreshStatuses(project),
           partial,
           value,
-          partial && sourceBranch === null,
-        )
-      }
-    })
-  }
-
-  async deleteBranch(
-    projectDir: string,
-    branch: string,
-  ): Promise<WorkspaceOperationResult<WorkspaceDeleteBranch>> {
-    const project = await this.#project(projectDir)
-    return this.#withBranchLocks(project, [branch], async () => {
-      const value: WorkspaceDeleteBranch = {
-        branch,
-        canvasDeleted: false,
-        sourceDeleted: false,
-        runtimeDeleted: false,
-      }
-      let destructiveStarted = false
-      try {
-        if (branch === 'main') {
-          throw new CanvasGitError('PROTECTED_BRANCH', 'The main canvas branch cannot be deleted')
-        }
-        this.#cancelScheduled(project, branch)
-        const canvas = await this.canvases.get(project.projectDir, branch)
-        const canvasBranch = await this.#canvasBranch(project, branch)
-        const source = await this.#sourceBranchLayers(project, 'main', branch, {
-          requireFromWhenTargetMissing: false,
-        })
-
-        // The runtime snapshot is authoritative. Flush it before asking Git
-        // whether this branch is safely merged, otherwise a save still inside
-        // the debounce window could be deleted without ever reaching history.
-        if (canvasBranch && canvas.revision > 0) {
-          await this.#checkpoint(project, branch, 'before-delete')
-        }
-        if (source.target?.dirty) {
-          throw new SourceGitError('worktree_dirty', 'dirty source worktree cannot be removed')
-        }
-        if (source.target) {
-          const preview = await project.sourceGit.previewMerge({
-            sourceBranch: branch,
-            targetBranch: 'main',
-          })
-          if (preview.state !== 'up-to-date') {
-            throw new SourceGitError(
-              'branch_not_merged',
-              `source branch is not fully merged and was not deleted: ${branch}`,
-            )
-          }
-        }
-        if (canvasBranch) {
-          const preview = await project.canvasGit.previewMerge({
-            sourceBranch: branch,
-            targetBranch: 'main',
-          })
-          if (preview.state !== 'up-to-date') {
-            throw new CanvasGitError(
-              'BRANCH_NOT_MERGED',
-              `Canvas branch is not fully merged and was not deleted: ${branch}`,
-            )
-          }
-        }
-
-        destructiveStarted = true
-        if (canvasBranch) await project.canvasGit.deleteBranch(branch)
-        value.canvasDeleted = true
-        if (source.target) {
-          await project.sourceGit.removeBranch(branch)
-        }
-        value.sourceDeleted = source.status.status === 'ready'
-        await this.canvases.removeBranch(project.projectDir, branch)
-        value.runtimeDeleted = true
-        return this.#success(value, await this.#refreshStatuses(project))
-      } catch (error) {
-        const partial = destructiveStarted
-          || value.canvasDeleted
-          || value.sourceDeleted
-          || value.runtimeDeleted
-        return this.#failure(
-          error,
-          await this.#refreshStatuses(project),
-          partial,
-          value,
-          value.canvasDeleted && !value.sourceDeleted,
         )
       }
     })
@@ -548,13 +613,14 @@ export class WorkspaceVersionManager {
     projectDir: string,
     input: WorkspaceMergeInput,
   ): Promise<WorkspaceOperationResult<WorkspaceMergePreview>> {
+    const parsed = parseMergeInput(input)
     const project = await this.#project(projectDir)
     return this.#withBranchLocks(
       project,
-      [input.sourceBranch, input.targetBranch],
+      [parsed.sourceBranch, parsed.targetBranch],
       async () => {
         try {
-          const prepared = await this.#prepareMerge(project, input)
+          const prepared = await this.#prepareMerge(project, parsed)
           return this.#success(prepared.preview, await this.#refreshStatuses(project))
         } catch (error) {
           return this.#failure(error, await this.#refreshStatuses(project))
@@ -567,22 +633,22 @@ export class WorkspaceVersionManager {
     projectDir: string,
     input: WorkspaceMergeExecutionInput,
   ): Promise<WorkspaceOperationResult<WorkspaceMergeExecution>> {
+    const parsed = parseMergeInput(input)
     const project = await this.#project(projectDir)
     return this.#withBranchLocks(
       project,
-      [input.sourceBranch, input.targetBranch],
+      [parsed.sourceBranch, parsed.targetBranch],
       async () => {
         let partialValue: WorkspaceMergeExecution | undefined
-        let sourceFailed = false
         try {
           if (!input.confirmed) {
             throw new WorkspaceVersioningError(
               'merge_confirmation_required',
-              'merge execution requires explicit confirmation',
+              'Canvas merge execution requires explicit confirmation',
             )
           }
-          await this.#assertMergeExpectationCurrent(project, input, input.expected)
-          const prepared = await this.#prepareMerge(project, input)
+          await this.#assertMergeExpectationCurrent(project, parsed, input.expected)
+          const prepared = await this.#prepareMerge(project, parsed)
           if (!sameMergeExpectation(prepared.preview.expectation, input.expected)) {
             throw staleMergePreview()
           }
@@ -590,22 +656,16 @@ export class WorkspaceVersionManager {
             const value: WorkspaceMergeExecution = {
               state: 'conflicts',
               canvas: unexecutedMerge(prepared.preview.canvas),
-              source: prepared.preview.source
-                ? unexecutedMerge(prepared.preview.source)
-                : null,
               canvasEnvelope: prepared.targetCanvas,
             }
             return this.#success(value, await this.#refreshStatuses(project))
           }
 
-          const canvas = await project.canvasGit.merge(input)
+          const canvas = await project.canvasGit.merge(parsed)
           if (canvas.state === 'conflicts') {
             const value: WorkspaceMergeExecution = {
               state: 'conflicts',
               canvas,
-              source: prepared.preview.source
-                ? unexecutedMerge(prepared.preview.source)
-                : null,
               canvasEnvelope: prepared.targetCanvas,
             }
             return this.#success(value, await this.#refreshStatuses(project))
@@ -614,163 +674,91 @@ export class WorkspaceVersionManager {
           partialValue = {
             state: canvas.merged ? 'partial' : 'up-to-date',
             canvas,
-            source: null,
             canvasEnvelope: prepared.targetCanvas,
           }
           if (canvas.commit !== prepared.targetCanvas.lastCheckpoint) {
-            const document = parseCanvasDocument(
-              await project.canvasGit.readDocument(input.targetBranch),
-            )
+            const document = await project.canvasGit.readDocument(canvas.commit)
             partialValue.canvasEnvelope = await this.canvases.applyCheckpoint(
               project.projectDir,
-              input.targetBranch,
+              parsed.targetBranch,
               document,
               canvas.commit,
               prepared.targetCanvas.revision,
             )
           }
-
-          if (prepared.preview.source) {
-            let source: GitMergeExecution
-            try {
-              source = await project.sourceGit.merge(input)
-            } catch (error) {
-              sourceFailed = true
-              throw error
-            }
-            partialValue.source = source
-            if (source.state === 'conflicts') {
-              if (canvas.merged) {
-                sourceFailed = true
-                throw new WorkspaceVersioningError(
-                  'source_merge_conflict',
-                  'canvas merged, but the source merge conflicted and was aborted',
-                )
-              }
-              partialValue.state = 'conflicts'
-              return this.#success(partialValue, await this.#refreshStatuses(project))
-            }
-            partialValue.state = canvas.merged || source.merged ? 'merged' : 'up-to-date'
-            const anchored = await this.#checkpoint(
-              project,
-              input.targetBranch,
-              `source-merge-${input.sourceBranch}`,
-            )
-            partialValue.canvasEnvelope = anchored.canvas
-          } else {
-            partialValue.state = canvas.merged ? 'merged' : 'up-to-date'
-          }
+          partialValue.state = canvas.merged ? 'merged' : 'up-to-date'
           return this.#success(partialValue, await this.#refreshStatuses(project))
         } catch (error) {
           return this.#failure(
             error,
             await this.#refreshStatuses(project),
-            partialValue?.canvas.merged === true || partialValue?.source?.merged === true,
+            partialValue?.canvas.merged === true,
             partialValue,
-            sourceFailed,
           )
         }
       },
     )
   }
 
-  async sourceStatus(projectDir = '.'): Promise<SourceGitStatus> {
-    const project = await this.#project(projectDir)
-    const source = await safeSourceStatus(project.sourceGit)
-    project.source = source
-    return source
-  }
-
-  async bindSource(
-    projectDir: string,
-    logicalBranch = 'main',
-  ): Promise<WorkspaceOperationResult<SourceBranchBinding>> {
-    return this.#sourceOperation(
-      projectDir,
-      (source) => source.bind(logicalBranch),
-      [logicalBranch],
-    )
-  }
-
-  async createSourceBranch(
-    projectDir: string,
-    logicalBranch: string,
-    fromLogicalBranch: string,
-  ): Promise<WorkspaceOperationResult<SourceBranchBinding>> {
-    return this.#sourceOperation(
-      projectDir,
-      (source) => source.createBranch(logicalBranch, fromLogicalBranch),
-      [logicalBranch, fromLogicalBranch],
-    )
-  }
-
-  async sourceBranch(
-    projectDir: string,
-    logicalBranch: string,
-  ): Promise<WorkspaceOperationResult<SourceBranchBinding | null>> {
-    return this.#sourceOperation(projectDir, (source) => source.branch(logicalBranch))
-  }
-
-  /** Returns only a revalidated managed worktree; unbound projects stay read-only. */
+  /**
+   * Task runs do not require a compatibility source-branch binding. The returned project
+   * root has passed the same project lease/scope checks as Canvas persistence.
+   * A non-default branch must already exist in runtime or managed Git metadata;
+   * the check never constructs an empty runtime envelope.
+   */
   async sourceExecutionProjectDir(
     projectDir: string,
-    logicalBranch: string,
-  ): Promise<string | null> {
+    branchRequest = 'main',
+  ): Promise<string> {
+    const branch = parseCanvasBranch(branchRequest)
     const project = await this.#project(projectDir)
-    const status = await project.sourceGit.status()
-    project.source = status
-    if (status.status === 'unavailable' || status.status === 'unbound') return null
-    if (status.status !== 'ready') {
-      throw new WorkspaceVersioningError(
-        'source_worktree_unavailable',
-        status.reason ?? 'managed source worktree is unavailable',
-      )
+    // The default branch remains runnable when optional Canvas Git history is
+    // unavailable; authoritative Run and Canvas durability do not depend on Git.
+    if (branch === 'main'
+      || await this.canvases.hasSnapshot(project.projectDir, branch)) {
+      return project.projectDir
     }
-    const binding = await project.sourceGit.branch(logicalBranch)
-    if (!binding) {
-      throw new WorkspaceVersioningError(
-        'source_branch_not_bound',
-        `canvas branch has no managed source worktree: ${logicalBranch}`,
-      )
-    }
-    return binding.projectDir
+    await this.#queryableBranch(project, branch)
+    return project.projectDir
   }
 
-  async checkpointSource(
-    projectDir: string,
-    logicalBranch: string,
-    options: { runId: string; nodeTitle: string; allowSensitive?: boolean },
-  ): Promise<WorkspaceOperationResult<SourceCheckpointResult>> {
-    const project = await this.#project(projectDir)
-    return this.#withBranchLocks(project, [logicalBranch], async () => {
-      let value: SourceCheckpointResult | undefined
-      try {
-        value = await project.sourceGit.checkpoint(logicalBranch, options)
-        // A sensitive preview returns without committing, but the successful
-        // second call deliberately keeps `requiresConfirmation: true` so the
-        // UI can retain the risk audit. `allowSensitive` therefore also marks
-        // a completed checkpoint that must be paired with Canvas history.
-        if (!value.requiresConfirmation || options.allowSensitive === true) {
-          this.#cancelScheduled(project, logicalBranch)
-          await this.#checkpoint(
-            project,
-            logicalBranch,
-            `source-checkpoint-${options.runId}`,
-          )
-        }
-        return this.#success(value, await this.#refreshStatuses(project))
-      } catch (error) {
-        return this.#failure(
-          error,
-          await this.#refreshStatuses(project),
-          value !== undefined,
-          value,
-          false,
-        )
+  /** Blocks new versioning work and drains every queued branch operation. */
+  async beginProjectDeletion(projectDirRequest: string): Promise<string> {
+    const project = await this.#project(projectDirRequest)
+    if (
+      this.#projectDeletionReservations.has(project.projectDir)
+      || this.#deletedProjects.has(project.projectDir)
+    ) {
+      throw new ProtocolError('workspace project is busy', 'project_busy', 409)
+    }
+    this.#projectDeletionReservations.add(project.projectDir)
+    try {
+      for (const [key, scheduled] of this.#scheduled) {
+        if (scheduled.project.projectDir !== project.projectDir) continue
+        clearTimeout(scheduled.timer)
+        this.#scheduled.delete(key)
       }
-    })
+      const prefix = `${project.projectDir}\0`
+      await Promise.allSettled(
+        [...this.#branchTails.entries()]
+          .filter(([key]) => key.startsWith(prefix))
+          .map(([, tail]) => tail),
+      )
+      return project.projectDir
+    } catch (error) {
+      this.#projectDeletionReservations.delete(project.projectDir)
+      throw error
+    }
   }
 
+  finishProjectDeletion(projectDir: string, deleted: boolean): void {
+    this.#projectDeletionReservations.delete(projectDir)
+    if (!deleted) return
+    this.#projects.delete(projectDir)
+    this.#deletedProjects.add(projectDir)
+  }
+
+  /** Flushes debounced history but leaves the injected Canvas manager owned by its caller. */
   close(): Promise<void> {
     this.#closing = true
     if (this.#closePromise) return this.#closePromise
@@ -778,8 +766,6 @@ export class WorkspaceVersionManager {
     for (const scheduled of pending) clearTimeout(scheduled.timer)
     this.#scheduled.clear()
     this.#closePromise = (async () => {
-      // A clean shutdown is a durability boundary: debounce coalesces edits
-      // during normal work, but must not silently discard the final checkpoint.
       for (const scheduled of pending) {
         const task = this.#withBranchLocks(
           scheduled.project,
@@ -793,12 +779,10 @@ export class WorkspaceVersionManager {
           .then(() => this.#refreshStatuses(scheduled.project))
           .catch(() => this.#refreshStatuses(scheduled.project))
           .then(() => undefined)
-        this.#checkpointTasks.add(task)
-        void task.finally(() => this.#checkpointTasks.delete(task))
+        this.#trackCheckpointTask(task)
       }
       await Promise.allSettled([...this.#checkpointTasks])
       await Promise.allSettled([...this.#branchTails.values()])
-      await Promise.allSettled([this.canvases.close(), this.sources.close()])
     })()
     return this.#closePromise
   }
@@ -810,47 +794,63 @@ export class WorkspaceVersionManager {
     if (input.sourceBranch === input.targetBranch) {
       throw new WorkspaceVersioningError(
         'invalid_merge',
-        'merge source and target branches must be different',
+        'Canvas merge source and target branches must be different',
       )
     }
+    await Promise.all([
+      this.#queryableBranch(project, input.sourceBranch),
+      this.#queryableBranch(project, input.targetBranch),
+    ])
+    await this.#reconcileCommittedCanvasMerge(project, input.sourceBranch)
     await this.#reconcileCommittedCanvasMerge(project, input.targetBranch)
     this.#cancelScheduled(project, input.sourceBranch)
     this.#cancelScheduled(project, input.targetBranch)
-    const sourceCanvas = await this.#checkpoint(project, input.sourceBranch, 'before-merge')
+    const source = await this.#checkpoint(project, input.sourceBranch, 'before-merge')
     const target = await this.#checkpoint(project, input.targetBranch, 'before-merge')
     const canvas = await project.canvasGit.previewMerge(input)
-
-    const sourceStatus = await project.sourceGit.status()
-    if (sourceStatus.status === 'degraded') {
-      throw new WorkspaceVersioningError(
-        'source_degraded',
-        sourceStatus.reason ?? 'source Git is degraded',
-      )
-    }
-    const source = sourceStatus.status === 'ready'
-      ? await project.sourceGit.previewMerge(input)
-      : null
     return {
       targetCanvas: target.canvas,
       preview: {
-        state: mergeState(canvas, source),
+        state: canvas.state,
         canvas,
-        source,
         expectation: {
-          canvas: {
-            sourceCommit: canvas.sourceCommit,
-            targetCommit: canvas.targetCommit,
-            sourceRevision: sourceCanvas.canvas.revision,
-            targetRevision: target.canvas.revision,
-          },
-          source: source
-            ? {
-                sourceCommit: source.sourceCommit,
-                targetCommit: source.targetCommit,
-              }
-            : null,
+          sourceCommit: canvas.sourceCommit,
+          targetCommit: canvas.targetCommit,
+          sourceRevision: source.canvas.revision,
+          targetRevision: target.canvas.revision,
         },
       },
+    }
+  }
+
+  async #assertMergeExpectationCurrent(
+    project: ProjectVersionState,
+    input: WorkspaceMergeInput,
+    expected: WorkspaceMergeExpectation,
+  ): Promise<void> {
+    assertMergeExpectation(expected)
+    await Promise.all([
+      this.#queryableBranch(project, input.sourceBranch),
+      this.#queryableBranch(project, input.targetBranch),
+    ])
+    const [sourceCanvas, targetCanvas, status] = await Promise.all([
+      this.canvases.get(project.projectDir, input.sourceBranch),
+      this.canvases.get(project.projectDir, input.targetBranch),
+      project.canvasGit.status(),
+    ])
+    if (status.state !== 'ready') throw staleMergePreview()
+    const branches = await project.canvasGit.listBranches()
+    const sourceBranch = branches.find((candidate) => candidate.name === input.sourceBranch)
+    const targetBranch = branches.find((candidate) => candidate.name === input.targetBranch)
+    if (
+      sourceCanvas.revision !== expected.sourceRevision
+      || targetCanvas.revision !== expected.targetRevision
+      || sourceCanvas.lastCheckpoint !== expected.sourceCommit
+      || targetCanvas.lastCheckpoint !== expected.targetCommit
+      || sourceBranch?.commit !== expected.sourceCommit
+      || targetBranch?.commit !== expected.targetCommit
+    ) {
+      throw staleMergePreview()
     }
   }
 
@@ -865,103 +865,100 @@ export class WorkspaceVersionManager {
       runtime.lastCheckpoint,
     )
     if (!merge) return
-    const firstParentDocument = parseCanvasDocument(merge.firstParentDocument)
-    if (!isDeepStrictEqual(
-      mergeRecoveryProjection(runtime.document),
-      mergeRecoveryProjection(firstParentDocument),
-    )) {
+    if (!isDeepStrictEqual(runtime.document, merge.firstParentDocument)) {
       throw new WorkspaceVersioningError(
         'invariant_conflict',
-        `runtime canvas changed after checkpoint and cannot be replaced by recovered merge: ${branch}`,
+        `runtime Canvas changed after checkpoint and cannot be replaced: ${branch}`,
       )
     }
-    const document = parseCanvasDocument(merge.document)
     await this.canvases.applyCheckpoint(
       project.projectDir,
       branch,
-      document,
+      merge.document,
       merge.commit,
       runtime.revision,
     )
   }
 
-  async #assertMergeExpectationCurrent(
+  async #loadBranchCanvas(
     project: ProjectVersionState,
-    input: WorkspaceMergeInput,
-    expected: WorkspaceMergeExpectation,
-  ): Promise<void> {
-    assertMergeExpectation(expected)
-    const [sourceCanvas, targetCanvas, canvasStatus, sourceStatus] = await Promise.all([
-      this.canvases.get(project.projectDir, input.sourceBranch),
-      this.canvases.get(project.projectDir, input.targetBranch),
+    branchName: string,
+  ): Promise<CanvasEnvelope> {
+    const [status, hasSnapshot] = await Promise.all([
       project.canvasGit.status(),
-      project.sourceGit.status(),
+      this.canvases.hasSnapshot(project.projectDir, branchName),
     ])
-    if (canvasStatus.state !== 'ready') throw staleMergePreview()
-    const canvasBranches = await project.canvasGit.listBranches()
-    const canvasSource = canvasBranches.find(
-      (candidate) => candidate.name === input.sourceBranch,
-    )
-    const canvasTarget = canvasBranches.find(
-      (candidate) => candidate.name === input.targetBranch,
-    )
-    if (
-      sourceCanvas.revision !== expected.canvas.sourceRevision
-      || targetCanvas.revision !== expected.canvas.targetRevision
-      || sourceCanvas.lastCheckpoint !== expected.canvas.sourceCommit
-      || targetCanvas.lastCheckpoint !== expected.canvas.targetCommit
-      || canvasSource?.commit !== expected.canvas.sourceCommit
-      || canvasTarget?.commit !== expected.canvas.targetCommit
-    ) {
-      throw staleMergePreview()
+    project.versioning = status
+    if (status.state === 'degraded') {
+      if (branchName === 'main' || hasSnapshot) {
+        return this.canvases.get(project.projectDir, branchName)
+      }
+      throw new WorkspaceVersioningError('canvas_degraded', status.reason)
     }
-
-    if (expected.source === null) {
-      if (sourceStatus.status === 'ready') throw staleMergePreview()
-      if (sourceStatus.status === 'degraded') {
+    if (status.state === 'uninitialized') {
+      if (branchName === 'main') return this.canvases.get(project.projectDir, branchName)
+      if (hasSnapshot) {
         throw new WorkspaceVersioningError(
-          'source_degraded',
-          sourceStatus.reason ?? 'source Git is degraded',
+          'invariant_conflict',
+          `runtime Canvas has no matching Git branch: ${branchName}`,
         )
       }
-      return
+      throw new CanvasGitError(
+        'BRANCH_NOT_FOUND',
+        `Canvas branch does not exist: ${branchName}`,
+      )
     }
-    if (sourceStatus.status !== 'ready') throw staleMergePreview()
-    const sourceBranch = sourceStatus.branches.find(
-      (candidate) => candidate.logicalBranch === input.sourceBranch,
-    )
-    const targetBranch = sourceStatus.branches.find(
-      (candidate) => candidate.logicalBranch === input.targetBranch,
-    )
-    if (
-      !sourceBranch
-      || !targetBranch
-      || sourceBranch.dirty
-      || targetBranch.dirty
-      || sourceBranch.head !== expected.source.sourceCommit
-      || targetBranch.head !== expected.source.targetCommit
-    ) {
-      throw staleMergePreview()
+    const branch = (await project.canvasGit.listBranches())
+      .find((candidate) => candidate.name === branchName)
+    if (!branch) {
+      if (hasSnapshot) {
+        throw new WorkspaceVersioningError(
+          'invariant_conflict',
+          `runtime Canvas has no matching Git branch: ${branchName}`,
+        )
+      }
+      throw new CanvasGitError(
+        'BRANCH_NOT_FOUND',
+        `Canvas branch does not exist: ${branchName}`,
+      )
     }
+    this.#assertManagedBranch(branchName, branch)
+    await this.#reconcileCommittedCanvasMerge(project, branchName)
+    let runtime = await this.canvases.get(project.projectDir, branchName)
+    const currentBranch = await this.#requireCanvasBranch(project, branchName)
+    if (runtime.revision === 0) {
+      const document = await project.canvasGit.readDocument(currentBranch.commit)
+      return this.canvases.materialize(
+        project.projectDir,
+        branchName,
+        document,
+        currentBranch.commit,
+      )
+    }
+    runtime = await this.#alignRuntimeAnchor(project, currentBranch, runtime)
+    return runtime
   }
 
-  async #sourceOperation<T>(
-    projectDir: string,
-    operation: (source: SourceGitStore) => Promise<T>,
-    branches: readonly string[] = [],
-  ): Promise<WorkspaceOperationResult<T>> {
-    const project = await this.#project(projectDir)
-    const execute = async (): Promise<WorkspaceOperationResult<T>> => {
-      try {
-        const value = await operation(project.sourceGit)
-        return this.#success(value, await this.#refreshStatuses(project))
-      } catch (error) {
-        return this.#failure<T>(error, await this.#refreshStatuses(project), false, undefined, true)
-      }
+  async #alignRuntimeAnchor(
+    project: ProjectVersionState,
+    branch: CanvasGitBranch,
+    runtime: CanvasEnvelope,
+  ): Promise<CanvasEnvelope> {
+    this.#assertManagedBranch(branch.name, branch)
+    if (runtime.lastCheckpoint === branch.commit) return runtime
+    const branchDocument = await project.canvasGit.readDocument(branch.commit)
+    if (!isDeepStrictEqual(runtime.document, branchDocument)) {
+      throw new WorkspaceVersioningError(
+        'invariant_conflict',
+        `runtime Canvas and Git history disagree for branch: ${branch.name}`,
+      )
     }
-    return branches.length > 0
-      ? this.#withBranchLocks(project, branches, execute)
-      : execute()
+    return this.canvases.setLastCheckpoint(
+      project.projectDir,
+      branch.name,
+      runtime.revision,
+      branch.commit,
+    )
   }
 
   async #checkpoint(
@@ -972,27 +969,10 @@ export class WorkspaceVersionManager {
     let conflict: CanvasRevisionConflictError | null = null
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const canvas = await this.canvases.get(project.projectDir, branch)
-      const [source, metadata] = await Promise.all([
-        this.#sourceMetadataForCheckpoint(project, branch),
-        buildCheckpointMetadata({
-          projectDir: project.projectDir,
-          branch,
-          document: canvas.document,
-          loadRunSummary: async ({ projectDir, runId }) => {
-            const summary = await project.runLogs.summary(runId)
-            return summary ? { projectDir, summary } : null
-          },
-        }),
-      ])
       const checkpoint = await project.canvasGit.checkpoint({
         branch,
         document: canvas.document,
         reason,
-        source,
-        runs: metadata.runs,
-        runIndex: metadata.runIndex,
-        artifacts: metadata.artifacts,
-        artifactIndex: metadata.artifactIndex,
       })
       try {
         const updated = await this.canvases.setLastCheckpoint(
@@ -1001,6 +981,7 @@ export class WorkspaceVersionManager {
           canvas.revision,
           checkpoint.commit,
         )
+        project.versioning = checkpoint.status
         return { canvas: updated, checkpoint }
       } catch (error) {
         if (!(error instanceof CanvasRevisionConflictError)) throw error
@@ -1010,24 +991,8 @@ export class WorkspaceVersionManager {
     throw conflict ?? new CanvasRevisionConflictError(-1)
   }
 
-  async #sourceMetadataForCheckpoint(
-    project: ProjectVersionState,
-    branch: string,
-  ): Promise<CanvasGitSourceMetadata | null> {
-    const status = await project.sourceGit.status()
-    if (status.status === 'degraded') {
-      throw new WorkspaceVersioningError(
-        'source_degraded',
-        status.reason ?? 'source Git is degraded',
-      )
-    }
-    if (status.status !== 'ready') return null
-    const binding = status.branches.find((candidate) => candidate.logicalBranch === branch)
-    return binding ? { version: 1, commit: binding.head } : null
-  }
-
   #scheduleCheckpoint(project: ProjectVersionState, branch: string, reason: string): void {
-    if (this.#closing) return
+    if (this.#closing || this.#projectDeletionReservations.has(project.projectDir)) return
     const key = branchKey(project.projectDir, branch)
     const prior = this.#scheduled.get(key)
     if (prior) clearTimeout(prior.timer)
@@ -1043,11 +1008,15 @@ export class WorkspaceVersionManager {
         .then(() => this.#refreshStatuses(project))
         .catch(() => this.#refreshStatuses(project))
         .then(() => undefined)
-      this.#checkpointTasks.add(task)
-      void task.finally(() => this.#checkpointTasks.delete(task))
+      this.#trackCheckpointTask(task)
     }, this.#checkpointDelayMs)
     timer.unref?.()
     this.#scheduled.set(key, { timer, reason, project, branch })
+  }
+
+  #trackCheckpointTask(task: Promise<void>): void {
+    this.#checkpointTasks.add(task)
+    void task.finally(() => this.#checkpointTasks.delete(task))
   }
 
   #cancelScheduled(project: ProjectVersionState, branch: string): void {
@@ -1063,6 +1032,12 @@ export class WorkspaceVersionManager {
     branches: readonly string[],
     operation: () => Promise<T>,
   ): Promise<T> {
+    if (
+      this.#projectDeletionReservations.has(project.projectDir)
+      || this.#deletedProjects.has(project.projectDir)
+    ) {
+      throw new ProtocolError('workspace project is being deleted', 'project_busy', 409)
+    }
     const keys = [...new Set(branches.map((branch) => branchKey(project.projectDir, branch)))]
       .sort()
     const predecessors = keys.map((key) => this.#branchTails.get(key) ?? Promise.resolve())
@@ -1085,109 +1060,83 @@ export class WorkspaceVersionManager {
     }
   }
 
+  async #queryableBranch(
+    project: ProjectVersionState,
+    branch: string,
+  ): Promise<CanvasGitBranch | null> {
+    const status = await project.canvasGit.status()
+    project.versioning = status
+    if (status.state === 'degraded') {
+      throw new WorkspaceVersioningError('canvas_degraded', status.reason)
+    }
+    if (status.state === 'uninitialized') {
+      if (branch === 'main') return null
+      throw new CanvasGitError(
+        'BRANCH_NOT_FOUND',
+        `Canvas branch does not exist: ${branch}`,
+      )
+    }
+    const candidate = (await project.canvasGit.listBranches())
+      .find((entry) => entry.name === branch)
+    if (!candidate) {
+      throw new CanvasGitError(
+        'BRANCH_NOT_FOUND',
+        `Canvas branch does not exist: ${branch}`,
+      )
+    }
+    this.#assertManagedBranch(branch, candidate)
+    return candidate
+  }
+
   async #canvasBranch(
     project: ProjectVersionState,
     branch: string,
   ): Promise<CanvasGitBranch | null> {
     const status = await project.canvasGit.status()
+    project.versioning = status
     if (status.state === 'degraded') {
-      throw new WorkspaceVersioningError(
-        'canvas_degraded',
-        status.reason,
-      )
+      throw new WorkspaceVersioningError('canvas_degraded', status.reason)
     }
     if (status.state === 'uninitialized') return null
     return (await project.canvasGit.listBranches())
       .find((candidate) => candidate.name === branch) ?? null
   }
 
-  async #sourceBranchLayers(
+  async #requireCanvasBranch(
     project: ProjectVersionState,
-    fromBranch: string,
-    targetBranch: string,
-    options: { requireFromWhenTargetMissing?: boolean } = {},
-  ): Promise<SourceBranchLayers> {
-    const status = await project.sourceGit.status()
-    if (status.status === 'degraded') {
-      throw new WorkspaceVersioningError(
-        'source_degraded',
-        status.reason ?? 'source Git is degraded',
+    branch: string,
+  ): Promise<CanvasGitBranch> {
+    const candidate = await this.#canvasBranch(project, branch)
+    if (!candidate) {
+      throw new CanvasGitError(
+        'BRANCH_NOT_FOUND',
+        `Canvas branch does not exist: ${branch}`,
       )
     }
-    if (status.status !== 'ready') return { status, from: null, target: null }
-    const from = status.branches.find((candidate) => candidate.logicalBranch === fromBranch) ?? null
-    const target = status.branches.find(
-      (candidate) => candidate.logicalBranch === targetBranch,
-    ) ?? null
-    if (!target && options.requireFromWhenTargetMissing !== false) {
-      if (!from) {
-        throw new WorkspaceVersioningError(
-          'invariant_conflict',
-          `source branch is missing for canvas branch ${fromBranch}`,
-        )
-      }
-      if (from.dirty) {
-        throw new SourceGitError(
-          'worktree_dirty',
-          `source worktree must be clean before branching: ${fromBranch}`,
-        )
-      }
+    this.#assertManagedBranch(branch, candidate)
+    return candidate
+  }
+
+  #assertManagedBranch(branchName: string, branch: CanvasGitBranch): void {
+    if (!branch.worktree
+      || !branch.worktree.managed
+      || branch.worktree.branch !== branchName) {
+      throw new WorkspaceVersioningError(
+        'invariant_conflict',
+        `Canvas branch has no matching managed worktree: ${branchName}`,
+      )
     }
-    return { status, from, target }
   }
 
   #assertBranchLayerConsistency(
     branchName: string,
     branch: CanvasGitBranch | null,
     canvas: CanvasEnvelope,
-    sourceBranch: SourceBranchBinding | null,
   ): void {
-    if (!branch && (canvas.revision > 0 || sourceBranch)) {
+    if (!branch && canvas.revision > 0) {
       throw new WorkspaceVersioningError(
         'invariant_conflict',
-        `branch layers disagree because canvas Git branch is missing: ${branchName}`,
-      )
-    }
-    if (branch && canvas.revision > 0 && canvas.lastCheckpoint === null) {
-      throw new WorkspaceVersioningError(
-        'invariant_conflict',
-        `runtime canvas has no checkpoint for existing branch: ${branchName}`,
-      )
-    }
-  }
-
-  #assertManagedCanvasBranch(branchName: string, branch: CanvasGitBranch): void {
-    if (
-      !branch.worktree
-      || !branch.worktree.managed
-      || branch.worktree.branch !== branchName
-    ) {
-      throw new WorkspaceVersioningError(
-        'invariant_conflict',
-        `canvas branch has no matching managed worktree: ${branchName}`,
-      )
-    }
-  }
-
-  #assertRuntimeMatchesCanvasBranch(
-    branchName: string,
-    branch: CanvasGitBranch,
-    canvas: CanvasEnvelope,
-  ): void {
-    if (canvas.lastCheckpoint === null) {
-      throw new WorkspaceVersioningError(
-        'invariant_conflict',
-        `runtime canvas has no checkpoint for existing branch: ${branchName}`,
-      )
-    }
-    if (
-      canvas.revision === 1
-      && canvas.lastMutationId === null
-      && canvas.lastCheckpoint !== branch.commit
-    ) {
-      throw new WorkspaceVersioningError(
-        'invariant_conflict',
-        `materialized runtime canvas points at another checkpoint: ${branchName}`,
+        `Canvas branch layers disagree because Git history is missing: ${branchName}`,
       )
     }
   }
@@ -1196,47 +1145,46 @@ export class WorkspaceVersionManager {
     if (this.#closing) {
       throw new ProtocolError('daemon is shutting down', 'daemon_shutting_down', 503)
     }
-    const projectDir = await this.canvases.acquireProjectLease(requestedProjectDir)
+    const leasedProjectDir = await this.canvases.acquireProjectLease(requestedProjectDir)
+    const projectDir = (await createProjectScope({
+      projectRoot: this.#projectRoot,
+      projectDir: leasedProjectDir,
+    })).projectDir
+    if (
+      this.#projectDeletionReservations.has(projectDir)
+      || this.#deletedProjects.has(projectDir)
+    ) {
+      throw new ProtocolError('workspace project is being deleted', 'project_busy', 409)
+    }
     let project = this.#projects.get(projectDir)
     if (!project) {
-      project = (async () => ({
+      project = Promise.resolve({
         projectDir,
         canvasGit: this.#canvasGitFactory(projectDir),
-        runLogs: new RunLogStore(projectDir),
-        sourceGit: await this.sources.store(projectDir),
         versioning: null,
-        source: null,
-      }))()
+      })
       this.#projects.set(projectDir, project)
     }
     return project
   }
 
   async #cachedStatuses(project: ProjectVersionState): Promise<WorkspaceStatuses> {
-    if (project.versioning && project.source) {
-      return { versioning: project.versioning, source: project.source }
-    }
-    return this.#refreshStatuses(project)
+    return project.versioning
+      ? { versioning: project.versioning }
+      : this.#refreshStatuses(project)
   }
 
   async #refreshStatuses(project: ProjectVersionState): Promise<WorkspaceStatuses> {
-    const [versioning, source] = await Promise.all([
-      safeCanvasStatus(project.canvasGit),
-      safeSourceStatus(project.sourceGit),
-    ])
+    const versioning = await safeCanvasStatus(project.canvasGit)
     project.versioning = versioning
-    project.source = source
-    return { versioning, source }
+    return { versioning }
   }
 
-  #success<T>(value: T, statuses: WorkspaceStatuses): WorkspaceOperationResult<T> {
-    return {
-      ok: true,
-      partial: false,
-      sourceDegraded: false,
-      value,
-      ...statuses,
-    }
+  #success<T>(
+    value: T,
+    statuses: WorkspaceStatuses,
+  ): WorkspaceOperationResult<T> {
+    return { ok: true, partial: false, value, ...statuses }
   }
 
   #failure<T>(
@@ -1244,12 +1192,10 @@ export class WorkspaceVersionManager {
     statuses: WorkspaceStatuses,
     partial = false,
     value?: T,
-    sourceDegraded = false,
   ): WorkspaceOperationResult<T> {
     return {
       ok: false,
       partial,
-      sourceDegraded: sourceDegraded || statuses.source.status === 'degraded',
       error: workspaceError(error),
       ...(value === undefined ? {} : { value }),
       ...statuses,
@@ -1257,7 +1203,7 @@ export class WorkspaceVersionManager {
   }
 }
 
-class WorkspaceVersioningError extends Error {
+export class WorkspaceVersioningError extends Error {
   readonly code: string
 
   constructor(code: string, message: string) {
@@ -1267,58 +1213,37 @@ class WorkspaceVersioningError extends Error {
   }
 }
 
+function parseMergeInput(input: WorkspaceMergeInput): WorkspaceMergeInput {
+  return {
+    sourceBranch: parseCanvasBranch(input.sourceBranch),
+    targetBranch: parseCanvasBranch(input.targetBranch),
+  }
+}
+
 function branchKey(projectDir: string, branch: string): string {
   return `${projectDir}\0${branch}`
 }
 
 function canonicalFullGitCommit(value: string): string {
-  return /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(value)
-    ? value.toLowerCase()
-    : value
-}
-
-function mergeRecoveryProjection(document: ReturnType<typeof parseCanvasDocument>): unknown {
-  return JSON.parse(JSON.stringify({
-    ...document,
-    generationByNodeId: {},
-  })) as unknown
-}
-
-function mergeState(canvas: GitMergePreview, source: GitMergePreview | null): GitMergeState {
-  if (canvas.state === 'conflicts' || source?.state === 'conflicts') return 'conflicts'
-  if (canvas.state === 'ready' || source?.state === 'ready') return 'ready'
-  return 'up-to-date'
+  if (!isFullGitCommit(value)) {
+    throw new WorkspaceVersioningError(
+      'invalid_checkpoint',
+      'Canvas restore requires a full Git checkpoint identifier',
+    )
+  }
+  return value.toLowerCase()
 }
 
 function unexecutedMerge(preview: GitMergePreview): GitMergeExecution {
-  return {
-    ...preview,
-    merged: false,
-    commit: preview.targetCommit,
-  }
+  return { ...preview, merged: false, commit: preview.targetCommit }
 }
 
 function assertMergeExpectation(expected: WorkspaceMergeExpectation): void {
-  if (!isRecord(expected) || !isRecord(expected.canvas)) {
-    throw invalidMergeExpectation()
-  }
-  const canvas = expected.canvas
-  if (
-    !isFullGitCommit(canvas.sourceCommit)
-    || !isFullGitCommit(canvas.targetCommit)
-    || !isRevision(canvas.sourceRevision)
-    || !isRevision(canvas.targetRevision)
-  ) {
-    throw invalidMergeExpectation()
-  }
-  if (
-    expected.source !== null
-    && (
-      !isRecord(expected.source)
-      || !isFullGitCommit(expected.source.sourceCommit)
-      || !isFullGitCommit(expected.source.targetCommit)
-    )
-  ) {
+  if (!isRecord(expected)
+    || !isFullGitCommit(expected.sourceCommit)
+    || !isFullGitCommit(expected.targetCommit)
+    || !isRevision(expected.sourceRevision)
+    || !isRevision(expected.targetRevision)) {
     throw invalidMergeExpectation()
   }
 }
@@ -1327,17 +1252,10 @@ function sameMergeExpectation(
   current: WorkspaceMergeExpectation,
   expected: WorkspaceMergeExpectation,
 ): boolean {
-  return current.canvas.sourceCommit === expected.canvas.sourceCommit
-    && current.canvas.targetCommit === expected.canvas.targetCommit
-    && current.canvas.sourceRevision === expected.canvas.sourceRevision
-    && current.canvas.targetRevision === expected.canvas.targetRevision
-    && (
-      current.source === null && expected.source === null
-      || current.source !== null
-        && expected.source !== null
-        && current.source.sourceCommit === expected.source.sourceCommit
-        && current.source.targetCommit === expected.source.targetCommit
-    )
+  return current.sourceCommit === expected.sourceCommit
+    && current.targetCommit === expected.targetCommit
+    && current.sourceRevision === expected.sourceRevision
+    && current.targetRevision === expected.targetRevision
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1345,7 +1263,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isFullGitCommit(value: unknown): value is string {
-  return typeof value === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(value)
+  return typeof value === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(value)
 }
 
 function isRevision(value: unknown): value is number {
@@ -1355,14 +1273,14 @@ function isRevision(value: unknown): value is number {
 function invalidMergeExpectation(): WorkspaceVersioningError {
   return new WorkspaceVersioningError(
     'invalid_merge_expectation',
-    'merge execution requires the exact expectation returned by preview',
+    'Canvas merge requires the exact expectation returned by preview',
   )
 }
 
 function staleMergePreview(): WorkspaceVersioningError {
   return new WorkspaceVersioningError(
     'merge_preview_stale',
-    'canvas or source state changed after merge preview; preview the merge again',
+    'Canvas state changed after merge preview; preview the merge again',
   )
 }
 
@@ -1379,24 +1297,32 @@ async function safeCanvasStatus(store: CanvasGitStore): Promise<CanvasGitStatus>
   }
 }
 
-async function safeSourceStatus(store: SourceGitStore): Promise<SourceGitStatus> {
-  try {
-    return await store.status()
-  } catch (error) {
-    return { status: 'degraded', reason: errorMessage(error), branches: [] }
-  }
-}
-
 function workspaceError(error: unknown): WorkspaceOperationError {
   const code = error instanceof CanvasGitError
-    || error instanceof SourceGitError
     || error instanceof WorkspaceVersioningError
     || error instanceof ProtocolError
     ? error.code
+    : error instanceof CanvasCommandError
+      ? `canvas_command_${error.code}`
     : error instanceof CanvasRevisionConflictError
       ? 'canvas_revision_conflict'
-      : 'versioning_failed'
+      : error instanceof CanvasMutationReuseError
+        ? 'canvas_mutation_reuse'
+        : error instanceof CanvasSnapshotError
+          ? 'canvas_snapshot_invalid'
+          : 'versioning_failed'
   return { code, message: errorMessage(error) }
+}
+
+function isDestructiveCanvasCommand(command: CanvasCommand): boolean {
+  return command.type === 'DeleteNode'
+    || command.type === 'DeleteEdge'
+    || command.type === 'DeleteEdges'
+    || command.type === 'DissolveCollection'
+    || command.type === 'DeleteTask'
+    || command.type === 'DeleteTaskAndViews'
+    || command.type === 'DeleteCollection'
+    || command.type === 'DeleteCollectionAndContents'
 }
 
 function errorMessage(error: unknown): string {

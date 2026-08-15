@@ -448,6 +448,49 @@ test('run outcomes stay run-bound, private, durable, and success-only', async ()
   }
 })
 
+test('project deletion reservation rejects active Runs and blocks new Runs in both directions', async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'ggai-runs-project-delete-'))
+  const root = await realpath(temporaryRoot)
+  const started = deferred()
+  const release = deferred()
+  const transport: AgentProcessTransport = {
+    kind: 'codex',
+    async run(options) {
+      started.resolve()
+      await release.promise
+      options.onEvent({ type: 'done', stopReason: 'end_turn' })
+      return { sessionId: null }
+    },
+    async cancel() {
+      release.resolve()
+      return true
+    },
+  }
+  const manager = new RunManager({ projectRoot: root, registry: registry(transport) })
+
+  try {
+    await manager.create(request('run-before-project-delete', 'node-delete'))
+    await withTimeout(started.promise)
+    await assert.rejects(
+      manager.beginProjectDeletion('.'),
+      (error: unknown) => error instanceof ProtocolError && error.code === 'project_busy',
+    )
+
+    release.resolve()
+    await waitFor(() => manager.get('run-before-project-delete')?.status === 'done')
+    const projectDir = await beginProjectDeletionWhenIdle(manager, '.')
+    await assert.rejects(
+      manager.create(request('run-during-project-delete', 'node-delete-late')),
+      (error: unknown) => error instanceof ProtocolError && error.code === 'project_busy',
+    )
+    manager.endProjectDeletion(projectDir)
+  } finally {
+    release.resolve()
+    await manager.close()
+    await rm(temporaryRoot, { recursive: true, force: true })
+  }
+})
+
 function outcomeFor(nodeId: string): object {
   return {
     schemaVersion: 1,
@@ -480,6 +523,21 @@ async function createWhenSourceIsFree(
     }
   }
   throw new Error('source worktree did not become available')
+}
+
+async function beginProjectDeletionWhenIdle(
+  manager: RunManager,
+  projectDir: string,
+): Promise<string> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      return await manager.beginProjectDeletion(projectDir)
+    } catch (error) {
+      if (!(error instanceof ProtocolError) || error.code !== 'project_busy') throw error
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+  }
+  throw new Error('project did not become idle')
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {

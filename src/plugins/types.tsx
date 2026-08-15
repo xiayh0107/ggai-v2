@@ -1,15 +1,23 @@
 import { FileQuestion, type LucideIcon } from 'lucide-react'
-import type { ComponentType } from 'react'
-import type { CanvasNode } from '@/types/canvas'
-import type { RunOutcome } from '@/agent/outcome'
+import type { CanvasNode } from '@/canvas/model'
 import {
-  ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION_V2,
-  BUILTIN_ARTIFACT_PLUGIN_IDS_V2,
-  inspectArtifactCapabilitySnapshotRequestV2,
-  inspectArtifactClaimRegistryV2,
-  type ArtifactCapabilitySnapshotRequestV2,
-  type ArtifactClaimRuleV2,
+  ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION,
+  inspectArtifactCapabilitySnapshotRequest,
+  inspectArtifactClaimRegistry,
+  type ArtifactCapabilitySnapshotRequest,
+  type ArtifactClaimRule,
 } from './artifactContracts'
+import {
+  BUILTIN_NODE_CONTEXT_PLUGIN_IDS,
+  LEGACY_NODE_CONTEXT_POLICY,
+  inspectNodeContextPolicy,
+  type NodeContextPolicy,
+} from './contextContracts'
+import {
+  defineNodeUi,
+  inspectNodeUiDefinition,
+  type NodeUiDefinition,
+} from './uiContracts'
 
 /**
  * GGAI 节点插件规范（v0.1）
@@ -17,38 +25,20 @@ import {
  * 画布上的一切节点——包括 9 种内置类型——都以完全相同的插件形态注册。
  * 内置插件与用户 / 社区插件能力完全对等：能看到的、能扩展的，就是这份规范。
  *
- * 一个节点插件 = 身份标识 + 内容契约 + 状态视图 + 指令配置。
+ * 一个节点插件 = 身份标识 + 数据化 UI 契约 + 指令配置 + Agent 能力声明。
  * 画布引擎（平移缩放、连线、选择、指令生命周期、持久化）对所有插件一视同仁。
  */
 
-/** 内容载荷：节点的本体数据。各插件自行定义结构，持久化时随节点保存 */
+/** 内容载荷：节点的本体数据。各插件声明结构，持久化时随节点保存。 */
 export type NodePayload = Record<string, unknown>
 
 /** 空内容判定：决定节点显示空白态还是内容态（状态递进的基础，规范 2.3） */
 export type IsEmpty = (node: CanvasNode) => boolean
 
-/**
- * 首次执行指令后的演示结果（原型阶段）。
- * 返回要合并进节点的补丁：标题 / 文本 / meta / payload。
- * 返回 null 表示内容无变化（仅在 meta 追加一条「✓ 已完成」）。
- */
-export type DemoResult = (node: CanvasNode, prompt: string) => Partial<CanvasNode> | null
-
-/** 节点插件可选择如何把一次通用 run 结果投影成自己的内容。 */
-export interface NodeRunResult {
-  responseText: string
-  artifactFiles: string[]
-  outcome?: RunOutcome
-}
-
-export type NodeContentPatch = Pick<Partial<CanvasNode>, 'title' | 'text' | 'meta' | 'payload'>
-export type MaterializeRunResult = (
-  node: CanvasNode,
-  result: NodeRunResult,
-) => NodeContentPatch | null
+export type NodeContentPatch = Pick<Partial<CanvasNode>, 'title' | 'text' | 'payload'>
 
 /** Daemon-verified artifact identity exposed to a browser-only pure projector. */
-export type TrustedArtifactProjectionV2 = Readonly<{
+export type TrustedArtifactProjection = Readonly<{
   runId: string
   artifactId: string
   mediaType: string
@@ -59,22 +49,14 @@ export type TrustedArtifactProjectionV2 = Readonly<{
   url: string
 }>
 
-export interface NodeArtifactViewPropsV2 {
-  artifact: TrustedArtifactProjectionV2
+export interface NodeArtifactViewProps {
+  artifact: TrustedArtifactProjection
   content: Readonly<NodeContentPatch>
-}
-
-/**
- * Pure V2 content projection. The hook cannot allocate entities, choose layout,
- * create edges, or dispatch commands because it receives no canvas authority.
- */
-export type ProjectArtifactV2 = (
-  artifact: TrustedArtifactProjectionV2,
-) => NodeContentPatch | null
-
-/** 指令参数槽：渲染在指令面板底部控制条左侧（如智能节点的图表类型 / 风格 / 张数） */
-export interface ParamSlotProps {
-  node: CanvasNode
+  /**
+   * 产物所属的当前节点（可选）：需要读取节点自身状态（如文本节点的
+   * 粗体 / 斜体 / 标题 payload 标记）的产物视图使用；与 artifact 内容无关。
+   */
+  node?: CanvasNode
 }
 
 /** 指令面板配置 */
@@ -89,23 +71,22 @@ export interface InstrConfig {
    * 避免空白节点上指令脱离上下文。
    */
   actionsFor?: (node: CanvasNode, sources: CanvasNode[]) => string[]
-  /** 底部控制条的参数槽（可选） */
-  ParamSlot?: ComponentType<ParamSlotProps>
+  /**
+   * 选择工具条的标记类按钮（可选）：如文本节点的粗体 / 斜体 / 标题。
+   * 与快捷指令不同，标记直接改写节点自身（payload），不经过指令面板。
+   * 返回非空数组时，选择工具条显示标记按钮而非快捷指令。
+   */
+  marksFor?: (node: CanvasNode) => NodeMark[]
+  /** 应用标记：返回整体替换的新 payload；返回 null 表示该标记不适用。 */
+  toggleMark?: (node: CanvasNode, markId: string) => Record<string, unknown> | null
 }
 
-/** 节点插件的视图组件契约 */
-export interface NodeViewProps {
-  node: CanvasNode
-  selected: boolean
-}
-
-export interface NodeViews {
-  /** 空白态（无内容时） */
-  Empty: ComponentType<NodeViewProps>
-  /** 内容态（有内容时） */
-  Content: ComponentType<NodeViewProps>
-  /** Optional V2 renderer for a daemon-verified, purely projected artifact. */
-  Artifact?: ComponentType<NodeArtifactViewPropsV2>
+/** 选择工具条上的一个标记按钮（粗体 / 斜体 / 标题等）。 */
+export interface NodeMark {
+  id: string
+  title: string
+  icon: LucideIcon
+  active: boolean
 }
 
 export interface NodePlugin {
@@ -124,28 +105,30 @@ export interface NodePlugin {
   initialPayload: () => NodePayload
   /** 空白判定 */
   isEmpty: IsEmpty
-  /** 视图 */
-  views: NodeViews
+  /** 严格可序列化的内容模板；插件不能提供节点壳、CSS 或运行态。 */
+  ui: NodeUiDefinition
   /** 指令区配置 */
   instr: InstrConfig
-  /** 可序列化的 V2 产物声明；daemon 与浏览器使用同一份数据规则。 */
-  artifactClaims: readonly ArtifactClaimRuleV2[]
-  /** 可选：仅把 daemon 已验证的 artifact identity 投影为内容补丁。函数绝不跨 daemon。 */
-  projectArtifact?: ProjectArtifactV2
-  /** V1 兼容：把 Agent 文本/路径投影到插件内容，待 V2 cutover 后移除。 */
-  materializeRunResult?: MaterializeRunResult
-  /** 首次指令演示结果 */
-  demoResult: DemoResult
+  /** 可序列化的产物声明；daemon 与浏览器使用同一份数据规则。 */
+  artifactClaims: readonly ArtifactClaimRule[]
+  /** 可序列化的 Node → Agent 上下文投影；不能扩大 Edge 或文件权限。 */
+  nodeContext: NodeContextPolicy
 }
 
 /** 注册表：Map 保序，注册顺序即创建菜单顺序 */
 const registry = new Map<string, NodePlugin>()
 const listeners = new Set<() => void>()
+let registryVersion = 0
 /** 未启用的插件不进创建菜单 / 首屏面板；已存在于画布的节点仍可正常渲染 */
 const disabled = new Set<string>()
 
 function emit() {
+  registryVersion += 1
   listeners.forEach((l) => l())
+}
+
+export function getPluginRegistryVersion(): number {
+  return registryVersion
 }
 
 export function subscribePlugins(l: () => void): () => void {
@@ -157,16 +140,26 @@ export function registerPlugin(p: NodePlugin) {
   if (registry.has(p.id)) {
     throw new TypeError(`[ggai] 节点插件 "${p.id}" 重复注册`)
   }
-  const inspection = inspectArtifactClaimRegistryV2([{
+  const inspection = inspectArtifactClaimRegistry([{
     id: p.id,
     artifactClaims: p.artifactClaims,
   }])
   if (inspection.status !== 'valid') {
     throw new TypeError(`[ggai] 节点插件 "${p.id}" 的 artifactClaims 无效：${inspection.reason}`)
   }
+  const contextInspection = inspectNodeContextPolicy(p.nodeContext)
+  if (contextInspection.status !== 'valid') {
+    throw new TypeError(`[ggai] 节点插件 "${p.id}" 的 nodeContext 无效：${contextInspection.reason}`)
+  }
+  const uiInspection = inspectNodeUiDefinition(p.ui)
+  if (uiInspection.status !== 'valid') {
+    throw new TypeError(`[ggai] 节点插件 "${p.id}" 的 ui 无效：${uiInspection.reason}`)
+  }
   registry.set(p.id, {
     ...p,
+    ui: uiInspection.definition,
     artifactClaims: inspection.registrations[0]?.artifactClaims ?? [],
+    nodeContext: contextInspection.policy,
   })
   emit()
 }
@@ -198,19 +191,11 @@ export function getPlugin(id: string): NodePlugin {
     id, label: id, desc: '未安装的节点类型',
     icon: FileQuestion, defaultWidth: 300,
     initialPayload: () => ({}),
-    isEmpty: (n) => !(n.text?.trim() || (n.meta ?? []).length),
-    views: {
-      Empty: () => null,
-      Content: ({ node }) => (
-        <div className="rounded-[10px] bg-gg-subtle p-3 text-[11.5px] text-gg-muted">
-          节点类型「{id}」未安装，内容已保留
-          {node.text ? <p className="mt-1 text-gg-ink">{node.text}</p> : null}
-        </div>
-      ),
-    },
+    isEmpty: (n) => !(n.text?.trim() || Object.keys(n.payload ?? {}).length),
+    ui: defineNodeUi('file'),
     instr: { placeholder: '该节点类型未安装…', actions: [] },
     artifactClaims: [],
-    demoResult: () => null,
+    nodeContext: structuredClone(LEGACY_NODE_CONTEXT_POLICY),
   }
 }
 
@@ -230,50 +215,20 @@ export function listCreatablePlugins(): NodePlugin[] {
 }
 
 /**
- * Runs a pure projector and keeps only structured content fields. Projectors
- * never receive a dispatcher or Canvas entity/layout authority.
- */
-export function projectArtifactContentV2(
-  plugin: NodePlugin,
-  artifact: TrustedArtifactProjectionV2,
-): NodeContentPatch | null {
-  if (!plugin.projectArtifact) return null
-  const projected = plugin.projectArtifact(Object.freeze({ ...artifact }))
-  if (projected === null) return null
-  const cloned = structuredClone(projected)
-  if (cloned.title !== undefined && typeof cloned.title !== 'string') {
-    throw new TypeError('artifact projector returned an invalid title')
-  }
-  if (cloned.text !== undefined && typeof cloned.text !== 'string') {
-    throw new TypeError('artifact projector returned invalid text')
-  }
-  if (cloned.meta !== undefined
-    && (!Array.isArray(cloned.meta)
-      || !cloned.meta.every((entry) => typeof entry === 'string'))) {
-    throw new TypeError('artifact projector returned invalid metadata')
-  }
-  if (cloned.payload !== undefined
-    && (typeof cloned.payload !== 'object'
-      || cloned.payload === null
-      || Array.isArray(cloned.payload))) {
-    throw new TypeError('artifact projector returned an invalid payload')
-  }
-  return cloned
-}
-
-/**
  * Captures enabled browser plugin claims as strict data. Daemon-owned built-ins
  * are intentionally omitted because the daemon supplies and protects them.
  */
-export function enabledArtifactCapabilitySnapshotV2(): ArtifactCapabilitySnapshotRequestV2 {
-  const inspection = inspectArtifactCapabilitySnapshotRequestV2({
-    schemaVersion: ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION_V2,
+export function enabledArtifactCapabilitySnapshot(): ArtifactCapabilitySnapshotRequest {
+  const inspection = inspectArtifactCapabilitySnapshotRequest({
+    schemaVersion: ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION,
     plugins: listEnabledPlugins()
-      .filter((plugin) => !BUILTIN_ARTIFACT_PLUGIN_IDS_V2.has(plugin.id))
-      .filter((plugin) => plugin.artifactClaims.length > 0)
+      .filter((plugin) => !BUILTIN_NODE_CONTEXT_PLUGIN_IDS.has(plugin.id))
+      .filter((plugin) => plugin.artifactClaims.length > 0
+        || JSON.stringify(plugin.nodeContext) !== JSON.stringify(LEGACY_NODE_CONTEXT_POLICY))
       .map((plugin) => ({
         id: plugin.id,
         artifactClaims: plugin.artifactClaims,
+        nodeContext: plugin.nodeContext,
       })),
   })
   if (inspection.status !== 'valid') {

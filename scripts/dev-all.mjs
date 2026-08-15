@@ -8,7 +8,9 @@
  *
  * 行为：
  * - 先增量构建 daemon（tsc，通常秒级），再并行拉起两个进程；
- * - 监听 daemon/ 源码变更：自动重新构建并重启 daemon，Vite 不受影响；
+ * - 监听 daemon/ 与共享前端源码（src/canvas、src/agent、src/types，
+ *   即 tsconfig.daemon.json 的 include）变更：自动重新构建并重启 daemon，
+ *   Vite 不受影响；
  * - 输出统一加 [daemon] / [vite] / [dev] 前缀；
  * - Ctrl+C 一次退出全部进程；任一进程意外退出时结束其余进程。
  */
@@ -163,7 +165,11 @@ function startVite() {
 }
 
 function watchDaemonSources() {
-  const watcher = chokidar.watch('daemon', {
+  // daemon 打包会编译进共享前端源码（见 tsconfig.daemon.json 的 include：
+  // src/canvas、src/agent、src/types）。这些目录的变更同样要重建并重启
+  // daemon，否则 daemon 会带着旧版共享 reducer 继续跑（浏览器乐观更新已被
+  // HMR 修复，但 daemon 权威状态会把旧行为写回来）。
+  const watcher = chokidar.watch(['daemon', 'src/canvas', 'src/agent', 'src/types'], {
     ignoreInitial: true,
     ignored: /(^|[/\\])\../,
   })

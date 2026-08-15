@@ -16,7 +16,7 @@ export interface WatchArtifactsOptions {
   nodeId: string
   canvasBranch: string
   runId: string
-  /** Daemon-authored V2 files root. Legacy callers use the node-owned root. */
+  /** Daemon-authored Task files root. Compatibility callers use the node-owned root. */
   projectRelativeRoot?: string
   onEvent: (event: Extract<CanvasAgentEvent, { type: 'file-write' }>) => void
   onError?: (error: Error) => void

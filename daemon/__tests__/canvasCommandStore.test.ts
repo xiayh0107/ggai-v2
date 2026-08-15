@@ -1,0 +1,281 @@
+import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { afterEach, test } from 'node:test'
+import {
+  CanvasCommandStore,
+  CanvasMutationReuseError,
+  CanvasRevisionConflictError,
+  CanvasSnapshotError,
+} from '../canvasCommandStore.js'
+import { emptyCanvasDocument } from '../../src/canvas/model.js'
+
+const temporaryDirectories: string[] = []
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((directory) =>
+    rm(directory, { recursive: true, force: true })))
+})
+
+async function temporarySnapshot(): Promise<string> {
+  const directory = await mkdtemp(path.join(tmpdir(), 'ggai-canvas-store-'))
+  temporaryDirectories.push(directory)
+  return path.join(directory, 'nested', 'snapshot.json')
+}
+
+function createTask(id: string, title = id) {
+  return {
+    type: 'CreateTask' as const,
+    task: {
+      id,
+      title,
+      goal: `Complete ${title}`,
+      anchor: { x: 100, y: 120 },
+      origin: { kind: 'user' as const },
+    },
+  }
+}
+
+test('serializes concurrent commits with revision CAS', async () => {
+  const filePath = await temporarySnapshot()
+  const store = new CanvasCommandStore('main', { filePath })
+
+  assert.equal(await store.hasSnapshot(), false)
+  assert.deepEqual(await store.get(), {
+    branch: 'main',
+    revision: 0,
+    updatedAt: '1970-01-01T00:00:00.000Z',
+    lastMutationId: null,
+    lastCheckpoint: null,
+    document: emptyCanvasDocument(),
+  })
+  assert.equal(await store.hasSnapshot(), false)
+
+  const results = await Promise.allSettled([
+    store.commit(0, 'mutation-a', createTask('task-a')),
+    store.commit(0, 'mutation-b', createTask('task-b')),
+  ])
+  const fulfilled = results.filter((result) => result.status === 'fulfilled')
+  const rejected = results.filter((result) => result.status === 'rejected')
+
+  assert.equal(fulfilled.length, 1)
+  assert.equal(rejected.length, 1)
+  const conflict = rejected[0]?.reason
+  assert.ok(conflict instanceof CanvasRevisionConflictError)
+  assert.equal(conflict.currentRevision, 1)
+  assert.equal((await store.get()).revision, 1)
+  assert.equal(await store.hasSnapshot(), true)
+})
+
+test('returns the committed envelope for an idempotent mutation retry', async () => {
+  const filePath = await temporarySnapshot()
+  const store = new CanvasCommandStore('main', { filePath })
+  const command = createTask('task-1')
+  const first = await store.commit(0, 'mutation-1', command)
+  const retried = await store.commit(0, 'mutation-1', command)
+
+  assert.deepEqual(retried, first)
+  assert.equal(retried.revision, 1)
+  assert.equal(retried.document.tasks.length, 1)
+  await assert.rejects(
+    store.commit(1, 'mutation-1', createTask('task-2')),
+    CanvasMutationReuseError,
+  )
+})
+
+test('deduplicates a lost-ack mutation after intervening browser and daemon commits', async () => {
+  const filePath = await temporarySnapshot()
+  const store = new CanvasCommandStore('main', { filePath })
+  await store.commit(0, 'mutation-create', createTask('task-1'))
+  const move = {
+    type: 'MoveEntities' as const,
+    entities: [{ kind: 'task' as const, id: 'task-1' }],
+    dx: 12,
+    dy: -4,
+  }
+  await store.commit(1, 'mutation-move', move)
+  await store.commitLatest('mutation-projection', {
+    type: 'UpdateTaskGoal',
+    taskId: 'task-1',
+    goal: 'Intervening daemon settlement',
+  })
+
+  const retried = await store.commit(3, 'mutation-move', move)
+  assert.equal(retried.revision, 3)
+  assert.equal(retried.lastMutationId, 'mutation-projection')
+  assert.deepEqual(retried.document.tasks[0]?.anchor, { x: 112, y: 116 })
+
+  const reopened = new CanvasCommandStore('main', { filePath })
+  const retriedAfterRestart = await reopened.commit(3, 'mutation-move', {
+    dy: -4,
+    entities: [{ id: 'task-1', kind: 'task' as const }],
+    dx: 12,
+    type: 'MoveEntities' as const,
+  })
+  assert.deepEqual(retriedAfterRestart, retried)
+  await assert.rejects(
+    reopened.commit(3, 'mutation-move', { ...move, dx: 24 }),
+    CanvasMutationReuseError,
+  )
+})
+
+test('deduplicates a create retry after another client advanced the branch', async () => {
+  const filePath = await temporarySnapshot()
+  const store = new CanvasCommandStore('main', { filePath })
+  const first = createTask('task-1')
+  await store.commit(0, 'mutation-create-1', first)
+  const current = await store.commit(1, 'mutation-create-2', createTask('task-2'))
+
+  const retried = await store.commit(2, 'mutation-create-1', first)
+  assert.deepEqual(retried, current)
+  assert.deepEqual(retried.document.tasks.map((task) => task.id), ['task-1', 'task-2'])
+})
+
+test('keeps memory and disk unchanged when a command fails atomically', async () => {
+  const filePath = await temporarySnapshot()
+  const store = new CanvasCommandStore('main', { filePath })
+  const committed = await store.commit(0, 'mutation-1', createTask('task-1'))
+  const diskBefore = await readFile(filePath, 'utf8')
+
+  await assert.rejects(store.commit(1, 'mutation-2', {
+    type: 'UpdateTaskGoal',
+    taskId: 'missing-task',
+    goal: 'This reducer operation must fail',
+  }))
+
+  assert.deepEqual(await store.get(), committed)
+  assert.equal(await readFile(filePath, 'utf8'), diskBefore)
+})
+
+test('persists an atomically-written envelope and reloads it defensively', async () => {
+  const filePath = await temporarySnapshot()
+  let now = Date.parse('2026-08-05T12:00:00.000Z')
+  const store = new CanvasCommandStore('feature/rich-nodes', {
+    filePath,
+    now: () => now,
+  })
+  const first = await store.commit(0, 'mutation-1', createTask('task-1', 'Plot'))
+  now += 1_000
+  const second = await store.commit(1, 'mutation-2', {
+    type: 'UpdateTaskGoal',
+    taskId: 'task-1',
+    goal: 'Create, explain, and export the plot',
+  })
+
+  assert.equal(first.updatedAt, '2026-08-05T12:00:00.000Z')
+  assert.equal(second.updatedAt, '2026-08-05T12:00:01.000Z')
+  const reopened = new CanvasCommandStore('feature/rich-nodes', { filePath })
+  const loaded = await reopened.get()
+  assert.deepEqual(loaded, second)
+  loaded.document.tasks[0]!.goal = 'mutated by caller'
+  assert.equal(
+    (await reopened.get()).document.tasks[0]?.goal,
+    'Create, explain, and export the plot',
+  )
+  assert.equal((await readFile(filePath, 'utf8')).endsWith('\n'), true)
+})
+
+test('archives every semantic revision for command-only conflict recovery', async () => {
+  const filePath = await temporarySnapshot()
+  const store = new CanvasCommandStore('main', { filePath })
+  assert.deepEqual(await store.readRevision(0), emptyCanvasDocument())
+  await store.commit(0, 'mutation-1', createTask('task-1'))
+  await store.commit(1, 'mutation-2', {
+    type: 'UpdateTaskGoal',
+    taskId: 'task-1',
+    goal: 'Revision two',
+  })
+
+  assert.deepEqual((await store.readRevision(0))?.tasks, [])
+  assert.equal((await store.readRevision(1))?.tasks[0]?.goal, 'Complete task-1')
+  assert.equal((await store.readRevision(2))?.tasks[0]?.goal, 'Revision two')
+  assert.equal(await store.readRevision(3), null)
+
+  const reopened = new CanvasCommandStore('main', { filePath })
+  assert.equal((await reopened.readRevision(1))?.tasks[0]?.goal, 'Complete task-1')
+  const revisionOne = path.join(path.dirname(filePath), 'revisions', '1.json')
+  const corrupted = JSON.parse(await readFile(revisionOne, 'utf8')) as {
+    document: { tasks: Array<{ goal: string }> }
+  }
+  corrupted.document.tasks[0]!.goal = 'Tampered without updating the digest'
+  await writeFile(revisionOne, JSON.stringify(corrupted), 'utf8')
+  await assert.rejects(reopened.readRevision(1), CanvasSnapshotError)
+})
+
+test('fails explicitly without overwriting an invalid stored snapshot', async () => {
+  const filePath = await temporarySnapshot()
+  await mkdir(path.dirname(filePath), { recursive: true })
+  await writeFile(filePath, JSON.stringify({ branch: 'main', revision: 7 }), 'utf8')
+  const source = await readFile(filePath, 'utf8')
+  const store = new CanvasCommandStore('main', { filePath })
+
+  await assert.rejects(store.get(), CanvasSnapshotError)
+  assert.equal(await readFile(filePath, 'utf8'), source)
+})
+
+test('rejects corrupted or duplicate durable mutation receipts', async () => {
+  const filePath = await temporarySnapshot()
+  const store = new CanvasCommandStore('main', { filePath })
+  await store.commit(0, 'mutation-1', createTask('task-1'))
+  const snapshot = JSON.parse(await readFile(filePath, 'utf8')) as {
+    mutationReceipts: Array<Record<string, unknown>>
+  }
+  snapshot.mutationReceipts.push({ ...snapshot.mutationReceipts[0] })
+  await writeFile(filePath, JSON.stringify(snapshot), 'utf8')
+
+  await assert.rejects(
+    new CanvasCommandStore('main', { filePath }).get(),
+    CanvasSnapshotError,
+  )
+})
+
+test('anchors checkpoints without changing the semantic revision', async () => {
+  const filePath = await temporarySnapshot()
+  const store = new CanvasCommandStore('main', { filePath })
+  const committed = await store.commit(0, 'mutation-1', createTask('task-1'))
+  const checkpoint = 'a'.repeat(40)
+  const anchored = await store.setLastCheckpoint(committed.revision, checkpoint)
+
+  assert.equal(anchored.revision, committed.revision)
+  assert.equal(anchored.updatedAt, committed.updatedAt)
+  assert.equal(anchored.lastCheckpoint, checkpoint)
+  assert.deepEqual(await store.setLastCheckpoint(committed.revision, checkpoint), anchored)
+  await assert.rejects(
+    store.setLastCheckpoint(0, 'b'.repeat(40)),
+    CanvasRevisionConflictError,
+  )
+})
+
+test('materializes and applies Git documents behind revision CAS', async () => {
+  const filePath = await temporarySnapshot()
+  let now = Date.parse('2026-08-05T12:00:00.000Z')
+  const store = new CanvasCommandStore('restored', { filePath, now: () => now })
+  const document = emptyCanvasDocument()
+  document.tasks.push(createTask('task-1').task)
+  document.everCreated = true
+  const firstCommit = 'c'.repeat(40)
+
+  const materialized = await store.materialize(document, firstCommit)
+  assert.equal(materialized.revision, 1)
+  assert.equal(materialized.lastMutationId, null)
+  assert.equal(materialized.lastCheckpoint, firstCommit)
+  await assert.rejects(
+    store.materialize(document, firstCommit),
+    CanvasRevisionConflictError,
+  )
+
+  now += 1_000
+  const mergedDocument = structuredClone(document)
+  mergedDocument.tasks[0]!.goal = 'Merged goal'
+  const secondCommit = 'd'.repeat(40)
+  const applied = await store.applyCheckpoint(mergedDocument, secondCommit, 1)
+  assert.equal(applied.revision, 2)
+  assert.equal(applied.lastMutationId, null)
+  assert.equal(applied.lastCheckpoint, secondCommit)
+  assert.equal(applied.document.tasks[0]?.goal, 'Merged goal')
+  await assert.rejects(
+    store.applyCheckpoint(document, firstCommit, 1),
+    CanvasRevisionConflictError,
+  )
+})

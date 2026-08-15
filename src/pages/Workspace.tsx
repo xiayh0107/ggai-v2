@@ -5,38 +5,47 @@ import {
   useRef,
   useState,
   type FormEvent,
-  type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
-import { Link, useNavigate } from 'react-router'
+import { useNavigate } from 'react-router'
 import {
-  Boxes,
   Compass,
   FolderKanban,
   FolderOpen,
   Home,
   Layers3,
   LayoutGrid,
-  ListTodo,
-  Loader2,
   Plus,
-  RotateCcw,
   Search,
   Settings,
-  X,
+  Wrench,
 } from 'lucide-react'
 import { DAEMON_URL } from '@/agent/config'
 import {
+  CreateProjectDialog,
+  DeleteProjectDialog,
+} from '@/workspace/WorkspaceProjectDialogs'
+import {
+  EmptyPanel,
+  ProjectCard,
+  ProjectRow,
+  WorkspaceError,
+  WorkspaceLoading,
+} from '@/workspace/WorkspaceProjectViews'
+import {
   WorkspaceProjectClient,
+  isManagedWorkspaceProjectId,
   type WorkspaceProject,
   type WorkspaceProjectApi,
 } from '@/workspace/projectClient'
 import { workspaceProjectErrorMessage } from '@/workspace/projectMessages'
+import { projectHref, sortProjects } from '@/workspace/projectViewModel'
 
 const NAV = [
   { key: 'workspace', label: '工作空间', icon: Home, available: true },
+  { key: 'node-studio', label: '节点工作台', icon: Wrench, available: true },
   { key: 'discover', label: '发现灵感', icon: Compass, available: false },
   { key: 'templates', label: '模板中心', icon: LayoutGrid, available: false },
-  { key: 'assets', label: '资源库', icon: FolderOpen, available: false },
+  { key: 'assets', label: '资源库', icon: FolderOpen, available: true },
   { key: 'settings', label: '设置', icon: Settings, available: false },
 ] as const
 
@@ -47,6 +56,7 @@ export interface WorkspaceProps {
   projectClient?: WorkspaceProjectApi
 }
 
+/** Workspace route coordinator; cards, dialogs and presentation live in the workspace domain. */
 export default function Workspace({ projectClient: injectedClient }: WorkspaceProps = {}) {
   const navigate = useNavigate()
   const client = useMemo(
@@ -63,10 +73,18 @@ export default function Workspace({ projectClient: injectedClient }: WorkspacePr
   const [projectTitle, setProjectTitle] = useState('')
   const [createError, setCreateError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<WorkspaceProject | null>(null)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleteConfirmation, setDeleteConfirmation] = useState('')
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
   const listControllerRef = useRef<AbortController | null>(null)
   const createControllerRef = useRef<AbortController | null>(null)
+  const deleteControllerRef = useRef<AbortController | null>(null)
   const loadedOnceRef = useRef(false)
   const createTriggerRef = useRef<HTMLElement | null>(null)
+  const deleteFocusTargetRef = useRef<HTMLElement | null>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
 
   const loadProjects = useCallback(async () => {
     listControllerRef.current?.abort()
@@ -75,7 +93,9 @@ export default function Workspace({ projectClient: injectedClient }: WorkspacePr
     if (!loadedOnceRef.current) setLoadingState('loading')
     setRefreshError(null)
     try {
-      const next = sortProjects(await client.list(controller.signal))
+      const listed = await client.list(controller.signal)
+      const next = sortProjects(listed.filter((project) =>
+        isManagedWorkspaceProjectId(project.id)))
       if (controller.signal.aborted) return
       setProjects(next)
       setLoadError(null)
@@ -104,8 +124,24 @@ export default function Workspace({ projectClient: injectedClient }: WorkspacePr
       window.removeEventListener('focus', refreshOnFocus)
       listControllerRef.current?.abort()
       createControllerRef.current?.abort()
+      deleteControllerRef.current?.abort()
     }
   }, [loadProjects])
+
+  useEffect(() => {
+    if (deleteOpen) return
+    const focusTarget = deleteFocusTargetRef.current
+    if (!focusTarget) return
+    deleteFocusTargetRef.current = null
+    const frame = window.requestAnimationFrame(() => {
+      if (focusTarget.isConnected) {
+        focusTarget.focus()
+      } else {
+        searchInputRef.current?.focus()
+      }
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [deleteOpen])
 
   const visibleProjects = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase('zh-CN')
@@ -123,8 +159,8 @@ export default function Workspace({ projectClient: injectedClient }: WorkspacePr
   )
 
   const openCreateDialog = () => {
-    createTriggerRef.current = document.activeElement instanceof HTMLElement
-      ? document.activeElement
+    createTriggerRef.current = globalThis.document.activeElement instanceof HTMLElement
+      ? globalThis.document.activeElement
       : null
     setProjectTitle('')
     setCreateError(null)
@@ -172,6 +208,64 @@ export default function Workspace({ projectClient: injectedClient }: WorkspacePr
     }
   }
 
+  const openDeleteDialog = (
+    project: WorkspaceProject,
+    trigger: HTMLButtonElement | null,
+  ) => {
+    if (project.state !== 'ready' || !isManagedWorkspaceProjectId(project.id)) return
+    deleteFocusTargetRef.current = trigger
+    setDeleteTarget(project)
+    setDeleteConfirmation('')
+    setDeleteError(null)
+    setDeleteOpen(true)
+  }
+
+  const closeDeleteDialog = () => {
+    if (deleting) return
+    setDeleteOpen(false)
+    setDeleteConfirmation('')
+    setDeleteError(null)
+  }
+
+  const deleteProject = async () => {
+    const project = deleteTarget
+    if (
+      !project
+      || deleting
+      || project.state !== 'ready'
+      || !isManagedWorkspaceProjectId(project.id)
+      || deleteConfirmation !== project.title
+    ) return
+
+    listControllerRef.current?.abort()
+    deleteControllerRef.current?.abort()
+    const controller = new AbortController()
+    deleteControllerRef.current = controller
+    setDeleting(true)
+    setDeleteError(null)
+    try {
+      const deletedProjectId = await client.delete(project.id, controller.signal)
+      if (controller.signal.aborted) return
+      setProjects((current) => current.filter((entry) => entry.id !== deletedProjectId))
+      deleteFocusTargetRef.current = searchInputRef.current
+      setDeleteOpen(false)
+      setDeleteConfirmation('')
+      setDeleteError(null)
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setDeleteError(workspaceProjectErrorMessage(
+          error,
+          '项目删除失败，请稍后重试。',
+        ))
+      }
+    } finally {
+      if (deleteControllerRef.current === controller) {
+        deleteControllerRef.current = null
+        if (!controller.signal.aborted) setDeleting(false)
+      }
+    }
+  }
+
   return (
     <div className="flex h-screen w-screen flex-col bg-gg-bg font-sans">
       <header className="flex h-[56px] shrink-0 items-center justify-between border-b border-gg-line bg-gg-node px-5">
@@ -192,11 +286,17 @@ export default function Workspace({ projectClient: injectedClient }: WorkspacePr
               key={key}
               type="button"
               disabled={!available}
-              aria-current={available ? 'page' : undefined}
+              aria-current={key === 'workspace' ? 'page' : undefined}
+              onClick={() => {
+                if (key === 'node-studio') navigate('/node-studio')
+                else if (key === 'assets') navigate('/resources')
+              }}
               title={available ? undefined : '尚未开放'}
               className={`flex items-center gap-2.5 rounded-[10px] px-3 py-2 text-left text-[13px] ${
                 available
-                  ? 'bg-[#EAF1FD] font-medium text-gg-primary'
+                  ? key === 'workspace'
+                    ? 'bg-[#EAF1FD] font-medium text-gg-primary'
+                    : 'text-gg-muted hover:bg-gg-subtle hover:text-gg-ink'
                   : 'cursor-not-allowed text-gg-muted opacity-55'
               }`}
             >
@@ -232,6 +332,7 @@ export default function Workspace({ projectClient: injectedClient }: WorkspacePr
                   <Search size={14} className="shrink-0 text-gg-muted" />
                   <span className="sr-only">搜索项目</span>
                   <input
+                    ref={searchInputRef}
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
                     placeholder="搜索项目名称"
@@ -285,6 +386,7 @@ export default function Workspace({ projectClient: injectedClient }: WorkspacePr
                       <ProjectCard
                         key={project.id}
                         project={project}
+                        onRequestDelete={openDeleteDialog}
                       />
                     ))}
                   </div>
@@ -297,6 +399,7 @@ export default function Workspace({ projectClient: injectedClient }: WorkspacePr
                           key={project.id}
                           project={project}
                           divided={index > 0}
+                          onRequestDelete={openDeleteDialog}
                         />
                       ))}
                     </div>
@@ -322,330 +425,22 @@ export default function Workspace({ projectClient: injectedClient }: WorkspacePr
           onSubmit={createProject}
         />
       )}
-    </div>
-  )
-}
 
-function ProjectCard({
-  project,
-}: {
-  project: WorkspaceProject
-}) {
-  const unavailable = project.state === 'unavailable'
-  const className = `group overflow-hidden rounded-[14px] border bg-gg-node transition-all duration-150 ${
-    unavailable
-      ? 'border-gg-line opacity-65'
-      : 'border-gg-line hover:-translate-y-0.5 hover:border-gg-select hover:shadow-float'
-  }`
-  const content = (
-    <>
-      <ProjectPreview project={project} />
-      <div className="px-4 py-3">
-        <div className="flex items-center justify-between gap-3">
-          <p className="truncate text-[13.5px] font-medium text-gg-ink">{project.title}</p>
-        </div>
-        <div className="mt-1.5 flex items-center gap-2 text-[11.5px] text-gg-muted">
-          <span>{unavailable ? '暂时不可用' : '个人项目'}</span>
-          <span aria-hidden="true">·</span>
-          <span>{formatProjectTime(project.lastOpenedAt ?? project.updatedAt)}</span>
-        </div>
-      </div>
-    </>
-  )
-  if (unavailable) {
-    return (
-      <div aria-disabled="true" className={className} title="项目当前不可用">
-        {content}
-      </div>
-    )
-  }
-  return <Link to={projectHref(project.id)} className={className}>{content}</Link>
-}
-
-function ProjectPreview({ project }: { project: WorkspaceProject }) {
-  const summary = project.summary
-  return (
-    <div className="flex aspect-[340/150] items-center justify-center border-b border-gg-line bg-gg-subtle/60 px-5">
-      {summary ? (
-        <div className="grid w-full max-w-[280px] grid-cols-3 gap-2">
-          <SummaryMetric icon={ListTodo} value={summary.taskCount} label="任务" />
-          <SummaryMetric icon={Boxes} value={summary.nodeCount} label="节点" />
-          <SummaryMetric icon={Layers3} value={summary.collectionCount} label="集合" />
-        </div>
-      ) : (
-        <div className="flex items-center gap-2 text-[12px] text-gg-muted">
-          <FolderKanban size={17} /> 项目摘要暂不可用
-        </div>
-      )}
-    </div>
-  )
-}
-
-function SummaryMetric({
-  icon: Icon,
-  value,
-  label,
-}: {
-  icon: typeof Boxes
-  value: number
-  label: string
-}) {
-  return (
-    <span className="flex flex-col items-center rounded-[10px] border border-gg-line bg-white px-2 py-2.5">
-      <Icon size={14} className="mb-1 text-gg-primary" />
-      <strong className="text-[16px] font-semibold leading-5 text-gg-ink">{value}</strong>
-      <span className="text-[10.5px] text-gg-muted">{label}</span>
-    </span>
-  )
-}
-
-function ProjectRow({
-  project,
-  divided,
-}: {
-  project: WorkspaceProject
-  divided: boolean
-}) {
-  const unavailable = project.state === 'unavailable'
-  const className = `flex items-center gap-3 px-4 py-3 transition-colors ${
-    divided ? 'border-t border-gg-line ' : ''
-  }${unavailable ? 'opacity-65' : 'hover:bg-gg-subtle'}`
-  const content = (
-    <>
-      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] bg-gg-subtle text-gg-primary">
-        <FolderKanban size={15} strokeWidth={1.8} />
-      </span>
-      <span className="min-w-0 flex-1 truncate text-[13px] text-gg-ink">{project.title}</span>
-      {project.summary && (
-        <span className="hidden text-[11.5px] text-gg-muted min-[900px]:inline">
-          {project.summary.taskCount} 个任务 · {project.summary.nodeCount} 个节点
-        </span>
-      )}
-      <span className="w-[110px] text-right text-[11.5px] text-gg-muted">
-        {unavailable ? '暂时不可用' : formatProjectTime(project.lastOpenedAt ?? project.updatedAt)}
-      </span>
-    </>
-  )
-  if (unavailable) {
-    return <div aria-disabled="true" className={className}>{content}</div>
-  }
-  return <Link to={projectHref(project.id)} className={className}>{content}</Link>
-}
-
-function CreateProjectDialog({
-  title,
-  error,
-  creating,
-  onTitleChange,
-  onCancel,
-  onSubmit,
-}: {
-  title: string
-  error: string | null
-  creating: boolean
-  onTitleChange: (title: string) => void
-  onCancel: () => void
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void
-}) {
-  const dialogRef = useRef<HTMLFormElement>(null)
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 p-4"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onCancel()
-      }}
-    >
-      <form
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="create-project-title"
-        aria-describedby="create-project-detail"
-        onSubmit={onSubmit}
-        onKeyDown={(event) => {
-          if (event.key === 'Escape') onCancel()
-          if (event.key === 'Tab') keepFocusInside(event, dialogRef.current)
+      <DeleteProjectDialog
+        open={deleteOpen}
+        project={deleteTarget}
+        confirmation={deleteConfirmation}
+        error={deleteError}
+        deleting={deleting}
+        onOpenChange={(open) => {
+          if (!open) closeDeleteDialog()
         }}
-        className="w-full max-w-[420px] rounded-[16px] border border-gg-line bg-gg-node p-5 shadow-float"
-      >
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h2 id="create-project-title" className="text-[15px] font-semibold text-gg-ink">新建项目</h2>
-            <p id="create-project-detail" className="mt-1 text-[12px] leading-5 text-gg-muted">
-              项目会拥有独立的画布、任务和产物。
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={creating}
-            aria-label="关闭新建项目窗口"
-            className="flex h-7 w-7 items-center justify-center rounded-[8px] text-gg-muted hover:bg-gg-subtle hover:text-gg-ink disabled:opacity-50"
-          >
-            <X size={15} />
-          </button>
-        </div>
-
-        <label htmlFor="workspace-project-title" className="mt-5 block text-[12px] font-medium text-gg-ink">
-          项目名称
-        </label>
-        <input
-          id="workspace-project-title"
-          autoFocus
-          required
-          maxLength={120}
-          value={title}
-          onChange={(event) => onTitleChange(event.target.value)}
-          disabled={creating}
-          aria-invalid={Boolean(error)}
-          aria-describedby={error ? 'create-project-error' : undefined}
-          placeholder="例如：实验结果分析"
-          className="mt-2 h-10 w-full rounded-[10px] border border-gg-line bg-white px-3 text-[13px] text-gg-ink outline-none transition-colors placeholder:text-[#98A2B3] focus:border-gg-primary disabled:bg-gg-subtle"
-        />
-        {error && (
-          <p id="create-project-error" role="alert" className="mt-2 text-[11.5px] text-red-600">
-            {error}
-          </p>
-        )}
-
-        <div className="mt-5 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={creating}
-            className="h-9 rounded-[10px] border border-gg-line bg-white px-4 text-[13px] text-gg-ink hover:bg-gg-subtle disabled:opacity-50"
-          >
-            取消
-          </button>
-          <button
-            type="submit"
-            disabled={creating || !title.trim()}
-            className="flex h-9 items-center gap-1.5 rounded-[10px] bg-gg-primary px-4 text-[13px] font-medium text-white hover:bg-gg-select disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {creating && <Loader2 size={14} className="animate-spin" />}
-            {creating ? '正在创建' : '创建并打开'}
-          </button>
-        </div>
-      </form>
+        onConfirmationChange={(value) => {
+          setDeleteConfirmation(value)
+          setDeleteError(null)
+        }}
+        onConfirm={() => void deleteProject()}
+      />
     </div>
   )
-}
-
-function WorkspaceLoading() {
-  return (
-    <div role="status" aria-label="正在加载项目" className="mt-7">
-      <div className="flex items-center gap-2 text-[13px] text-gg-muted">
-        <Loader2 size={15} className="animate-spin" /> 正在加载项目…
-      </div>
-      <div className="gg-shimmer mt-4 grid grid-cols-3 gap-4 max-[1200px]:grid-cols-2" aria-hidden="true">
-        {[0, 1, 2].map((item) => (
-          <div key={item} className="h-[220px] rounded-[14px] border border-gg-line bg-gg-node p-4">
-            <div className="h-[140px] rounded-[10px] bg-gg-subtle" />
-            <div className="mt-4 h-3 w-2/3 rounded bg-gg-subtle" />
-            <div className="mt-2 h-2.5 w-1/3 rounded bg-gg-subtle" />
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function WorkspaceError({ message, onRetry }: { message: string; onRetry: () => void }) {
-  return (
-    <div role="alert" className="mt-12 flex flex-col items-center rounded-[14px] border border-gg-line bg-gg-node px-6 py-10 text-center">
-      <FolderKanban size={24} className="text-gg-muted" />
-      <h2 className="mt-3 text-[14px] font-semibold text-gg-ink">项目列表加载失败</h2>
-      <p className="mt-1 max-w-md text-[12px] leading-5 text-gg-muted">{message}</p>
-      <button
-        type="button"
-        onClick={() => void onRetry()}
-        className="mt-4 flex h-9 items-center gap-1.5 rounded-[10px] bg-gg-primary px-4 text-[13px] font-medium text-white hover:bg-gg-select"
-      >
-        <RotateCcw size={14} /> 重试
-      </button>
-    </div>
-  )
-}
-
-function EmptyPanel({
-  icon: Icon,
-  title,
-  detail,
-  action,
-}: {
-  icon: typeof FolderKanban
-  title: string
-  detail: string
-  action?: () => void
-}) {
-  return (
-    <section className="mt-12 flex flex-col items-center rounded-[14px] border border-dashed border-gg-line bg-gg-node px-6 py-12 text-center">
-      <span className="flex h-11 w-11 items-center justify-center rounded-[12px] bg-gg-subtle text-gg-muted">
-        <Icon size={21} />
-      </span>
-      <h2 className="mt-3 text-[14px] font-semibold text-gg-ink">{title}</h2>
-      <p className="mt-1 text-[12px] leading-5 text-gg-muted">{detail}</p>
-      {action && (
-        <button
-          type="button"
-          onClick={action}
-          className="mt-4 flex h-9 items-center gap-1.5 rounded-[10px] bg-gg-primary px-4 text-[13px] font-medium text-white hover:bg-gg-select"
-        >
-          <Plus size={14} /> 新建项目
-        </button>
-      )}
-    </section>
-  )
-}
-
-function projectHref(projectId: string): string {
-  return `/canvas?project=${encodeURIComponent(projectId)}`
-}
-
-function sortProjects(projects: WorkspaceProject[]): WorkspaceProject[] {
-  return [...projects].sort((left, right) => {
-    const rightTime = Date.parse(right.lastOpenedAt ?? right.updatedAt)
-    const leftTime = Date.parse(left.lastOpenedAt ?? left.updatedAt)
-    return rightTime - leftTime || left.title.localeCompare(right.title, 'zh-CN')
-  })
-}
-
-function formatProjectTime(value: string): string {
-  const time = Date.parse(value)
-  if (!Number.isFinite(time)) return '时间未知'
-  const date = new Date(time)
-  const now = new Date()
-  const day = 24 * 60 * 60 * 1_000
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-  const startOfDate = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
-  const days = Math.round((startOfToday - startOfDate) / day)
-  if (days === 0) {
-    return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-  }
-  if (days === 1) return '昨天'
-  if (days > 1 && days < 7) return `${days} 天前`
-  return date.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
-}
-
-function keepFocusInside(
-  event: ReactKeyboardEvent<HTMLElement>,
-  dialog: HTMLElement | null,
-) {
-  if (!dialog) return
-  const focusable = [...dialog.querySelectorAll<HTMLElement>(
-    'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
-  )].filter((element) => !element.hasAttribute('hidden'))
-  if (focusable.length === 0) {
-    event.preventDefault()
-    return
-  }
-  const first = focusable[0]
-  const last = focusable[focusable.length - 1]
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault()
-    last.focus()
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault()
-    first.focus()
-  }
 }

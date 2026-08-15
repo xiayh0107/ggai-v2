@@ -1,9 +1,5 @@
 #!/usr/bin/env node
 import process from 'node:process'
-import {
-  assertCanvasModelReady,
-  CanvasModelBootError,
-} from './canvasModelMode.js'
 import { AgentRegistry } from './registry.js'
 import { createDaemonServer } from './server.js'
 import { DAEMON_HELP, parseDaemonConfig } from './startupOptions.js'
@@ -14,7 +10,6 @@ async function main(): Promise<void> {
     console.log(DAEMON_HELP)
     return
   }
-  await assertCanvasModelReady(config.projectRoot, 'v2')
   const registry = new AgentRegistry({
     acpxAgents: config.acpxAgents,
     acpxApprovalMode: config.acpxApprovalMode,
@@ -26,7 +21,7 @@ async function main(): Promise<void> {
   daemon.server.listen(config.port, config.host, () => {
     console.log(`GGAI daemon listening on http://${config.host}:${config.port}`)
     console.log(`Project root: ${config.projectRoot}`)
-    console.log('Canvas model: v2')
+    console.log('Canvas: ready')
   })
 
   let closing = false
@@ -40,10 +35,6 @@ async function main(): Promise<void> {
 }
 
 void main().catch((error: unknown) => {
-  if (error instanceof CanvasModelBootError) {
-    process.stderr.write(`[${error.code}] ${error.message}\n`)
-  } else {
-    process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`)
-  }
+  process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`)
   process.exitCode = 1
 })

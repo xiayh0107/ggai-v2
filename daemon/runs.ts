@@ -1,21 +1,22 @@
 import { randomUUID } from 'node:crypto'
 import { lstat } from 'node:fs/promises'
 import path from 'node:path'
-import type { RunOutcome, SuggestedAction } from '../src/agent/outcome.js'
-import type { RunOutcomeV2 } from '../src/agent/outcomeV2.js'
+import type { RunOutcome } from '../src/agent/outcome.js'
+import type { LegacyRunOutcome } from './legacyOutcome.js'
+import type { SuggestedAction } from '../src/agent/suggestedActions.js'
 import type { CanvasAgentEvent } from '../src/agent/types.js'
-import type { ArtifactManifestV1 } from './artifactManifestV2.js'
+import type { ArtifactManifest } from './artifactManifest.js'
 import { artifactRunRelativeDir, isArtifactControlPath } from './artifactPaths.js'
-import { canvasBranchStorageId } from './canvasStore.js'
+import { canvasBranchStorageId } from './canvasBranch.js'
+import { readLegacyRunOutcome } from './legacyOutcome.js'
 import { readRunOutcome } from './outcome.js'
-import { readRunOutcomeV2 } from './outcomeV2.js'
 import { listArtifactSnapshot, prepareRunContext } from './packer.js'
 import {
-  BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2,
-  ProjectionPluginCapabilityStoreV2,
-  inspectProjectionPluginCapabilitySnapshotV2,
-  type ProjectionPluginCapabilitySnapshotV2,
-} from './pluginCapabilitiesV2.js'
+  BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
+  ProjectionPluginCapabilityStore,
+  inspectProjectionPluginCapabilitySnapshot,
+  type ProjectionPluginCapabilitySnapshot,
+} from './pluginCapabilities.js'
 import {
   assessWritePath,
   canonicalizePotentialPath,
@@ -32,32 +33,39 @@ import type {
 } from './protocol.js'
 import { parseCanvasBranch, ProtocolError } from './protocol.js'
 import { AgentRegistry } from './registry.js'
-import { RunLogExistsError, RunLogStore, type RunLogPage } from './runLogs.js'
-import { recoverInterruptedTaskRunsV2 } from './runRecoveryV2.js'
 import {
-  RunArtifactStoreV2,
-  type RunArtifactLookupV2,
-} from './runArtifactStorageV2.js'
+  RunLogExistsError,
+  RunLogStore,
+  type RunHistoryFilter,
+  type RunLogPage,
+} from './runLogs.js'
+import { recoverInterruptedTaskRuns } from './runRecovery.js'
+import {
+  RunArtifactStore,
+  type RunArtifactLookup,
+} from './runArtifactStorage.js'
 import { SessionStore, type SessionRecord } from './sessions.js'
 import {
-  TaskSessionStoreV2,
-  type TaskSessionListFilterV2,
-  type TaskSessionRecordV2,
-} from './taskSessionsV2.js'
+  TaskSessionStore,
+  type TaskSessionListFilter,
+  type TaskSessionRecord,
+} from './taskSessions.js'
 import {
-  isResolvedTaskRunRequestV2,
+  isNodeStudioRunRequest,
+  isResolvedTaskRunRequest,
+  pinResolvedTaskSkills,
   requestedRunSessionId,
   runTargetId,
   type RunExecutionRequest,
-} from './taskRunTypesV2.js'
-import { parseTaskIdV2 } from './taskRunProtocolV2.js'
+} from './taskRunTypes.js'
+import { parseTaskId } from './taskRunProtocol.js'
 import type { AgentProcessTransport } from './transport/types.js'
 import { watchArtifacts, type ArtifactWatcher } from './watcher.js'
-import type { ProjectionPlanV2, ProjectionSettlementV2 } from './projectionPlanV2.js'
+import type { ProjectionPlan, ProjectionSettlement } from './projectionPlan.js'
 import {
-  ProjectionPlanStoreV2,
-  type ProjectionPlanLifecycleV2,
-} from './projectionPlanStoreV2.js'
+  ProjectionPlanStore,
+  type ProjectionPlanLifecycle,
+} from './projectionPlanStore.js'
 
 const EVENT_HISTORY_LIMIT = 2_000
 const EVENT_HISTORY_BYTES = 1024 * 1024
@@ -125,6 +133,7 @@ export interface RunManagerOptions {
     projectDir: string
     canvasBranch: string
     taskOwned: boolean
+    studioOwned: boolean
   }) => Promise<string | null>
   /** Test seam for deterministic artifact settlement without OS watcher limits. */
   watchArtifacts?: typeof watchArtifacts
@@ -137,13 +146,13 @@ export interface RunFinishedEvent {
 }
 
 export interface ProjectionPlanReadyEvent {
-  plan: ProjectionPlanV2
+  plan: ProjectionPlan
   projectDir: string
   canvasBranch: string
 }
 
-export interface RunProjectionPlanRecordV2 extends ProjectionSettlementV2 {
-  state: ProjectionPlanLifecycleV2
+export interface RunProjectionPlanRecord extends ProjectionSettlement {
+  state: ProjectionPlanLifecycle
 }
 
 export interface RunCreationOptions {
@@ -167,7 +176,7 @@ interface PendingRunCreation {
 interface TerminalArtifactSnapshot {
   files: string[]
   complete: boolean
-  manifest?: ArtifactManifestV1
+  manifest?: ArtifactManifest
 }
 
 interface RunReservation {
@@ -186,10 +195,10 @@ export class RunManager {
   readonly #runs = new Map<string, InternalRun>()
   readonly #tasks = new Map<string, Promise<void>>()
   readonly #sessionStores = new Map<string, SessionStore>()
-  readonly #taskSessionStores = new Map<string, TaskSessionStoreV2>()
-  readonly #artifactStoresV2 = new Map<string, RunArtifactStoreV2>()
-  readonly #projectionPlanStoresV2 = new Map<string, ProjectionPlanStoreV2>()
-  readonly #pluginCapabilityStoresV2 = new Map<string, ProjectionPluginCapabilityStoreV2>()
+  readonly #taskSessionStores = new Map<string, TaskSessionStore>()
+  readonly #artifactStores = new Map<string, RunArtifactStore>()
+  readonly #projectionPlanStores = new Map<string, ProjectionPlanStore>()
+  readonly #pluginCapabilityStores = new Map<string, ProjectionPluginCapabilityStore>()
   readonly #runLogStores = new Map<string, RunLogStore>()
   readonly #runLogRecovery = new Map<string, Promise<void>>()
   readonly #pendingCreates = new Map<string, PendingRunCreation>()
@@ -197,6 +206,8 @@ export class RunManager {
   readonly #branchMutationLeases = new Set<string>()
   readonly #taskRunLeases = new Map<string, Set<string>>()
   readonly #taskMutationLeases = new Set<string>()
+  readonly #projectDeletionReservations = new Set<string>()
+  readonly #projectRunPreparations = new Map<string, number>()
   #closing = false
 
   constructor(options: RunManagerOptions) {
@@ -216,9 +227,13 @@ export class RunManager {
     this.#assertOpen()
     // Pin the revision payload before any asynchronous lease/path work so a
     // caller cannot mutate the context while the run is being accepted.
-    if (isResolvedTaskRunRequestV2(request)) {
-      const pluginCapabilities = pinProjectionPluginCapabilitiesV2(request.pluginCapabilities)
-      request = structuredClone({ ...request, pluginCapabilities })
+    if (isResolvedTaskRunRequest(request)) {
+      const pluginCapabilities = pinProjectionPluginCapabilities(request.pluginCapabilities)
+      const resolvedSkills = pinResolvedTaskSkills(
+        request.resolvedSkills,
+        request.skillCapabilityDigest,
+      )
+      request = structuredClone({ ...request, pluginCapabilities, resolvedSkills })
     }
     const transport = this.#registry.resolve(request.agentId)
     if (!transport) {
@@ -231,13 +246,18 @@ export class RunManager {
     })
     this.#assertOpen()
     const projectDir = scope.projectDir
-    if (isResolvedTaskRunRequestV2(request)) {
-      request = {
-        ...request,
-        pluginCapabilities: await this.#pluginCapabilitiesV2(projectDir).pin(
-          requirePinnedPluginCapabilitiesV2(request),
-        ),
+    this.#beginRunPreparation(projectDir)
+    try {
+      if (isResolvedTaskRunRequest(request)) {
+        request = {
+          ...request,
+          pluginCapabilities: await this.#pluginCapabilities(projectDir).pin(
+            requirePinnedPluginCapabilities(request),
+          ),
+        }
       }
+    } finally {
+      this.#endRunPreparation(projectDir)
     }
     const canvasBranch = request.canvasBranch ?? 'main'
     const runId = request.runId ?? randomUUID()
@@ -313,7 +333,8 @@ export class RunManager {
         ? await this.#resolveSourceProjectDir({
             projectDir,
             canvasBranch,
-            taskOwned: isResolvedTaskRunRequestV2(request),
+            taskOwned: isResolvedTaskRunRequest(request),
+            studioOwned: isNodeStudioRunRequest(request),
           })
         : null
       const sourceProjectDir = sourceCandidate
@@ -350,7 +371,7 @@ export class RunManager {
         && run.projectDir === projectDir
         && runTargetId(run.request) === runTargetId(request)
         && (run.request.canvasBranch ?? 'main') === canvasBranch)) {
-        const targetKind = isResolvedTaskRunRequestV2(request) ? 'task' : 'node'
+        const targetKind = isResolvedTaskRunRequest(request) ? 'task' : 'node'
         throw new ProtocolError(
           `this ${targetKind} already has an active run`,
           `${targetKind}_run_active`,
@@ -360,7 +381,7 @@ export class RunManager {
       const targetId = runTargetId(request)
       const summary: RunSummary = {
         runId,
-        ...(isResolvedTaskRunRequestV2(request) ? {
+        ...(isResolvedTaskRunRequest(request) ? {
           taskId: request.taskId,
           baseRevision: request.baseRevision,
           prompt: request.prompt,
@@ -368,9 +389,17 @@ export class RunManager {
         nodeId: targetId,
         agentId: request.agentId,
         canvasBranch,
-        ...(isResolvedTaskRunRequestV2(request)
-          ? { pluginCapabilityDigest: requirePinnedPluginCapabilitiesV2(request).digest }
+        ...(isResolvedTaskRunRequest(request)
+          ? {
+              pluginCapabilityDigest: requirePinnedPluginCapabilities(request).digest,
+              skillCapabilityDigest: request.skillCapabilityDigest,
+            }
           : {}),
+        ...(isNodeStudioRunRequest(request) ? {
+          runKind: 'node-studio' as const,
+          baseDefinitionId: request.baseDefinitionId,
+          baseDefinitionRevision: request.baseDefinitionRevision,
+        } : {}),
         status: 'preparing',
         startedAt: Date.now(),
         sessionId: null,
@@ -422,7 +451,8 @@ export class RunManager {
           targetId,
           runId,
           canvasBranch,
-          isResolvedTaskRunRequestV2(request),
+          isResolvedTaskRunRequest(request),
+          isResolvedTaskRunRequest(request) || isNodeStudioRunRequest(request),
         )
         run.acceptanceState = 'accepted'
         run.resolveAcceptance()
@@ -477,13 +507,7 @@ export class RunManager {
 
   async listRunHistory(
     projectDirRequest = '.',
-    filter: {
-      nodeId?: string
-      taskId?: string
-      taskOwned?: boolean
-      canvasBranch?: string
-      limit?: number
-    } = {},
+    filter: RunHistoryFilter = {},
   ): Promise<RunSummary[]> {
     const { store } = await this.#persistentRunStore(projectDirRequest)
     return store.list(filter)
@@ -498,6 +522,14 @@ export class RunManager {
     return store.page(runId, options)
   }
 
+  async readTerminalClose(
+    runId: string,
+    projectDirRequest = '.',
+  ): Promise<RunClosePayload | null> {
+    const { store } = await this.#persistentRunStore(projectDirRequest)
+    return store.terminalClose(runId)
+  }
+
   async deleteRunLog(runId: string, projectDirRequest = '.'): Promise<boolean> {
     const { store } = await this.#persistentRunStore(projectDirRequest)
     return store.deleteLog(runId)
@@ -507,11 +539,11 @@ export class RunManager {
     runId: string,
     artifactId: string,
     projectDirRequest = '.',
-  ): Promise<RunArtifactLookupV2 | null> {
+  ): Promise<RunArtifactLookup | null> {
     const { projectDir, store } = await this.#persistentRunStore(projectDirRequest)
     const summary = await store.summary(runId)
     if (!summary) return null
-    return await this.#artifactStoreV2(
+    return await this.#artifactStore(
       projectDir,
       summary.canvasBranch ?? 'main',
     ).lookup(runId, artifactId) ?? null
@@ -521,7 +553,7 @@ export class RunManager {
     planId: string,
     projectDirRequest = '.',
     canvasBranchRequest = 'main',
-  ): Promise<ProjectionSettlementV2 | null> {
+  ): Promise<ProjectionSettlement | null> {
     const record = await this.getProjectionPlanRecord(
       planId,
       projectDirRequest,
@@ -536,10 +568,10 @@ export class RunManager {
     planId: string,
     projectDirRequest = '.',
     canvasBranchRequest = 'main',
-  ): Promise<RunProjectionPlanRecordV2 | null> {
+  ): Promise<RunProjectionPlanRecord | null> {
     const projectDir = await this.#leaseProject(projectDirRequest)
     const canvasBranch = parseCanvasBranch(canvasBranchRequest)
-    const record = await this.#projectionPlansV2(projectDir, canvasBranch).get(planId)
+    const record = await this.#projectionPlans(projectDir, canvasBranch).get(planId)
     if (!record) return null
 
     // The registry is an indexed lifecycle view. Browser plan commands still
@@ -579,7 +611,7 @@ export class RunManager {
   ): Promise<boolean> {
     const projectDir = await this.#leaseProject(projectDirRequest)
     const canvasBranch = parseCanvasBranch(canvasBranchRequest)
-    const store = this.#projectionPlansV2(projectDir, canvasBranch)
+    const store = this.#projectionPlans(projectDir, canvasBranch)
     if (!await store.get(planId)) return false
     await store.dismiss(planId)
     return true
@@ -597,10 +629,10 @@ export class RunManager {
   ): Promise<string[]> {
     const projectDir = await this.#leaseProject(projectDirRequest)
     const canvasBranch = parseCanvasBranch(canvasBranchRequest)
-    const parsedTaskIds = new Set(liveTaskIds.map((taskId) => parseTaskIdV2(taskId)))
+    const parsedTaskIds = new Set(liveTaskIds.map((taskId) => parseTaskId(taskId)))
     this.#runLogs(projectDir)
     await this.#runLogRecovery.get(projectDir)
-    const result = await this.#projectionPlansV2(
+    const result = await this.#projectionPlans(
       projectDir,
       canvasBranch,
     ).dismissPendingForMissingTasks(parsedTaskIds)
@@ -678,8 +710,8 @@ export class RunManager {
 
   async listTaskSessions(
     projectDirRequest = '.',
-    filter: TaskSessionListFilterV2 = {},
-  ): Promise<TaskSessionRecordV2[]> {
+    filter: TaskSessionListFilter = {},
+  ): Promise<TaskSessionRecord[]> {
     const projectDir = await this.#leaseProject(projectDirRequest)
     return this.#taskSessions(projectDir).list(filter)
   }
@@ -701,6 +733,9 @@ export class RunManager {
       .sort((left, right) => left.localeCompare(right))
     if (normalizedBranches.length === 0) {
       throw new TypeError('at least one branch is required for a branch mutation lease')
+    }
+    if (this.#projectDeletionReservations.has(projectDir)) {
+      throw new ProtocolError('workspace project is being deleted', 'project_busy', 409)
     }
     const keys = normalizedBranches.map((branch) => branchLeaseKey(projectDir, branch))
     const busyIndex = keys.findIndex((key) =>
@@ -742,10 +777,13 @@ export class RunManager {
     this.#runLogs(projectDir)
     await this.#runLogRecovery.get(projectDir)
     this.#assertOpen()
-    const normalizedTaskIds = [...new Set(taskIds.map((taskId) => parseTaskIdV2(taskId)))]
+    const normalizedTaskIds = [...new Set(taskIds.map((taskId) => parseTaskId(taskId)))]
       .sort((left, right) => left.localeCompare(right))
     if (normalizedTaskIds.length === 0) {
       throw new TypeError('at least one Task is required for a Task mutation lease')
+    }
+    if (this.#projectDeletionReservations.has(projectDir)) {
+      throw new ProtocolError('workspace project is being deleted', 'project_busy', 409)
     }
     const keys = normalizedTaskIds.map((taskId) =>
       taskLeaseKey(projectDir, canvasBranch, taskId))
@@ -771,6 +809,71 @@ export class RunManager {
     }
   }
 
+  /**
+   * Reserves a whole project against new Runs while permanent deletion drains
+   * the remaining daemon-owned stores. Existing or pending Runs fail closed.
+   */
+  async beginProjectDeletion(projectDirRequest: string): Promise<string> {
+    this.#assertOpen()
+    const projectDir = await this.#leaseProject(projectDirRequest)
+    if (this.#projectDeletionReservations.has(projectDir)) {
+      throw new ProtocolError('workspace project is busy', 'project_busy', 409)
+    }
+    this.#projectDeletionReservations.add(projectDir)
+    try {
+      this.#runLogs(projectDir)
+      await this.#runLogRecovery.get(projectDir)
+      const runBusy = [...this.#runs.values()].some((run) =>
+        run.projectDir === projectDir && !run.closed)
+        || (this.#projectRunPreparations.get(projectDir) ?? 0) > 0
+        || [...this.#pendingCreates.values()].some((pending) =>
+          pending.projectDir === projectDir)
+        || [...this.#branchRunLeases.entries()].some(([key, owners]) =>
+          projectScopedLeaseKey(key, projectDir) && owners.size > 0)
+        || [...this.#branchMutationLeases].some((key) =>
+          projectScopedLeaseKey(key, projectDir))
+        || [...this.#taskMutationLeases].some((key) =>
+          projectScopedLeaseKey(key, projectDir))
+      if (runBusy) {
+        throw new ProtocolError(
+          'workspace project has an active or pending operation',
+          'project_busy',
+          409,
+        )
+      }
+      await this.#runLogStores.get(projectDir)?.flush()
+      return projectDir
+    } catch (error) {
+      this.#projectDeletionReservations.delete(projectDir)
+      throw error
+    }
+  }
+
+  evictProject(projectDir: string): void {
+    const runIds = [...this.#runs.values()]
+      .filter((run) => run.projectDir === projectDir)
+      .map((run) => run.summary.runId)
+    for (const runId of runIds) {
+      this.#runs.delete(runId)
+      this.#tasks.delete(runId)
+    }
+    this.#sessionStores.delete(projectDir)
+    this.#taskSessionStores.delete(projectDir)
+    this.#runLogStores.delete(projectDir)
+    this.#runLogRecovery.delete(projectDir)
+    this.#pluginCapabilityStores.delete(projectDir)
+    for (const key of this.#artifactStores.keys()) {
+      if (projectScopedLeaseKey(key, projectDir)) this.#artifactStores.delete(key)
+    }
+    for (const key of this.#projectionPlanStores.keys()) {
+      if (projectScopedLeaseKey(key, projectDir)) this.#projectionPlanStores.delete(key)
+    }
+  }
+
+  endProjectDeletion(projectDir: string): void {
+    this.#projectDeletionReservations.delete(projectDir)
+  }
+
   async close(): Promise<void> {
     this.#closing = true
     const cancellations: Promise<boolean>[] = []
@@ -789,7 +892,8 @@ export class RunManager {
     let watcherError: Error | null = null
     const targetId = runTargetId(run.request)
     const canvasBranch = run.request.canvasBranch ?? 'main'
-    const taskOwned = isResolvedTaskRunRequestV2(run.request)
+    const taskOwned = isResolvedTaskRunRequest(run.request)
+    const manifestOwned = taskOwned || isNodeStudioRunRequest(run.request)
 
     try {
       await assertManagedPaths(
@@ -798,6 +902,7 @@ export class RunManager {
         run.summary.runId,
         canvasBranch,
         taskOwned,
+        manifestOwned,
       )
       await this.#revalidateSourceProjectDir(run)
       throwIfAborted(run.abortController.signal)
@@ -813,8 +918,8 @@ export class RunManager {
         nodeId: targetId,
         canvasBranch,
         runId: run.summary.runId,
-        ...(taskOwned ? {
-          projectRelativeRoot: this.#artifactStoreV2(
+        ...(manifestOwned ? {
+          projectRelativeRoot: this.#artifactStore(
             run.projectDir,
             canvasBranch,
           ).location(run.summary.runId).projectRelativeFilesRoot,
@@ -831,7 +936,12 @@ export class RunManager {
       throwIfAborted(run.abortController.signal)
 
       let priorSessionId: string | null
-      if (isResolvedTaskRunRequestV2(run.request)) {
+      if (isNodeStudioRunRequest(run.request)) {
+        // The current manifest is the complete Studio context. Package ids are
+        // reusable draft labels, so resuming their prior Agent session would
+        // leak an unrelated draft's conversation into this run.
+        priorSessionId = null
+      } else if (isResolvedTaskRunRequest(run.request)) {
         priorSessionId = (await this.#taskSessions(run.projectDir).get(
           canvasBranch,
           run.request.taskId,
@@ -854,6 +964,7 @@ export class RunManager {
         run.summary.runId,
         canvasBranch,
         taskOwned,
+        manifestOwned,
       )
       await this.#revalidateSourceProjectDir(run)
       throwIfAborted(run.abortController.signal)
@@ -904,8 +1015,8 @@ export class RunManager {
       const artifacts = await this.#collectTerminalArtifacts(run, true)
       const outcome = status === 'done'
         ? taskOwned
-          ? await readRunOutcomeV2(prepared.artifactDir)
-          : await readRunOutcome(prepared.artifactDir)
+          ? await readRunOutcome(prepared.artifactDir)
+          : await readLegacyRunOutcome(prepared.artifactDir)
         : undefined
       await this.#finish(
         run,
@@ -998,10 +1109,10 @@ export class RunManager {
       ? path.resolve(reportedPath)
       : path.resolve(run.projectDir, reportedPath)
     const relative = path.relative(run.projectDir, absolute).split(path.sep).join('/')
-    const root = isResolvedTaskRunRequestV2(run.request)
-      ? this.#artifactStoreV2(
+    const root = isResolvedTaskRunRequest(run.request) || isNodeStudioRunRequest(run.request)
+      ? this.#artifactStore(
           run.projectDir,
-          run.request.canvasBranch,
+          run.request.canvasBranch ?? 'node-studio',
         ).location(run.summary.runId).projectRelativeFilesRoot
       : artifactRunRelativeDir(
           run.request.canvasBranch ?? 'main',
@@ -1045,8 +1156,8 @@ export class RunManager {
     status: Extract<DaemonRunStatus, 'done' | 'error' | 'cancelled'>,
     artifacts: string[],
     artifactsComplete: boolean,
-    outcome?: RunOutcome | RunOutcomeV2,
-    artifactManifest?: ArtifactManifestV1,
+    outcome?: LegacyRunOutcome | RunOutcome,
+    artifactManifest?: ArtifactManifest,
   ): Promise<void> {
     if (run.closed) return
     try {
@@ -1060,11 +1171,11 @@ export class RunManager {
     }
     run.summary.status = status
     run.summary.finishedAt = Date.now()
-    let projectionPlan: ProjectionPlanV2 | undefined
+    let projectionPlan: ProjectionPlan | undefined
     let suggestedActions: SuggestedAction[] | undefined
-    if (isResolvedTaskRunRequestV2(run.request) && artifactManifest) {
+    if (isResolvedTaskRunRequest(run.request) && artifactManifest) {
       try {
-        const created = await this.#projectionPlansV2(
+        const created = await this.#projectionPlans(
           run.projectDir,
           run.request.canvasBranch,
         ).createPending({
@@ -1072,7 +1183,7 @@ export class RunManager {
           runId: run.summary.runId,
           runStatus: status,
           manifest: artifactManifest,
-          plugins: requirePinnedPluginCapabilitiesV2(run.request).plugins,
+          plugins: requirePinnedPluginCapabilities(run.request).plugins,
           ...(status === 'done' && outcome ? { outcome } : {}),
         })
         projectionPlan = created.plan
@@ -1090,9 +1201,9 @@ export class RunManager {
       artifacts,
       artifactsComplete,
       ...(artifactManifest ? { artifactManifest } : {}),
-      ...(isResolvedTaskRunRequestV2(run.request)
+      ...(isResolvedTaskRunRequest(run.request)
         ? projectionPlan ? { projectionPlan, suggestedActions: suggestedActions ?? [] } : {}
-        : status === 'done' && outcome ? { outcome: outcome as RunOutcome } : {}),
+        : status === 'done' && outcome ? { outcome: outcome as LegacyRunOutcome } : {}),
     }
     const buffered: BufferedStreamMessage = {
       event: 'close',
@@ -1121,7 +1232,7 @@ export class RunManager {
           canvasBranch: run.request.canvasBranch ?? 'main',
         })
         if (close.projectionPlan.taskProposals.length === 0) {
-          await this.#projectionPlansV2(
+          await this.#projectionPlans(
             run.projectDir,
             run.request.canvasBranch ?? 'main',
           ).dismiss(close.projectionPlan.planId)
@@ -1153,10 +1264,10 @@ export class RunManager {
     run: InternalRun,
     complete: boolean,
   ): Promise<TerminalArtifactSnapshot> {
-    if (isResolvedTaskRunRequestV2(run.request)) {
-      const closed = await this.#artifactStoreV2(
+    if (isResolvedTaskRunRequest(run.request) || isNodeStudioRunRequest(run.request)) {
+      const closed = await this.#artifactStore(
         run.projectDir,
-        run.request.canvasBranch,
+        run.request.canvasBranch ?? 'node-studio',
       ).closeRun(run.summary.runId, { complete })
       return {
         files: closed.manifest.entries.map((entry) => path.posix.join(
@@ -1175,7 +1286,8 @@ export class RunManager {
 
   async #persistRunSession(run: InternalRun, sessionId: string): Promise<void> {
     const canvasBranch = run.request.canvasBranch ?? 'main'
-    if (isResolvedTaskRunRequestV2(run.request)) {
+    if (isNodeStudioRunRequest(run.request)) return
+    if (isResolvedTaskRunRequest(run.request)) {
       await this.#taskSessions(run.projectDir).upsert({
         canvasBranch,
         taskId: run.request.taskId,
@@ -1203,32 +1315,32 @@ export class RunManager {
     return store
   }
 
-  #taskSessions(projectDir: string): TaskSessionStoreV2 {
+  #taskSessions(projectDir: string): TaskSessionStore {
     let store = this.#taskSessionStores.get(projectDir)
     if (!store) {
       const filePath = path.join(projectDir, '.gg', 'runtime', 'task-sessions-v2.json')
-      store = new TaskSessionStoreV2(filePath, {
-        validatePath: () => assertTaskSessionStoreV2Path(projectDir),
+      store = new TaskSessionStore(filePath, {
+        validatePath: () => assertTaskSessionStorePath(projectDir),
       })
       this.#taskSessionStores.set(projectDir, store)
     }
     return store
   }
 
-  #artifactStoreV2(projectDir: string, canvasBranch: string): RunArtifactStoreV2 {
+  #artifactStore(projectDir: string, canvasBranch: string): RunArtifactStore {
     const key = JSON.stringify([projectDir, canvasBranch])
-    let store = this.#artifactStoresV2.get(key)
+    let store = this.#artifactStores.get(key)
     if (!store) {
-      store = new RunArtifactStoreV2(projectDir, canvasBranch)
-      this.#artifactStoresV2.set(key, store)
+      store = new RunArtifactStore(projectDir, canvasBranch)
+      this.#artifactStores.set(key, store)
     }
     return store
   }
 
-  #projectionPlansV2(projectDir: string, canvasBranch: string): ProjectionPlanStoreV2 {
+  #projectionPlans(projectDir: string, canvasBranch: string): ProjectionPlanStore {
     const parsedBranch = parseCanvasBranch(canvasBranch)
     const key = JSON.stringify([projectDir, parsedBranch])
-    let store = this.#projectionPlanStoresV2.get(key)
+    let store = this.#projectionPlanStores.get(key)
     if (!store) {
       const branchStorageId = canvasBranchStorageId(parsedBranch)
       const filePath = path.join(
@@ -1238,14 +1350,14 @@ export class RunManager {
         'projection-plans',
         `${branchStorageId}.json`,
       )
-      store = new ProjectionPlanStoreV2(filePath, {
-        validatePath: () => assertProjectionPlanStoreV2Path(
+      store = new ProjectionPlanStore(filePath, {
+        validatePath: () => assertProjectionPlanStorePath(
           projectDir,
           branchStorageId,
           filePath,
         ),
       })
-      this.#projectionPlanStoresV2.set(key, store)
+      this.#projectionPlanStores.set(key, store)
     }
     return store
   }
@@ -1255,15 +1367,15 @@ export class RunManager {
     if (!store) {
       store = new RunLogStore(projectDir)
       this.#runLogStores.set(projectDir, store)
-      const recovery = recoverInterruptedTaskRunsV2({
+      const recovery = recoverInterruptedTaskRuns({
         projectDir,
         runLogs: store,
-        artifactStore: (canvasBranch) => this.#artifactStoreV2(projectDir, canvasBranch),
-        projectionPlanStore: (canvasBranch) => this.#projectionPlansV2(
+        artifactStore: (canvasBranch) => this.#artifactStore(projectDir, canvasBranch),
+        projectionPlanStore: (canvasBranch) => this.#projectionPlans(
           projectDir,
           canvasBranch,
         ),
-        pluginCapabilities: (digest) => this.#pluginCapabilitiesV2(projectDir).recover(digest),
+        pluginCapabilities: (digest) => this.#pluginCapabilities(projectDir).recover(digest),
         ...(this.#onProjectionPlanReady
           ? { onProjectionPlanReady: this.#onProjectionPlanReady }
           : {}),
@@ -1273,11 +1385,11 @@ export class RunManager {
     return store
   }
 
-  #pluginCapabilitiesV2(projectDir: string): ProjectionPluginCapabilityStoreV2 {
-    let store = this.#pluginCapabilityStoresV2.get(projectDir)
+  #pluginCapabilities(projectDir: string): ProjectionPluginCapabilityStore {
+    let store = this.#pluginCapabilityStores.get(projectDir)
     if (!store) {
-      store = new ProjectionPluginCapabilityStoreV2(projectDir)
-      this.#pluginCapabilityStoresV2.set(projectDir, store)
+      store = new ProjectionPluginCapabilityStore(projectDir)
+      this.#pluginCapabilityStores.set(projectDir, store)
     }
     return store
   }
@@ -1286,7 +1398,30 @@ export class RunManager {
     const leased = this.#acquireProjectLease
       ? await this.#acquireProjectLease(projectDirRequest)
       : projectDirRequest
-    return resolveProjectDir(this.#projectRoot, leased)
+    const projectDir = await resolveProjectDir(this.#projectRoot, leased)
+    if (this.#projectDeletionReservations.has(projectDir)) {
+      throw new ProtocolError('workspace project is being deleted', 'project_busy', 409)
+    }
+    return projectDir
+  }
+
+  #beginRunPreparation(projectDir: string): void {
+    if (this.#projectDeletionReservations.has(projectDir)) {
+      throw new ProtocolError('workspace project is being deleted', 'project_busy', 409)
+    }
+    this.#projectRunPreparations.set(
+      projectDir,
+      (this.#projectRunPreparations.get(projectDir) ?? 0) + 1,
+    )
+  }
+
+  #endRunPreparation(projectDir: string): void {
+    const remaining = (this.#projectRunPreparations.get(projectDir) ?? 1) - 1
+    if (remaining <= 0) {
+      this.#projectRunPreparations.delete(projectDir)
+    } else {
+      this.#projectRunPreparations.set(projectDir, remaining)
+    }
   }
 
   #reserveRun(
@@ -1295,11 +1430,14 @@ export class RunManager {
     canvasBranch: string,
     runId: string,
   ): RunReservation {
+    if (this.#projectDeletionReservations.has(projectDir)) {
+      throw new ProtocolError('workspace project is being deleted', 'project_busy', 409)
+    }
     const branchKey = this.#reserveRunBranch(projectDir, canvasBranch, runId)
     try {
       return {
         branchKey,
-        ...(isResolvedTaskRunRequestV2(request)
+        ...(isResolvedTaskRunRequest(request)
           ? { taskKey: this.#reserveRunTask(projectDir, canvasBranch, request.taskId, runId) }
           : {}),
       }
@@ -1372,7 +1510,8 @@ export class RunManager {
     const candidate = await this.#resolveSourceProjectDir?.({
       projectDir: run.projectDir,
       canvasBranch: run.request.canvasBranch ?? 'main',
-      taskOwned: isResolvedTaskRunRequestV2(run.request),
+      taskOwned: isResolvedTaskRunRequest(run.request),
+      studioOwned: isNodeStudioRunRequest(run.request),
     })
     if (!candidate) {
       throw new ProtocolError(
@@ -1478,9 +1617,10 @@ async function assertManagedPaths(
   runId: string,
   canvasBranch: string,
   taskOwned = false,
+  manifestOwned = taskOwned,
 ): Promise<void> {
   if (taskOwned) {
-    await assertTaskSessionStoreV2Path(scope.projectDir)
+    await assertTaskSessionStorePath(scope.projectDir)
     const branchStorageId = canvasBranchStorageId(parseCanvasBranch(canvasBranch))
     const projectionPlanPath = path.join(
       scope.projectDir,
@@ -1489,14 +1629,14 @@ async function assertManagedPaths(
       'projection-plans',
       `${branchStorageId}.json`,
     )
-    await assertProjectionPlanStoreV2Path(
+    await assertProjectionPlanStorePath(
       scope.projectDir,
       branchStorageId,
       projectionPlanPath,
     )
   }
-  const artifactRoot = taskOwned
-    ? new RunArtifactStoreV2(scope.projectDir, canvasBranch)
+  const artifactRoot = manifestOwned
+    ? new RunArtifactStore(scope.projectDir, canvasBranch)
         .location(runId).projectRelativeFilesRoot
     : artifactRunRelativeDir(canvasBranch, runId, targetId)
   const paths = [
@@ -1567,7 +1707,7 @@ async function assertSessionStorePath(projectDir: string): Promise<void> {
   }
 }
 
-async function assertTaskSessionStoreV2Path(projectDir: string): Promise<void> {
+async function assertTaskSessionStorePath(projectDir: string): Promise<void> {
   const runtimeDir = path.join(projectDir, '.gg', 'runtime')
   const expected = path.join(runtimeDir, 'task-sessions-v2.json')
   const [canonicalProject, canonicalRuntime, canonicalExpected] = await Promise.all([
@@ -1601,7 +1741,7 @@ async function assertTaskSessionStoreV2Path(projectDir: string): Promise<void> {
   }
 }
 
-async function assertProjectionPlanStoreV2Path(
+async function assertProjectionPlanStorePath(
   projectDir: string,
   branchStorageId: string,
   expected: string,
@@ -1672,6 +1812,15 @@ function taskLeaseKey(projectDir: string, canvasBranch: string, taskId: string):
   return JSON.stringify([projectDir, canvasBranch, taskId])
 }
 
+function projectScopedLeaseKey(key: string, projectDir: string): boolean {
+  try {
+    const value = JSON.parse(key) as unknown
+    return Array.isArray(value) && value[0] === projectDir
+  } catch {
+    return false
+  }
+}
+
 function sameRunIdentity(
   run: InternalRun,
   request: RunExecutionRequest,
@@ -1699,24 +1848,24 @@ function samePendingRunIdentity(
 }
 
 function runRequestIdentity(request: RunExecutionRequest): string {
-  if (!isResolvedTaskRunRequestV2(request)) return 'canvas-v1'
+  if (!isResolvedTaskRunRequest(request)) return 'standalone-run'
   return JSON.stringify({
     schemaVersion: request.schemaVersion,
     baseRevision: request.baseRevision,
     prompt: request.prompt,
     attachments: request.attachments,
     materializationPolicy: request.materializationPolicy,
-    pluginCapabilityDigest: requirePinnedPluginCapabilitiesV2(request).digest,
+    pluginCapabilityDigest: requirePinnedPluginCapabilities(request).digest,
   })
 }
 
-function pinProjectionPluginCapabilitiesV2(
-  value: ProjectionPluginCapabilitySnapshotV2 | undefined,
-): ProjectionPluginCapabilitySnapshotV2 {
+function pinProjectionPluginCapabilities(
+  value: ProjectionPluginCapabilitySnapshot | undefined,
+): ProjectionPluginCapabilitySnapshot {
   if (value === undefined) {
-    return structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2)
+    return structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT)
   }
-  const inspection = inspectProjectionPluginCapabilitySnapshotV2(value)
+  const inspection = inspectProjectionPluginCapabilitySnapshot(value)
   if (inspection.status !== 'valid') {
     throw new ProtocolError(
       `plugin capability snapshot is invalid: ${inspection.reason}`,
@@ -1727,9 +1876,9 @@ function pinProjectionPluginCapabilitiesV2(
   return inspection.snapshot
 }
 
-function requirePinnedPluginCapabilitiesV2(
+function requirePinnedPluginCapabilities(
   request: Extract<RunExecutionRequest, { schemaVersion: 2 }>,
-): ProjectionPluginCapabilitySnapshotV2 {
+): ProjectionPluginCapabilitySnapshot {
   if (!request.pluginCapabilities) {
     throw new TypeError('Task Run was not pinned to plugin capabilities')
   }

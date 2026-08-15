@@ -106,15 +106,15 @@ test('Run history endpoints never expose persisted legacy summaries', async () =
   }
 })
 
-test('Canvas V2 command API persists reducer commands with CAS', async () => {
+test('Canvas command API persists reducer commands with CAS', async () => {
   const fixture = await startTestDaemon()
   try {
     const health = await (await fetch(`${fixture.baseUrl}/health`)).json() as {
-      capabilities?: { canvasModelV2?: boolean }
+      capabilities?: { canvas?: boolean }
     }
-    assert.equal(health.capabilities?.canvasModelV2, true)
+    assert.equal(health.capabilities?.canvas, true)
 
-    const emptyResponse = await fetch(`${fixture.baseUrl}/canvas/v2?branch=main`)
+    const emptyResponse = await fetch(`${fixture.baseUrl}/canvas?branch=main`)
     assert.equal(emptyResponse.status, 200)
     const empty = await emptyResponse.json() as { revision: number; document: { tasks: unknown[] } }
     assert.equal(empty.revision, 0)
@@ -186,7 +186,7 @@ test('Canvas V2 command API persists reducer commands with CAS', async () => {
   }
 })
 
-test('Canvas V2 HTTP retries remain exactly once after an intervening mutation', async () => {
+test('Canvas HTTP retries remain exactly once after an intervening mutation', async () => {
   const fixture = await startTestDaemon()
   const post = (body: unknown) => fetch(`${fixture.baseUrl}/canvas/commands`, {
     method: 'POST',
@@ -250,11 +250,11 @@ test('Canvas V2 HTTP retries remain exactly once after an intervening mutation',
   }
 })
 
-test('V2 plugin capability handshake pins strict data before accepting a Run', async () => {
+test('plugin capability handshake pins strict data before accepting a Run', async () => {
   const fixture = await startTestDaemon()
   const headers = { 'Content-Type': 'application/json' }
   try {
-    const capabilityResponse = await fetch(`${fixture.baseUrl}/plugin-capabilities/v2`, {
+    const capabilityResponse = await fetch(`${fixture.baseUrl}/plugin-capabilities`, {
       method: 'PUT',
       headers,
       body: JSON.stringify({
@@ -276,7 +276,7 @@ test('V2 plugin capability handshake pins strict data before accepting a Run', a
     assert.match(capability.digest, /^[0-9a-f]{64}$/u)
     assert.ok(capability.pluginCount > 6)
 
-    const override = await fetch(`${fixture.baseUrl}/plugin-capabilities/v2`, {
+    const override = await fetch(`${fixture.baseUrl}/plugin-capabilities`, {
       method: 'PUT',
       headers,
       body: JSON.stringify({
@@ -288,7 +288,7 @@ test('V2 plugin capability handshake pins strict data before accepting a Run', a
     assert.equal((await override.json() as { error: { code: string } }).error.code,
       'invalid_plugin_capabilities')
 
-    const forged = await fetch(`${fixture.baseUrl}/plugin-capabilities/v2`, {
+    const forged = await fetch(`${fixture.baseUrl}/plugin-capabilities`, {
       method: 'PUT',
       headers,
       body: JSON.stringify({
@@ -407,7 +407,7 @@ test('V2 plugin capability handshake pins strict data before accepting a Run', a
   }
 })
 
-test('RunIntent V2 executes only against the exact persisted Canvas revision', async () => {
+test('RunIntent executes only against the exact persisted Canvas revision', async () => {
   const fixture = await startTestDaemon()
   try {
     const command = await fetch(`${fixture.baseUrl}/canvas/commands`, {
@@ -421,7 +421,7 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
           type: 'CreateTask',
           task: {
             id: 'task-server-v2',
-            title: 'Server V2 task',
+            title: 'Server task',
             goal: 'Use the durable task revision',
             anchor: { x: 100, y: 120 },
             origin: { kind: 'user' },
@@ -438,7 +438,7 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
       agentId: 'codex',
       canvasBranch: 'main',
       baseRevision: 1,
-      prompt: 'SERVER_V2_PROMPT',
+      prompt: 'SERVER_PROMPT',
       attachments: [],
       materializationPolicy: 'auto',
     }
@@ -450,8 +450,8 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
     assert.equal(stale.status, 409)
     assert.deepEqual(await stale.json(), {
       error: {
-        code: 'canvas_v2_revision_conflict',
-        message: 'Canvas V2 revision changed; current revision is 1',
+        code: 'canvas_revision_conflict',
+        message: 'Canvas revision changed; current revision is 1',
         currentRevision: 1,
       },
     })
@@ -463,7 +463,7 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
     })
     assert.equal(forgedSnapshot.status, 400)
     assert.equal((await forgedSnapshot.json() as { error: { code: string } }).error.code,
-      'invalid_run_intent_v2')
+      'invalid_run_intent')
 
     const accepted = await fetch(`${fixture.baseUrl}/runs?projectDir=.`, {
       method: 'POST',
@@ -557,7 +557,7 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
     assert.deepEqual(await rejectedLogDeletion.json(), {
       error: {
         code: 'run_log_delete_unsupported',
-        message: 'Canvas V2 run logs are durable execution records and cannot be deleted independently',
+        message: 'Canvas run logs are durable execution records and cannot be deleted independently',
       },
     })
     const retainedLog = await fetch(
@@ -596,7 +596,7 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
       }
     } | undefined
     await waitFor(async () => {
-      const canvasResponse = await fetch(`${fixture.baseUrl}/canvas/v2?branch=main`)
+      const canvasResponse = await fetch(`${fixture.baseUrl}/canvas?branch=main`)
       if (!canvasResponse.ok) return false
       materializedCanvas = await canvasResponse.json() as typeof materializedCanvas
       return materializedCanvas?.document.receipts.some((receipt) =>
@@ -721,7 +721,7 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
       'utf8',
     )
     assert.match(pack, /Use the durable task revision/u)
-    assert.match(pack, /SERVER_V2_PROMPT/u)
+    assert.match(pack, /SERVER_PROMPT/u)
     assert.doesNotMatch(pack, /canvasSnapshot/u)
 
     const history = await fetch(`${fixture.baseUrl}/runs?taskId=task-server-v2`)
@@ -732,7 +732,160 @@ test('RunIntent V2 executes only against the exact persisted Canvas revision', a
   }
 })
 
-test('RunIntent V2 resolves readable artifacts from pinned full edges only', async () => {
+test('Run context applies one pinned Node policy to edges and explicit attachments', async () => {
+  const fixture = await startTestDaemon()
+  const headers = { 'Content-Type': 'application/json' }
+  const commit = async (
+    baseRevision: number,
+    mutationId: string,
+    command: Record<string, unknown>,
+  ): Promise<number> => {
+    const response = await fetch(`${fixture.baseUrl}/canvas/commands?projectDir=.`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ branch: 'main', baseRevision, mutationId, command }),
+    })
+    const text = await response.text()
+    assert.equal(response.status, 200, text)
+    return (JSON.parse(text) as { revision: number }).revision
+  }
+  try {
+    const registrationResponse = await fetch(
+      `${fixture.baseUrl}/plugin-capabilities?projectDir=.`,
+      {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          schemaVersion: 2,
+          plugins: [{
+            id: '@community/semantic',
+            artifactClaims: [],
+            nodeContext: {
+              schemaVersion: 1,
+              summary: { textMaxChars: 2, payloadFields: ['visible'] },
+              full: { textMaxChars: 4, payloadFields: ['visible'], artifactRefs: 'none' },
+            },
+          }],
+        }),
+      },
+    )
+    const registrationText = await registrationResponse.text()
+    assert.equal(registrationResponse.status, 200, registrationText)
+    const registration = JSON.parse(registrationText) as { digest: string }
+
+    let revision = await commit(0, 'create-context-policy-source', {
+      type: 'CreateNode',
+      node: {
+        id: 'node-context-policy-source',
+        type: '@community/semantic',
+        frame: { x: 100, y: 100, w: 320, h: 180, z: 1 },
+        title: 'Semantic source',
+        text: 'abcdef',
+        payload: { visible: 'keep', secret: 'omit' },
+        artifactRefs: [],
+        origin: { kind: 'user' },
+      },
+    })
+    revision = await commit(revision, 'create-context-policy-task', {
+      type: 'CreateTask',
+      task: {
+        id: 'task-context-policy',
+        title: 'Use semantic source',
+        goal: 'Use only the plugin-declared semantic Node fields',
+        anchor: { x: 500, y: 100 },
+        origin: { kind: 'user' },
+      },
+    })
+    revision = await commit(revision, 'connect-context-policy-source', {
+      type: 'CreateEdges',
+      edges: [{
+        id: 'edge-context-policy-source',
+        from: { kind: 'node', id: 'node-context-policy-source' },
+        to: { kind: 'task', id: 'task-context-policy' },
+        relation: 'source',
+        contextRole: 'full',
+        origin: { kind: 'user' },
+      }],
+    })
+
+    const runId = 'run-context-policy'
+    const accepted = await fetch(
+      `${fixture.baseUrl}/runs?projectDir=.&pluginCapabilityDigest=${registration.digest}`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          schemaVersion: 2,
+          runId,
+          taskId: 'task-context-policy',
+          agentId: 'codex',
+          canvasBranch: 'main',
+          baseRevision: revision,
+          prompt: 'Use the semantic source.',
+          attachments: [{ kind: 'node', nodeId: 'node-context-policy-source' }],
+          materializationPolicy: 'auto',
+        }),
+      },
+    )
+    assert.equal(accepted.status, 202, await accepted.text())
+    await waitFor(async () => (await fixture.daemon.runs.getPersisted(runId))?.status === 'done')
+
+    const pack = JSON.parse(await readFile(path.join(
+      fixture.root,
+      '.gg',
+      'context',
+      'runs',
+      runId,
+      'pack.json',
+    ), 'utf8')) as {
+      schemaVersion: number
+      inputs: Array<{
+        text: string | null
+        payload: Record<string, unknown> | null
+        artifactRefs: unknown[]
+        contextProjection: {
+          policySource: string
+          artifactRefs: { omittedByPolicy: number }
+        }
+      }>
+      explicitNodeAttachments: {
+        nodes: Array<{
+          text?: string
+          payload?: Record<string, unknown>
+          artifactRefs: unknown[]
+          contextProjection: {
+            policySource: string
+            artifactRefs: { omittedByPolicy: number }
+          }
+        }>
+      }
+      verifiedArtifactAttachments: unknown[]
+    }
+    assert.equal(pack.schemaVersion, 3)
+    assert.deepEqual(pack.inputs[0]?.text, 'abcd')
+    assert.deepEqual(pack.inputs[0]?.payload, { visible: 'keep' })
+    assert.deepEqual(pack.inputs[0]?.artifactRefs, [])
+    assert.deepEqual(pack.verifiedArtifactAttachments, [])
+    assert.equal(pack.inputs[0]?.contextProjection.policySource, 'plugin')
+    assert.equal(pack.inputs[0]?.contextProjection.artifactRefs.omittedByPolicy, 0)
+    assert.equal(pack.explicitNodeAttachments.nodes[0]?.text, 'abcd')
+    assert.deepEqual(pack.explicitNodeAttachments.nodes[0]?.payload, { visible: 'keep' })
+    assert.deepEqual(pack.explicitNodeAttachments.nodes[0]?.artifactRefs, [])
+    assert.equal(
+      pack.explicitNodeAttachments.nodes[0]?.contextProjection.policySource,
+      'plugin',
+    )
+    assert.equal(
+      pack.explicitNodeAttachments.nodes[0]?.contextProjection.artifactRefs.omittedByPolicy,
+      0,
+    )
+    assert.doesNotMatch(JSON.stringify(pack), /secret/u)
+  } finally {
+    await fixture.close()
+  }
+})
+
+test('RunIntent resolves readable artifacts from pinned full edges only', async () => {
   const fixture = await startTestDaemon()
   type CanvasEnvelope = {
     revision: number
@@ -756,7 +909,7 @@ test('RunIntent V2 resolves readable artifacts from pinned full edges only', asy
   }
 
   const canvas = async (): Promise<CanvasEnvelope> => {
-    const response = await fetch(`${fixture.baseUrl}/canvas/v2?projectDir=.&branch=main`)
+    const response = await fetch(`${fixture.baseUrl}/canvas?projectDir=.&branch=main`)
     assert.equal(response.status, 200)
     return await response.json() as CanvasEnvelope
   }
@@ -881,6 +1034,83 @@ test('RunIntent V2 resolves readable artifacts from pinned full edges only', asy
       && node.artifactRefs.some((artifact) => artifact.artifactId === sourceArtifact.artifactId))
     assert.ok(sourceNode)
 
+    const outputSlotNodeId = 'node-community-review-slot'
+    await commit('create-community-review-slot', {
+      type: 'CreateNode',
+      node: {
+        id: outputSlotNodeId,
+        type: '@community/review',
+        frame: { x: 460, y: 100, w: 320, h: 220, z: 2 },
+        title: 'Community review slot',
+        payload: {},
+        artifactRefs: [],
+        origin: { kind: 'user' },
+      },
+    })
+    await commit('connect-source-to-community-review-slot', {
+      type: 'CreateEdges',
+      edges: [{
+        id: 'edge-community-source-slot',
+        from: { kind: 'node', id: sourceNode.id },
+        to: { kind: 'node', id: outputSlotNodeId },
+        relation: 'source',
+        contextRole: 'full',
+        origin: { kind: 'user' },
+      }],
+    })
+    const promotedSlotCanvas = await commit('promote-community-review-slot', {
+      type: 'CreateTaskForOutputSlot',
+      task: {
+        id: 'task-context-output-slot',
+        title: 'Review the source through a community output slot',
+        goal: 'Review the source artifact',
+        anchor: { x: 420, y: 80 },
+        origin: { kind: 'user' },
+      },
+      nodeId: outputSlotNodeId,
+    })
+    assert.ok(promotedSlotCanvas.document.nodes.find((node) =>
+      node.id === outputSlotNodeId)?.homeTaskId === 'task-context-output-slot')
+    const promotedInput = await runTask(
+      'task-context-output-slot',
+      'run-context-output-slot',
+    )
+    const promotedPackJson = JSON.parse(await readFile(path.join(
+      fixture.root,
+      '.gg',
+      'context',
+      'runs',
+      'run-context-output-slot',
+      'pack.json',
+    ), 'utf8')) as {
+      inputs: Array<{
+        ref: { kind: string; id: string }
+        contextRole: string
+        artifactRefs?: Array<{ runId: string; artifactId: string }>
+      }>
+      explicitNodeAttachments: { nodes: unknown[] }
+      verifiedArtifactAttachments: Array<{ runId: string; artifactId: string }>
+    }
+    assert.equal(promotedPackJson.inputs.length, 1)
+    assert.deepEqual(promotedPackJson.inputs[0]?.ref, {
+      kind: 'node',
+      id: sourceNode.id,
+    })
+    assert.equal(promotedPackJson.inputs[0]?.contextRole, 'full')
+    assert.deepEqual(promotedPackJson.inputs[0]?.artifactRefs, [{
+      runId: 'run-context-source',
+      artifactId: sourceArtifact.artifactId,
+    }])
+    assert.deepEqual(promotedPackJson.explicitNodeAttachments.nodes, [])
+    assert.equal(promotedPackJson.verifiedArtifactAttachments.length, 1)
+    assert.equal(promotedPackJson.verifiedArtifactAttachments[0]?.runId, 'run-context-source')
+    assert.equal(
+      promotedPackJson.verifiedArtifactAttachments[0]?.artifactId,
+      sourceArtifact.artifactId,
+    )
+    assert.match(promotedInput.pack, /Verified read-only artifact attachments/u)
+    assert.match(promotedInput.pack, new RegExp(sourceArtifact.artifactId, 'u'))
+
     await commit('update-explicit-node-attachment-content', {
       type: 'UpdateNodeContent',
       nodeId: sourceNode.id,
@@ -888,8 +1118,8 @@ test('RunIntent V2 resolves readable artifacts from pinned full edges only', asy
         title: 'Explicit Node input',
         text: `PINNED_EXPLICIT_NODE_CONTENT\n${'x'.repeat(150_000)}NODE_TEXT_TAIL`,
         payload: {
-          aKeep: 'PINNED_NODE_PAYLOAD',
-          zOversized: `${'y'.repeat(150_000)}NODE_PAYLOAD_TAIL`,
+          heading: 'PINNED_NODE_PAYLOAD',
+          italic: `${'y'.repeat(150_000)}NODE_PAYLOAD_TAIL`,
         },
       },
     })
@@ -954,7 +1184,7 @@ test('RunIntent V2 resolves readable artifacts from pinned full edges only', asy
     })
     assert.equal(forgedNodePath.status, 400)
     assert.equal((await forgedNodePath.json() as { error: { code: string } }).error.code,
-      'invalid_run_intent_v2')
+      'invalid_run_intent')
 
     const explicit = await runTaskWithAttachments(
       'task-explicit-node-attachment',
@@ -973,7 +1203,7 @@ test('RunIntent V2 resolves readable artifacts from pinned full edges only', asy
           nodeId: sourceNode.id,
           patch: {
             text: 'MUTATED_AFTER_RUN_ACCEPTANCE',
-            payload: { aKeep: 'MUTATED_AFTER_RUN_ACCEPTANCE' },
+            payload: { heading: 'MUTATED_AFTER_RUN_ACCEPTANCE' },
           },
         })
       },
@@ -1107,7 +1337,7 @@ test('RunIntent V2 resolves readable artifacts from pinned full edges only', asy
     const beforeForeignNode = await canvas()
     const foreignArtifactId = `artifact_${'e'.repeat(64)}`
     const foreignPlanId = `plan_${'e'.repeat(64)}`
-    const foreignNodeCanvas = await fixture.daemon.canvasV2.commit(
+    const foreignNodeCanvas = await fixture.daemon.canvas.commit(
       '.',
       'main',
       beforeForeignNode.revision,

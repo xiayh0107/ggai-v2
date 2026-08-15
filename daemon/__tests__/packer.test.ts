@@ -1,14 +1,19 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import type { CanvasDocumentV2 } from '../../src/canvas-v2/model.js'
+import type { CanvasDocument } from '../../src/canvas/model.js'
 import { artifactRunDir } from '../artifactPaths.js'
 import { listArtifactSnapshot, prepareRunContext } from '../packer.js'
-import { BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2 } from '../pluginCapabilitiesV2.js'
+import { BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT } from '../pluginCapabilities.js'
 import type { CreateRunRequest } from '../protocol.js'
-import type { ResolvedTaskRunRequestV2 } from '../taskRunTypesV2.js'
+import {
+  resolvedTaskSkillCapabilityDigest,
+  type ResolvedTaskSkill,
+  type ResolvedTaskRunRequest,
+} from '../taskRunTypes.js'
 
 function request(nodeId: string, prompt: string, text: string): CreateRunRequest {
   return {
@@ -164,12 +169,12 @@ test('a managed source worktree gets source context without redirecting artifact
   }
 })
 
-test('Task V2 packs bounded full-edge outputs with daemon-verified artifact paths', async () => {
+test('Task Run packs bounded full-edge outputs with daemon-verified artifact paths', async () => {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'ggai-packer-task-v2-'))
   const root = await realpath(temporaryRoot)
   const artifactId = `artifact_${'a'.repeat(64)}`
   const digest = 'b'.repeat(64)
-  const document: CanvasDocumentV2 = {
+  const document: CanvasDocument = {
     schemaVersion: 2,
     nodes: [{
       id: 'node-prior-output',
@@ -208,7 +213,27 @@ test('Task V2 packs bounded full-edge outputs with daemon-verified artifact path
     everCreated: true,
   }
   const verifiedPath = 'artifacts/.branches/main/run-prior/files/prior.png'
-  const input: ResolvedTaskRunRequestV2 = {
+  const skillMarkdown = Buffer.from('# Image direction\n\nUse a restrained visual hierarchy.\n')
+  const skillFileDigest = createHash('sha256').update(skillMarkdown).digest('hex')
+  const skillDigest = createHash('sha256')
+    .update('ggai.skill-asset.v1\0', 'utf8')
+    .update(`${Buffer.byteLength('SKILL.md', 'utf8')}:SKILL.md:${skillMarkdown.byteLength}:`, 'utf8')
+    .update(skillMarkdown)
+    .digest('hex')
+  const resolvedSkills: ResolvedTaskSkill[] = [{
+    ref: { skillId: '@workspace/image-direction', revision: 2, digest: skillDigest },
+    title: 'Image direction',
+    description: 'Use the project image direction.',
+    entrypoint: 'SKILL.md',
+    files: [{
+      relativePath: 'SKILL.md',
+      size: skillMarkdown.byteLength,
+      digest: skillFileDigest,
+      contentBase64: skillMarkdown.toString('base64'),
+    }],
+    sources: [{ kind: 'node', nodeId: 'node-prior-output', nodeType: 'image', role: 'attachment' }],
+  }]
+  const input: ResolvedTaskRunRequest = {
     schemaVersion: 2,
     runId: 'run-derived',
     taskId: 'task-derived',
@@ -233,11 +258,23 @@ test('Task V2 packs bounded full-edge outputs with daemon-verified artifact path
       title: 'Prior plot',
       type: 'image',
       text: 'User-selected plot notes',
-      payload: { palette: 'viridis' },
       artifactRefs: [{ runId: 'run-prior', artifactId }],
+      contextProjection: {
+        policySource: 'plugin',
+        text: { sourceChars: 24, includedChars: 24, truncated: false },
+        payload: { sourceFields: 1, includedFields: [], omittedFields: 1 },
+        artifactRefs: {
+          source: 1,
+          included: 1,
+          omittedByPolicy: 0,
+          omittedByBudget: 0,
+        },
+      },
       truncation: { text: false, payload: false },
     }],
-    pluginCapabilities: BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2,
+    pluginCapabilities: BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
+    resolvedSkills,
+    skillCapabilityDigest: resolvedTaskSkillCapabilityDigest(resolvedSkills),
     automationMode: 'confirm',
   }
 
@@ -256,11 +293,13 @@ test('Task V2 packs bounded full-edge outputs with daemon-verified artifact path
           text?: string
           payload?: Record<string, unknown>
           artifactRefs: unknown[]
+          contextProjection: unknown
           truncation: { text: boolean; payload: boolean }
         }>
       }
       verifiedArtifactAttachments: Array<{ projectRelativePath: string; contentDigest: string }>
       pluginCapabilities: { digest: string; plugins: Array<{ id: string }> }
+      skillCapabilities: { digest: string; skills: Array<{ title: string; directory: string }> }
     }
 
     assert.deepEqual(json.inputs[0]?.outputs?.[0]?.artifactRefs, [{
@@ -274,8 +313,18 @@ test('Task V2 packs bounded full-edge outputs with daemon-verified artifact path
         title: 'Prior plot',
         type: 'image',
         text: 'User-selected plot notes',
-        payload: { palette: 'viridis' },
         artifactRefs: [{ runId: 'run-prior', artifactId }],
+        contextProjection: {
+          policySource: 'plugin',
+          text: { sourceChars: 24, includedChars: 24, truncated: false },
+          payload: { sourceFields: 1, includedFields: [], omittedFields: 1 },
+          artifactRefs: {
+            source: 1,
+            included: 1,
+            omittedByPolicy: 0,
+            omittedByBudget: 0,
+          },
+        },
         truncation: { text: false, payload: false },
       }],
     })
@@ -289,17 +338,33 @@ test('Task V2 packs bounded full-edge outputs with daemon-verified artifact path
     }])
     assert.equal(
       json.pluginCapabilities.digest,
-      BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2.digest,
+      BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT.digest,
     )
     assert.ok(json.pluginCapabilities.plugins.some(({ id }) => id === 'file'))
-    assert.match(rendered, /Fixed artifact plugin capabilities for this run/u)
+    assert.match(rendered, /Fixed plugin capabilities for this run/u)
     assert.match(rendered, /Explicit node attachments for this run/u)
     assert.match(rendered, /persisted Canvas revision 7/u)
     assert.match(rendered, /User-selected plot notes/u)
-    assert.match(rendered, new RegExp(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT_V2.digest, 'u'))
+    assert.match(rendered, new RegExp(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT.digest, 'u'))
     assert.match(rendered, /Verified read-only artifact attachments/u)
     assert.match(rendered, new RegExp(artifactId, 'u'))
     assert.match(rendered, new RegExp(verifiedPath.replaceAll('.', '\\.'), 'u'))
+    assert.match(rendered, /Node-bound skills authorized for this run/u)
+    assert.match(rendered, /Image direction/u)
+    assert.equal(json.skillCapabilities.skills[0]?.title, 'Image direction')
+    assert.equal(
+      await readFile(path.join(
+        root,
+        '.gg',
+        'context',
+        'runs',
+        input.runId,
+        'skills',
+        json.skillCapabilities.skills[0]?.directory ?? '',
+        'SKILL.md',
+      ), 'utf8'),
+      skillMarkdown.toString('utf8'),
+    )
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true })
   }

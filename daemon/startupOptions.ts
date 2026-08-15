@@ -16,8 +16,8 @@ export const DAEMON_HELP = [
   '                   [--acpx-agent ID] [--acpx-approval approve-reads|deny-all|approve-all]',
   '                   [--codex-command FILE] [--acpx-command FILE]',
   '',
-  'The server always binds to 127.0.0.1 and runs Canvas V2.',
-  'A project without the V2 marker must first run: npm run canvas:v2:reset -- --apply',
+  'The server always binds to 127.0.0.1 and runs Canvas.',
+  'Workspace Projects are created and initialized through the daemon-owned catalog.',
   'acpx adapters are experimental and disabled until --acpx-agent is provided.',
 ].join('\n')
 

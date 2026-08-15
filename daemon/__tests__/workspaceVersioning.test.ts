@@ -1,1413 +1,627 @@
 import assert from 'node:assert/strict'
-import { execFile } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { promisify } from 'node:util'
 import { afterEach, test } from 'node:test'
 
-import { CanvasGitStore } from '../canvasGit.js'
+import type { CanvasCommand } from '../../src/canvas/commands.js'
+import { CanvasCommandStoreManager } from '../canvasCommandStoreManager.js'
+import { CanvasGitStore, CanvasGitError } from '../canvasGit.js'
 import {
-  CanvasStore,
-  CanvasStoreManager,
-  canvasSnapshotPath,
-  emptyCanvasDocument,
-} from '../canvasStore.js'
-import {
-  MAX_CANVAS_BRANCH_LENGTH,
-  type CanvasDocumentV1,
-  type CanvasEnvelope,
-  type PutCanvasRequest,
-} from '../protocol.js'
-import {
-  SourceGitError,
-  SourceGitManager,
-  SourceGitStore,
-  type SourceBranchBinding,
-} from '../sourceGit.js'
-import { WorkspaceVersionManager } from '../workspaceVersioning.js'
+  WorkspaceVersionManager,
+  type WorkspaceCanvasStoreManager,
+} from '../workspaceVersioning.js'
 
 const temporaryDirectories: string[] = []
-const exec = promisify(execFile)
-
-interface Deferred<T> {
-  promise: Promise<T>
-  resolve(value: T): void
-}
-
-function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>((next) => {
-    resolve = next
-  })
-  return { promise, resolve }
-}
-
-class BlockingCanvasStoreManager extends CanvasStoreManager {
-  readonly putEntered = deferred<void>()
-  readonly concurrentGet = deferred<void>()
-  readonly #putRelease = deferred<void>()
-  #blockedMutationId: string | null = null
-  #putBlocked = false
-
-  blockMutation(mutationId: string): void {
-    this.#blockedMutationId = mutationId
-  }
-
-  releaseMutation(): void {
-    this.#putRelease.resolve()
-  }
-
-  override async put(
-    projectDir: string,
-    branch: string,
-    request: PutCanvasRequest,
-  ): Promise<CanvasEnvelope> {
-    if (request.mutationId === this.#blockedMutationId) {
-      this.#putBlocked = true
-      this.putEntered.resolve()
-      await this.#putRelease.promise
-      this.#putBlocked = false
-    }
-    return super.put(projectDir, branch, request)
-  }
-
-  override get(projectDir: string, branch: string): Promise<CanvasEnvelope> {
-    if (this.#putBlocked) this.concurrentGet.resolve()
-    return super.get(projectDir, branch)
-  }
-}
-
-class FailOnceMaterializeCanvasStoreManager extends CanvasStoreManager {
-  readonly #branches: Set<string>
-
-  constructor(projectRoot: string, branches: readonly string[]) {
-    super({ projectRoot })
-    this.#branches = new Set(branches)
-  }
-
-  override async materialize(
-    projectDir: string,
-    branch: string,
-    canvas: CanvasDocumentV1,
-    checkpoint: string,
-  ): Promise<CanvasEnvelope> {
-    if (this.#branches.delete(branch)) throw new Error(`injected materialize failure: ${branch}`)
-    return super.materialize(projectDir, branch, canvas, checkpoint)
-  }
-}
-
-class FailOnceApplyCheckpointCanvasStoreManager extends CanvasStoreManager {
-  #branch: string | null = null
-
-  failNextApply(branch: string): void {
-    this.#branch = branch
-  }
-
-  override async applyCheckpoint(
-    projectDir: string,
-    branch: string,
-    canvas: CanvasDocumentV1,
-    checkpoint: string,
-    expectedRevision: number,
-  ): Promise<CanvasEnvelope> {
-    if (this.#branch === branch) {
-      this.#branch = null
-      throw new Error(`injected apply checkpoint failure: ${branch}`)
-    }
-    return super.applyCheckpoint(projectDir, branch, canvas, checkpoint, expectedRevision)
-  }
-}
-
-class FailAfterDeleteCanvasGitStore extends CanvasGitStore {
-  readonly #branches = new Set<string>()
-
-  failAfterDelete(branch: string): void {
-    this.#branches.add(branch)
-  }
-
-  override async deleteBranch(branch: string): Promise<void> {
-    await super.deleteBranch(branch)
-    if (this.#branches.delete(branch)) throw new Error(`injected canvas delete failure: ${branch}`)
-  }
-}
-
-class FailAfterRemoveCanvasStoreManager extends CanvasStoreManager {
-  readonly #branches = new Set<string>()
-
-  failAfterRemove(branch: string): void {
-    this.#branches.add(branch)
-  }
-
-  override async removeBranch(projectDir: string, branch: string): Promise<void> {
-    await super.removeBranch(projectDir, branch)
-    if (this.#branches.delete(branch)) throw new Error(`injected runtime delete failure: ${branch}`)
-  }
-}
-
-class FailOnceSourceGitStore extends SourceGitStore {
-  readonly #createBranches = new Set<string>()
-  readonly #afterCreateBranches = new Set<string>()
-  readonly #removeBranches = new Set<string>()
-
-  failCreate(branch: string): void {
-    this.#createBranches.add(branch)
-  }
-
-  failAfterCreate(branch: string): void {
-    this.#afterCreateBranches.add(branch)
-  }
-
-  failAfterRemove(branch: string): void {
-    this.#removeBranches.add(branch)
-  }
-
-  override async createBranch(
-    logicalBranch: string,
-    fromLogicalBranch: string,
-  ): Promise<SourceBranchBinding> {
-    if (this.#createBranches.delete(logicalBranch)) {
-      throw new SourceGitError('injected_failure', `injected source create failure: ${logicalBranch}`)
-    }
-    return super.createBranch(logicalBranch, fromLogicalBranch)
-  }
-
-  override async createBranchAt(
-    logicalBranch: string,
-    fromLogicalBranch: string,
-    startCommit: string,
-  ): Promise<SourceBranchBinding> {
-    if (this.#createBranches.delete(logicalBranch)) {
-      throw new SourceGitError('injected_failure', `injected source create failure: ${logicalBranch}`)
-    }
-    const binding = await super.createBranchAt(logicalBranch, fromLogicalBranch, startCommit)
-    if (this.#afterCreateBranches.delete(logicalBranch)) {
-      throw new SourceGitError(
-        'injected_failure',
-        `injected failure after source create: ${logicalBranch}`,
-      )
-    }
-    return binding
-  }
-
-  override async removeBranch(logicalBranch: string): Promise<void> {
-    await super.removeBranch(logicalBranch)
-    if (this.#removeBranches.delete(logicalBranch)) {
-      throw new SourceGitError('injected_failure', `injected source delete failure: ${logicalBranch}`)
-    }
-  }
-}
-
-class SingleSourceGitManager extends SourceGitManager {
-  readonly #sourceStore: SourceGitStore
-
-  constructor(projectRoot: string, sourceStore: SourceGitStore) {
-    super(projectRoot)
-    this.#sourceStore = sourceStore
-  }
-
-  override async store(): Promise<SourceGitStore> {
-    return this.#sourceStore
-  }
-
-  override async close(): Promise<void> {
-    await this.#sourceStore.close()
-  }
-}
+const workspaces: WorkspaceVersionManager[] = []
+const canvasManagers: CanvasCommandStoreManager[] = []
 
 afterEach(async () => {
+  await Promise.allSettled(workspaces.splice(0).map((workspace) => workspace.close()))
+  for (const manager of canvasManagers.splice(0)) manager.close()
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
     rm(directory, { recursive: true, force: true })))
 })
 
-async function temporaryProject(): Promise<string> {
-  const directory = await mkdtemp(path.join(tmpdir(), 'ggai-versioning-'))
-  temporaryDirectories.push(directory)
-  return directory
+async function harness(options: {
+  checkpointDelayMs?: number
+  canvasStoreManager?: WorkspaceCanvasStoreManager
+  canvasGitFactory?: (projectDir: string) => CanvasGitStore
+} = {}): Promise<{
+  projectDir: string
+  canvases: CanvasCommandStoreManager
+  workspace: WorkspaceVersionManager
+}> {
+  const projectDir = await mkdtemp(path.join(tmpdir(), 'ggai-workspace-v2-'))
+  temporaryDirectories.push(projectDir)
+  const canvases = new CanvasCommandStoreManager({
+    projectRoot: projectDir,
+    acquireProjectLease: async (requested) => realpath(
+      path.isAbsolute(requested) ? requested : path.resolve(projectDir, requested),
+    ),
+  })
+  canvasManagers.push(canvases)
+  const workspace = new WorkspaceVersionManager({
+    projectRoot: projectDir,
+    checkpointDelayMs: options.checkpointDelayMs ?? 60_000,
+    canvasStoreManager: options.canvasStoreManager ?? canvases,
+    ...(options.canvasGitFactory === undefined
+      ? {}
+      : { canvasGitFactory: options.canvasGitFactory }),
+  })
+  workspaces.push(workspace)
+  return { projectDir, canvases, workspace }
 }
 
-async function git(cwd: string, args: string[]): Promise<string> {
-  return (await exec('git', args, { cwd, encoding: 'utf8' })).stdout.trim()
-}
-
-async function initializeSourceRepository(projectDir: string): Promise<void> {
-  await git(projectDir, ['init', '--initial-branch=main'])
-  await writeFile(path.join(projectDir, 'README.md'), '# project\n', 'utf8')
-  await git(projectDir, ['add', 'README.md'])
-  await git(projectDir, [
-    '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
-    'commit', '-m', 'initial',
-  ])
-}
-
-function document(title: string): CanvasDocumentV1 {
+function createTask(id: string, title = id): CanvasCommand {
   return {
-    ...emptyCanvasDocument(),
-    everCreated: true,
-    nodes: [{
-      id: 'node_1',
-      type: 'text',
-      x: 10,
-      y: 20,
-      w: 320,
-      h: 120,
+    type: 'CreateTask',
+    task: {
+      id,
       title,
-      instruction: {
-        phase: 'done',
-        prompt: 'Write',
-        attachments: [],
-        sources: [],
-        open: false,
-      },
-      payload: { text: title },
-    }],
+      goal: `${title} goal`,
+      anchor: { x: 20, y: 30 },
+      origin: { kind: 'user' },
+    },
   }
 }
 
-test('coordinates durable canvas snapshots, checkpoints, branches, and restore', async () => {
-  const projectDir = await temporaryProject()
-  const versions = new WorkspaceVersionManager({ projectRoot: projectDir })
-  const firstDocument = { ...emptyCanvasDocument(), everCreated: true }
-  const saved = await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'mutation-1',
-    changeKind: 'node-created',
-    document: firstDocument,
-  })
+function updateGoal(taskId: string, goal: string): CanvasCommand {
+  return { type: 'UpdateTaskGoal', taskId, goal }
+}
+
+function expectGitError(code: CanvasGitError['code']): (error: unknown) => boolean {
+  return (error: unknown) => {
+    assert.ok(error instanceof CanvasGitError)
+    assert.equal(error.code, code)
+    return true
+  }
+}
+
+test('validates branch queries without creating orphan runtime snapshots', async () => {
+  const { projectDir, workspace } = await harness()
+  const canonicalProjectDir = await realpath(projectDir)
+  const runtimeRoot = path.join(projectDir, '.gg', 'runtime', 'canvas')
+
+  assert.equal(await workspace.sourceExecutionProjectDir(projectDir, 'main'), canonicalProjectDir)
+  await assert.rejects(access(runtimeRoot), { code: 'ENOENT' })
+  await assert.rejects(
+    workspace.sourceExecutionProjectDir(projectDir, 'feature/missing'),
+    expectGitError('BRANCH_NOT_FOUND'),
+  )
+  await assert.rejects(
+    workspace.getCanvas(projectDir, 'feature/missing'),
+    expectGitError('BRANCH_NOT_FOUND'),
+  )
+  await assert.rejects(access(runtimeRoot), { code: 'ENOENT' })
+
+  const main = await workspace.getCanvas(projectDir, 'main')
+  assert.equal(main.canvas.revision, 0)
+  assert.equal(main.versioning.state, 'uninitialized')
+  await assert.rejects(access(runtimeRoot), { code: 'ENOENT' })
+})
+
+test('flushes authoritative commands to normalized history on clean shutdown', async () => {
+  const { projectDir, canvases, workspace } = await harness()
+  const initial = await workspace.getCanvas(projectDir, 'main')
+  const saved = await workspace.commitCanvas(
+    projectDir,
+    'main',
+    initial.canvas.revision,
+    'create-main-task',
+    createTask('task-main', 'Main'),
+  )
   assert.equal(saved.canvas.revision, 1)
+  assert.equal(saved.canvas.lastCheckpoint, null)
 
-  const checkpoint = await versions.manualCheckpoint('.', 'main', 'initial')
-  assert.equal(checkpoint.ok, true)
-  assert.ok(checkpoint.ok)
-  assert.match(checkpoint.value.checkpoint.commit, /^[0-9a-f]{40,64}$/u)
-  assert.equal(checkpoint.value.canvas.lastCheckpoint, checkpoint.value.checkpoint.commit)
-
-  const branch = await versions.createBranch('.', { name: 'feature/persist' })
-  assert.equal(branch.ok, true)
-  assert.ok(branch.ok)
-  assert.equal(branch.value.canvas.branch, 'feature/persist')
-  assert.equal(branch.value.canvas.document.everCreated, true)
-  assert.equal(branch.value.sourceBranch, null)
-
-  await versions.saveCanvas('.', 'feature/persist', {
-    baseRevision: branch.value.canvas.revision,
-    mutationId: 'mutation-branch',
-    changeKind: 'branch-edit',
-    document: { ...firstDocument, everCreated: false },
-  })
-  const branchCheckpoint = await versions.manualCheckpoint('.', 'feature/persist', 'branch edit')
-  assert.ok(branchCheckpoint.ok)
-  assert.notEqual(
-    branchCheckpoint.value.checkpoint.commit,
-    checkpoint.value.checkpoint.commit,
-  )
-  assert.equal((await versions.getCanvas('.', 'main')).canvas.document.everCreated, true)
-
-  const restored = await versions.restoreAsNewBranch('.', {
-    sourceBranch: 'main',
-    checkpoint: checkpoint.value.checkpoint.commit,
-    newBranch: 'restore/initial',
-  })
-  assert.ok(restored.ok)
-  assert.equal(restored.value.canvas.document.everCreated, true)
-
-  const branches = await versions.listBranches('.')
-  assert.ok(branches.ok)
-  assert.deepEqual(
-    branches.value.map((entry) => entry.name).sort(),
-    ['feature/persist', 'main', 'restore/initial'],
-  )
-  await versions.close()
-})
-
-test('canvas and source branch layers share the same conservative name limit', async () => {
-  const projectDir = await temporaryProject()
-  await initializeSourceRepository(projectDir)
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'branch-limit-base',
-    changeKind: 'node-created',
-    document: document('Base'),
-  })
-  await versions.manualCheckpoint('.', 'main', 'base')
-  assert.ok((await versions.bindSource('.', 'main')).ok)
-
-  const boundaryName = `b${'x'.repeat(MAX_CANVAS_BRANCH_LENGTH - 1)}`
-  const boundary = await versions.createBranch('.', { name: boundaryName })
-  assert.ok(boundary.ok)
-  assert.equal(boundary.value.sourceBranch?.logicalBranch, boundaryName)
-
-  const tooLong = `${boundaryName}x`
-  const rejected = await versions.createBranch('.', { name: tooLong })
-  assert.equal(rejected.ok, false)
-  assert.equal(rejected.partial, false)
-  const canvasBranches = await versions.listBranches('.')
-  assert.ok(canvasBranches.ok)
-  assert.equal(canvasBranches.value.some((branch) => branch.name === tooLong), false)
-  const source = await versions.sourceStatus('.')
-  assert.equal(
-    source.branches.some((branch) => branch.logicalBranch === tooLong),
-    false,
-  )
-  await versions.close()
-})
-
-test('Git degradation never rolls back the authoritative canvas save', async () => {
-  const projectDir = await temporaryProject()
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    canvasGitFactory: (canonicalProjectDir) => new CanvasGitStore(canonicalProjectDir, {
-      gitBinary: path.join(projectDir, 'missing-git'),
-    }),
-  })
-
-  const saved = await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'durable-without-git',
-    changeKind: 'autosave',
-    document: emptyCanvasDocument(),
-  })
-  assert.equal(saved.canvas.revision, 1)
-  assert.equal((await versions.getCanvas('.', 'main')).canvas.revision, 1)
-
-  const checkpoint = await versions.manualCheckpoint('.', 'main')
-  assert.equal(checkpoint.ok, false)
-  assert.equal(checkpoint.versioning.state, 'degraded')
-  await versions.close()
-})
-
-test('a quarantined runtime snapshot can be restored safely from Git into a new branch', async () => {
-  const projectDir = await temporaryProject()
-  const first = new WorkspaceVersionManager({ projectRoot: projectDir })
-  await first.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'before-corruption',
-    changeKind: 'node-created',
-    document: { ...emptyCanvasDocument(), everCreated: true },
-  })
-  const checkpoint = await first.manualCheckpoint('.', 'main', 'known good')
-  assert.ok(checkpoint.ok)
-  await first.close()
-
-  await writeFile(canvasSnapshotPath(projectDir, 'main'), '{ invalid runtime snapshot', 'utf8')
-  const reopened = new WorkspaceVersionManager({ projectRoot: projectDir })
-  const restored = await reopened.restoreAsNewBranch('.', {
-    sourceBranch: 'main',
-    checkpoint: checkpoint.value.checkpoint.commit,
-    newBranch: 'recovery/quarantined',
-  })
-  assert.ok(restored.ok)
-  assert.equal(restored.value.canvas.document.everCreated, true)
-  assert.equal(restored.value.canvas.branch, 'recovery/quarantined')
-  await reopened.close()
-})
-
-test('clean shutdown flushes the final debounced canvas checkpoint', async () => {
-  const projectDir = await temporaryProject()
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'pending-at-shutdown',
-    changeKind: 'node-created',
-    document: { ...emptyCanvasDocument(), everCreated: true },
-  })
-  await versions.close()
-
-  const reopened = await new CanvasStore(projectDir, 'main').get()
-  assert.match(reopened.lastCheckpoint ?? '', /^[0-9a-f]{40,64}$/u)
+  await workspace.close()
+  const durable = await canvases.get(projectDir, 'main')
+  assert.match(durable.lastCheckpoint ?? '', /^[0-9a-f]{40,64}$/u)
+  assert.equal(durable.revision, 1)
   const history = await new CanvasGitStore(projectDir).history({ branch: 'main' })
   assert.equal(history.entries.length, 1)
+  assert.equal(history.entries[0]?.commit, durable.lastCheckpoint)
 })
 
-test('deleting a branch checkpoints the latest runtime edit before checking merge safety', async () => {
-  const projectDir = await temporaryProject()
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'delete-base',
-    changeKind: 'node-created',
-    document: document('Base'),
-  })
-  await versions.manualCheckpoint('.', 'main', 'base')
-  const created = await versions.createBranch('.', { name: 'feature/pending-delete' })
-  assert.ok(created.ok)
-
-  const saved = await versions.saveCanvas('.', 'feature/pending-delete', {
-    baseRevision: created.value.canvas.revision,
-    mutationId: 'pending-delete-edit',
-    changeKind: 'node-updated',
-    document: document('Must survive'),
-  })
-  const deleted = await versions.deleteBranch('.', 'feature/pending-delete')
-
-  assert.equal(deleted.ok, false)
-  if (!deleted.ok) assert.equal(deleted.error.code, 'BRANCH_NOT_MERGED')
-  const preserved = await versions.getCanvas('.', 'feature/pending-delete')
-  assert.equal(preserved.canvas.revision, saved.canvas.revision)
-  assert.equal(preserved.canvas.document.nodes[0]?.title, 'Must survive')
-  const branches = await versions.listBranches('.')
-  assert.ok(branches.ok)
-  assert.equal(
-    branches.value.some((branch) => branch.name === 'feature/pending-delete'),
-    true,
-  )
-  await versions.close()
-})
-
-test('branch deletion cannot cross a concurrent save on the same branch', async () => {
-  const projectDir = await temporaryProject()
-  const canvases = new BlockingCanvasStoreManager({ projectRoot: projectDir })
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-    canvasStoreManager: canvases,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'concurrent-delete-base',
-    changeKind: 'node-created',
-    document: document('Base'),
-  })
-  await versions.manualCheckpoint('.', 'main', 'base')
-  const created = await versions.createBranch('.', { name: 'feature/concurrent-delete' })
-  assert.ok(created.ok)
-
-  canvases.blockMutation('concurrent-delete-edit')
-  const saving = versions.saveCanvas('.', 'feature/concurrent-delete', {
-    baseRevision: created.value.canvas.revision,
-    mutationId: 'concurrent-delete-edit',
-    changeKind: 'node-updated',
-    document: document('Concurrent edit'),
-  })
-  await canvases.putEntered.promise
-  const deleting = versions.deleteBranch('.', 'feature/concurrent-delete')
-  const crossedSave = await Promise.race([
-    canvases.concurrentGet.promise.then(() => true),
-    new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
-  ])
-  canvases.releaseMutation()
-
-  const [saved, deleted] = await Promise.all([saving, deleting])
-  assert.equal(crossedSave, false)
-  assert.equal(deleted.ok, false)
-  if (!deleted.ok) assert.equal(deleted.error.code, 'BRANCH_NOT_MERGED')
-  assert.equal(saved.canvas.document.nodes[0]?.title, 'Concurrent edit')
-  assert.equal(
-    (await versions.getCanvas('.', 'feature/concurrent-delete')).canvas.document.nodes[0]?.title,
-    'Concurrent edit',
-  )
-  await versions.close()
-})
-
-test('merge execution waits for a concurrent save and rejects its stale preview', async () => {
-  const projectDir = await temporaryProject()
-  const canvases = new BlockingCanvasStoreManager({ projectRoot: projectDir })
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-    canvasStoreManager: canvases,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'concurrent-merge-base',
-    changeKind: 'node-created',
-    document: document('Base'),
-  })
-  await versions.manualCheckpoint('.', 'main', 'base')
-  const created = await versions.createBranch('.', { name: 'feature/concurrent-merge' })
-  assert.ok(created.ok)
-  const preview = await versions.previewMerge('.', {
-    sourceBranch: 'feature/concurrent-merge',
-    targetBranch: 'main',
-  })
-  assert.ok(preview.ok)
-
-  canvases.blockMutation('concurrent-merge-edit')
-  const saving = versions.saveCanvas('.', 'feature/concurrent-merge', {
-    baseRevision: created.value.canvas.revision,
-    mutationId: 'concurrent-merge-edit',
-    changeKind: 'node-updated',
-    document: document('Concurrent merge edit'),
-  })
-  await canvases.putEntered.promise
-  const merging = versions.executeMerge('.', {
-    sourceBranch: 'feature/concurrent-merge',
-    targetBranch: 'main',
-    confirmed: true,
-    expected: preview.value.expectation,
-  })
-  const crossedSave = await Promise.race([
-    canvases.concurrentGet.promise.then(() => true),
-    new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
-  ])
-  canvases.releaseMutation()
-
-  await saving
-  const merged = await merging
-  assert.equal(crossedSave, false)
-  assert.equal(merged.ok, false)
-  if (!merged.ok) assert.equal(merged.error.code, 'merge_preview_stale')
-  assert.equal(
-    (await versions.getCanvas('.', 'main')).canvas.document.nodes[0]?.title,
-    'Base',
-  )
-  await versions.close()
-})
-
-test('a committed canvas merge is reconciled into runtime after apply failure and restart', async () => {
-  const projectDir = await temporaryProject()
-  const canvases = new FailOnceApplyCheckpointCanvasStoreManager({ projectRoot: projectDir })
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-    canvasStoreManager: canvases,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'recover-merge-base',
-    changeKind: 'node-created',
-    document: {
-      ...document('Base'),
-      generationByNodeId: {
-        node_1: {
-          epoch: 1,
-          current: { key: 'finishing', kind: 'finishing', label: 'Finishing' },
-          recent: [],
-          log: [{ kind: 'info', text: 'Transient Agent log' }],
-        },
-      },
-    },
-  })
-  await versions.manualCheckpoint('.', 'main', 'base')
-  const created = await versions.createBranch('.', { name: 'feature/recover-merge' })
-  assert.ok(created.ok)
-  await versions.saveCanvas('.', 'feature/recover-merge', {
-    baseRevision: created.value.canvas.revision,
-    mutationId: 'recover-merge-feature',
-    changeKind: 'node-updated',
-    document: document('Merged content'),
-  })
-  const preview = await versions.previewMerge('.', {
-    sourceBranch: 'feature/recover-merge',
-    targetBranch: 'main',
-  })
-  assert.ok(preview.ok)
-
-  canvases.failNextApply('main')
-  const failed = await versions.executeMerge('.', {
-    sourceBranch: 'feature/recover-merge',
-    targetBranch: 'main',
-    confirmed: true,
-    expected: preview.value.expectation,
-  })
-  assert.equal(failed.ok, false)
-  assert.equal(failed.partial, true)
-  assert.equal(failed.value?.canvas.merged, true)
-  const mergeCommit = failed.value?.canvas.commit
-  assert.ok(mergeCommit)
-  const staleRuntime = (await versions.getCanvas('.', 'main')).canvas
-  assert.equal(staleRuntime.document.nodes[0]?.title, 'Base')
-  assert.equal(staleRuntime.lastCheckpoint, preview.value.canvas.targetCommit)
-  assert.equal(
-    (await new CanvasGitStore(projectDir).readDocument('main') as CanvasDocumentV1)
-      .nodes[0]?.title,
-    'Merged content',
-  )
-  await versions.close()
-
-  const reopened = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-  })
-  const recoveredPreview = await reopened.previewMerge('.', {
-    sourceBranch: 'feature/recover-merge',
-    targetBranch: 'main',
-  })
-  assert.ok(recoveredPreview.ok)
-  assert.equal(recoveredPreview.value.state, 'up-to-date')
-  const recovered = (await reopened.getCanvas('.', 'main')).canvas
-  assert.equal(recovered.document.nodes[0]?.title, 'Merged content')
-  assert.equal(recovered.lastCheckpoint, mergeCommit)
-  const retried = await reopened.executeMerge('.', {
-    sourceBranch: 'feature/recover-merge',
-    targetBranch: 'main',
-    confirmed: true,
-    expected: recoveredPreview.value.expectation,
-  })
-  assert.ok(retried.ok)
-  assert.equal(retried.value.state, 'up-to-date')
-  assert.equal(
-    (await reopened.getCanvas('.', 'main')).canvas.document.nodes[0]?.title,
-    'Merged content',
-  )
-  await reopened.close()
-})
-
-test('merge recovery never overwrites runtime edits made after the recorded first parent', async () => {
-  const projectDir = await temporaryProject()
-  const canvases = new FailOnceApplyCheckpointCanvasStoreManager({ projectRoot: projectDir })
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-    canvasStoreManager: canvases,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'divergent-recovery-base',
-    changeKind: 'node-created',
-    document: document('Base'),
-  })
-  await versions.manualCheckpoint('.', 'main', 'base')
-  const created = await versions.createBranch('.', { name: 'feature/divergent-recovery' })
-  assert.ok(created.ok)
-  await versions.saveCanvas('.', 'feature/divergent-recovery', {
-    baseRevision: created.value.canvas.revision,
-    mutationId: 'divergent-recovery-feature',
-    changeKind: 'node-updated',
-    document: document('Committed merge content'),
-  })
-  const preview = await versions.previewMerge('.', {
-    sourceBranch: 'feature/divergent-recovery',
-    targetBranch: 'main',
-  })
-  assert.ok(preview.ok)
-  canvases.failNextApply('main')
-  const failed = await versions.executeMerge('.', {
-    sourceBranch: 'feature/divergent-recovery',
-    targetBranch: 'main',
-    confirmed: true,
-    expected: preview.value.expectation,
-  })
-  assert.equal(failed.ok, false)
-  const mergeCommit = failed.value?.canvas.commit
-  assert.ok(mergeCommit)
-  await versions.close()
-
-  const reopened = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-  })
-  const beforeEdit = (await reopened.getCanvas('.', 'main')).canvas
-  const edited = await reopened.saveCanvas('.', 'main', {
-    baseRevision: beforeEdit.revision,
-    mutationId: 'journal-edit-before-reconciliation',
-    changeKind: 'node-updated',
-    document: document('New runtime journal edit'),
-  })
-  assert.equal(edited.canvas.lastCheckpoint, preview.value.canvas.targetCommit)
-
-  const refused = await reopened.previewMerge('.', {
-    sourceBranch: 'feature/divergent-recovery',
-    targetBranch: 'main',
-  })
-  assert.equal(refused.ok, false)
-  if (!refused.ok) assert.equal(refused.error.code, 'invariant_conflict')
-  const preservedRuntime = (await reopened.getCanvas('.', 'main')).canvas
-  assert.equal(preservedRuntime.document.nodes[0]?.title, 'New runtime journal edit')
-  assert.equal(preservedRuntime.revision, edited.canvas.revision)
-  assert.equal(preservedRuntime.lastCheckpoint, preview.value.canvas.targetCommit)
-  const gitStore = new CanvasGitStore(projectDir)
-  assert.equal(
-    (await gitStore.readDocument('main') as CanvasDocumentV1).nodes[0]?.title,
-    'Committed merge content',
-  )
-  assert.equal(
-    (await gitStore.listBranches()).find((branch) => branch.name === 'main')?.commit,
-    mergeCommit,
-  )
-  await reopened.close()
-})
-
-test('create and restore retries fill a missing runtime layer without duplicate branches', async () => {
-  const projectDir = await temporaryProject()
-  const canvases = new FailOnceMaterializeCanvasStoreManager(projectDir, [
-    'feature/materialize-retry',
-    'restore/materialize-retry',
-  ])
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-    canvasStoreManager: canvases,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'materialize-retry-base',
-    changeKind: 'node-created',
-    document: document('Base'),
-  })
-  const checkpoint = await versions.manualCheckpoint('.', 'main', 'base')
-  assert.ok(checkpoint.ok)
-
-  const failedCreate = await versions.createBranch('.', { name: 'feature/materialize-retry' })
-  assert.equal(failedCreate.ok, false)
-  assert.equal(failedCreate.partial, true)
-  const created = await versions.createBranch('.', { name: 'feature/materialize-retry' })
-  assert.ok(created.ok)
-  assert.equal(created.value.canvas.document.nodes[0]?.title, 'Base')
-
-  const failedRestore = await versions.restoreAsNewBranch('.', {
-    sourceBranch: 'main',
-    checkpoint: checkpoint.value.checkpoint.commit.toUpperCase(),
-    newBranch: 'restore/materialize-retry',
-  })
-  assert.equal(failedRestore.ok, false)
-  assert.equal(failedRestore.partial, true)
-  const restored = await versions.restoreAsNewBranch('.', {
-    sourceBranch: 'main',
-    checkpoint: checkpoint.value.checkpoint.commit.toUpperCase(),
-    newBranch: 'restore/materialize-retry',
-  })
-  assert.ok(restored.ok)
-  assert.equal(restored.value.canvas.document.nodes[0]?.title, 'Base')
-
-  const branches = await versions.listBranches('.')
-  assert.ok(branches.ok)
-  assert.equal(
-    branches.value.filter((branch) => branch.name === 'feature/materialize-retry').length,
-    1,
-  )
-  assert.equal(
-    branches.value.filter((branch) => branch.name === 'restore/materialize-retry').length,
-    1,
-  )
-  await versions.close()
-})
-
-test('create and restore retries fill a missing bound-source layer', async () => {
-  const projectDir = await temporaryProject()
-  await initializeSourceRepository(projectDir)
-  const sourceStore = new FailOnceSourceGitStore({
-    projectRoot: projectDir,
+test('replays a conflicted command journal from its durable base into a new branch', async () => {
+  const { projectDir, workspace } = await harness()
+  const initial = await workspace.getCanvas(projectDir, 'main')
+  const created = await workspace.commitCanvas(
     projectDir,
-  })
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-    sourceGitManager: new SingleSourceGitManager(projectDir, sourceStore),
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'source-retry-base',
-    changeKind: 'node-created',
-    document: document('Base'),
-  })
-  const checkpoint = await versions.manualCheckpoint('.', 'main', 'base')
-  assert.ok(checkpoint.ok)
-  assert.ok((await versions.bindSource('.', 'main')).ok)
-  const pairedCheckpoint = await versions.manualCheckpoint('.', 'main', 'paired source base')
-  assert.ok(pairedCheckpoint.ok)
-
-  sourceStore.failCreate('feature/source-retry')
-  const failedCreate = await versions.createBranch('.', { name: 'feature/source-retry' })
-  assert.equal(failedCreate.ok, false)
-  assert.equal(failedCreate.partial, true)
-  const created = await versions.createBranch('.', { name: 'feature/source-retry' })
-  assert.ok(created.ok)
-  assert.equal(created.value.sourceBranch?.logicalBranch, 'feature/source-retry')
-
-  sourceStore.failAfterCreate('restore/source-retry')
-  const restoreInput = {
+    'main',
+    initial.canvas.revision,
+    'conflict-create-task',
+    createTask('task-conflict'),
+  )
+  await workspace.commitCanvas(
+    projectDir,
+    'main',
+    created.canvas.revision,
+    'conflict-remote-update',
+    updateGoal('task-conflict', 'Remote goal'),
+  )
+  const input = {
     sourceBranch: 'main',
-    checkpoint: pairedCheckpoint.value.checkpoint.commit,
-    newBranch: 'restore/source-retry',
+    newBranch: 'conflict/local-goal',
+    baseRevision: created.canvas.revision,
+    mutations: [{
+      mutationId: 'conflict-local-update',
+      command: updateGoal('task-conflict', 'Local goal'),
+    }],
   }
-  const failedRestore = await versions.restoreAsNewBranch('.', restoreInput)
-  assert.equal(failedRestore.ok, false)
-  assert.equal(failedRestore.partial, true)
-  const partiallyRestoredSource = await sourceStore.branch('restore/source-retry')
-  assert.ok(partiallyRestoredSource)
-  await writeFile(
-    path.join(partiallyRestoredSource.projectDir, 'continued-after-partial.ts'),
-    'export const continued = true\n',
-    'utf8',
-  )
-  const continued = await sourceStore.checkpoint('restore/source-retry', {
-    runId: 'source-restore-retry-continued',
-    nodeTitle: 'Continue after partial restore',
-  })
-  const restored = await versions.restoreAsNewBranch('.', restoreInput)
-  assert.ok(restored.ok)
-  assert.equal(restored.value.sourceBranch?.logicalBranch, 'restore/source-retry')
-  assert.equal(restored.value.sourceBranch?.head, continued.commit)
 
-  const source = await versions.sourceStatus('.')
+  const recovered = await workspace.saveConflictBranch(projectDir, input)
+  assert.equal(recovered.ok, true)
+  if (!recovered.ok) return
+  assert.equal(recovered.value.canvas.revision, 1)
+  assert.equal(recovered.value.canvas.document.tasks[0]?.goal, 'Local goal')
+  assert.deepEqual(recovered.value.mutationIds, ['conflict-local-update'])
   assert.equal(
-    source.branches.filter((branch) => branch.logicalBranch === 'feature/source-retry').length,
-    1,
+    (await workspace.getCanvas(projectDir, 'main')).canvas.document.tasks[0]?.goal,
+    'Remote goal',
   )
+
+  const replay = await workspace.saveConflictBranch(projectDir, input)
+  assert.equal(replay.ok, true)
+  assert.equal(replay.ok ? replay.value.canvas.revision : -1, 1)
+
+  const collision = await workspace.saveConflictBranch(projectDir, {
+    ...input,
+    mutations: [{
+      mutationId: 'conflict-other-update',
+      command: updateGoal('task-conflict', 'Another local goal'),
+    }],
+  })
+  assert.equal(collision.ok, false)
+  assert.equal(collision.ok ? '' : collision.error.code, 'invariant_conflict')
+
+  const invalid = await workspace.saveConflictBranch(projectDir, {
+    ...input,
+    newBranch: 'conflict/invalid-command',
+    mutations: [{
+      mutationId: 'conflict-invalid-update',
+      command: updateGoal('missing-task', 'Cannot apply'),
+    }],
+  })
+  assert.equal(invalid.ok, false)
+  const branches = await workspace.listBranches(projectDir)
+  assert.equal(branches.ok, true)
   assert.equal(
-    source.branches.filter((branch) => branch.logicalBranch === 'restore/source-retry').length,
-    1,
+    branches.ok && branches.value.some((branch) => branch.name === 'conflict/invalid-command'),
+    false,
   )
-  await versions.close()
 })
 
-test('historical restore recreates the source worktree at the checkpointed source HEAD', async () => {
-  const projectDir = await temporaryProject()
-  await initializeSourceRepository(projectDir)
-  const userHead = await git(projectDir, ['rev-parse', 'HEAD'])
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'historical-source-base',
-    changeKind: 'node-created',
-    document: document('Historical canvas'),
-  })
-  const binding = await versions.bindSource('.', 'main')
-  assert.ok(binding.ok)
-  const historicalSourceHead = binding.value.head
-  const historical = await versions.manualCheckpoint('.', 'main', 'historical pair')
-  assert.ok(historical.ok)
-
-  await writeFile(
-    path.join(binding.value.projectDir, 'advanced-source.ts'),
-    'export const advancedSource = true\n',
-    'utf8',
+test('checkpoints the exact pre-delete document for durable history recovery', async () => {
+  const { projectDir, workspace } = await harness()
+  const initial = await workspace.getCanvas(projectDir, 'main')
+  const created = await workspace.commitCanvas(
+    projectDir,
+    'main',
+    initial.canvas.revision,
+    'history-create-before-delete',
+    createTask('task-history-delete'),
   )
-  const advanced = await versions.checkpointSource('.', 'main', {
-    runId: 'historical-source-advance',
-    nodeTitle: 'Advance source after canvas checkpoint',
-  })
-  assert.ok(advanced.ok)
-  assert.notEqual(advanced.value.commit, historicalSourceHead)
-  const anchoredCanvas = (await versions.getCanvas('.', 'main')).canvas.lastCheckpoint
-  assert.ok(anchoredCanvas)
-  assert.deepEqual(
-    await new CanvasGitStore(projectDir).readSourceMetadata(anchoredCanvas),
-    { version: 1, commit: advanced.value.commit },
-  )
+  assert.equal(created.canvas.lastCheckpoint, null)
 
-  const restored = await versions.restoreAsNewBranch('.', {
+  const deleted = await workspace.commitCanvas(
+    projectDir,
+    'main',
+    created.canvas.revision,
+    'history-delete-task',
+    { type: 'DeleteTask', taskId: 'task-history-delete' },
+  )
+  assert.equal(deleted.canvas.document.tasks.length, 0)
+  assert.match(deleted.canvas.lastCheckpoint ?? '', /^[0-9a-f]{40,64}$/u)
+
+  const beforeDeleteCommit = deleted.canvas.lastCheckpoint!
+  const history = await workspace.history(projectDir, { branch: 'main', limit: 10 })
+  assert.equal(history.ok, true)
+  assert.equal(history.ok ? history.value.entries[0]?.commit : '', beforeDeleteCommit)
+
+  const restored = await workspace.restoreAsNewBranch(projectDir, {
     sourceBranch: 'main',
-    checkpoint: historical.value.checkpoint.commit,
-    newBranch: 'restore/historical-source',
+    checkpoint: beforeDeleteCommit,
+    newBranch: 'restore/before-delete',
   })
-  assert.ok(restored.ok)
-  assert.equal(restored.value.sourceBranch?.head, historicalSourceHead)
+  assert.equal(restored.ok, true)
+  assert.equal(
+    restored.ok ? restored.value.canvas.document.tasks[0]?.id : '',
+    'task-history-delete',
+  )
+
+  const replay = await workspace.commitCanvas(
+    projectDir,
+    'main',
+    created.canvas.revision,
+    'history-delete-task',
+    { type: 'DeleteTask', taskId: 'task-history-delete' },
+  )
+  assert.equal(replay.canvas.revision, deleted.canvas.revision)
+})
+
+test('keeps main-branch commands and execution available when Canvas Git is degraded', async () => {
+  const { projectDir, canvases, workspace } = await harness({
+    canvasGitFactory: (canonicalProjectDir) => new CanvasGitStore(
+      canonicalProjectDir,
+      { gitBinary: 'ggai-definitely-missing-git' },
+    ),
+  })
+  const initial = await workspace.getCanvas(projectDir, 'main')
+  assert.equal(initial.versioning.state, 'degraded')
+  const saved = await workspace.commitCanvas(
+    projectDir,
+    'main',
+    initial.canvas.revision,
+    'save-without-git',
+    createTask('task-without-git'),
+  )
+  assert.equal(saved.canvas.revision, 1)
+  assert.equal(saved.versioning.state, 'degraded')
+  assert.equal(
+    await workspace.sourceExecutionProjectDir(projectDir, 'main'),
+    await realpath(projectDir),
+  )
+  const checkpoint = await workspace.manualCheckpoint(projectDir, 'main')
+  assert.equal(checkpoint.ok, false)
+  assert.equal(checkpoint.ok ? '' : checkpoint.error.code, 'GIT_UNAVAILABLE')
   await assert.rejects(
-    readFile(path.join(restored.value.sourceBranch?.projectDir ?? '', 'advanced-source.ts'), 'utf8'),
-    (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT',
+    workspace.commitCanvas(
+      projectDir,
+      'main',
+      saved.canvas.revision,
+      'reject-unrecoverable-delete',
+      { type: 'DeleteTask', taskId: 'task-without-git' },
+    ),
+    expectGitError('GIT_UNAVAILABLE'),
   )
-  assert.equal((await versions.sourceBranch('.', 'main')).value?.head, advanced.value.commit)
-  assert.equal(await git(projectDir, ['rev-parse', 'HEAD']), userHead)
-  await versions.close()
+  assert.equal((await canvases.get(projectDir, 'main')).document.tasks.length, 1)
 })
 
-test('confirmed sensitive source checkpoints anchor their exact HEAD in canvas history', async () => {
-  const projectDir = await temporaryProject()
-  await initializeSourceRepository(projectDir)
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'sensitive-source-anchor',
-    changeKind: 'node-created',
-    document: document('Sensitive source anchor'),
-  })
-  const binding = await versions.bindSource('.', 'main')
-  assert.ok(binding.ok)
-  const initial = await versions.manualCheckpoint('.', 'main', 'before sensitive source')
-  assert.ok(initial.ok)
-
-  await writeFile(
-    path.join(binding.value.projectDir, 'credentials.pem'),
-    'test-only-sensitive-material\n',
-    'utf8',
-  )
-  const preview = await versions.checkpointSource('.', 'main', {
-    runId: 'sensitive-source-run',
-    nodeTitle: 'Sensitive source change',
-  })
-  assert.ok(preview.ok)
-  assert.equal(preview.value.requiresConfirmation, true)
-  assert.equal((await versions.getCanvas('.', 'main')).canvas.lastCheckpoint, initial.value.checkpoint.commit)
-
-  const confirmed = await versions.checkpointSource('.', 'main', {
-    runId: 'sensitive-source-run',
-    nodeTitle: 'Sensitive source change',
-    allowSensitive: true,
-  })
-  assert.ok(confirmed.ok)
-  assert.equal(confirmed.value.requiresConfirmation, true)
-  const anchored = (await versions.getCanvas('.', 'main')).canvas.lastCheckpoint
-  assert.ok(anchored)
-  assert.notEqual(anchored, initial.value.checkpoint.commit)
-  assert.deepEqual(
-    await new CanvasGitStore(projectDir).readSourceMetadata(anchored),
-    { version: 1, commit: confirmed.value.commit },
-  )
-  await versions.close()
-})
-
-test('legacy canvas checkpoints without source metadata restore canvas-only', async () => {
-  const projectDir = await temporaryProject()
-  await initializeSourceRepository(projectDir)
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'legacy-source-base',
-    changeKind: 'node-created',
-    document: document('Legacy canvas'),
-  })
-  const legacy = await versions.manualCheckpoint('.', 'main', 'legacy canvas-only')
-  assert.ok(legacy.ok)
-  assert.equal(
-    await new CanvasGitStore(projectDir).readSourceMetadata(legacy.value.checkpoint.commit),
-    null,
-  )
-  assert.ok((await versions.bindSource('.', 'main')).ok)
-
-  const restored = await versions.restoreAsNewBranch('.', {
-    sourceBranch: 'main',
-    checkpoint: legacy.value.checkpoint.commit,
-    newBranch: 'restore/legacy-canvas-only',
-  })
-  assert.ok(restored.ok)
-  assert.equal(restored.value.canvas.document.nodes[0]?.title, 'Legacy canvas')
-  assert.equal(restored.value.sourceBranch, null)
-  const source = await versions.sourceBranch('.', 'restore/legacy-canvas-only')
-  assert.ok(source.ok)
-  assert.equal(source.value, null)
-  await versions.close()
-})
-
-test('a source-paired checkpoint restores canvas partially when source Git is unbound', async () => {
-  const projectDir = await temporaryProject()
-  await initializeSourceRepository(projectDir)
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'source-unbound-restore-base',
-    changeKind: 'node-created',
-    document: document('Source-paired canvas'),
-  })
-  await versions.manualCheckpoint('.', 'main', 'canvas base')
-  const sourceHead = await git(projectDir, ['rev-parse', 'HEAD'])
-  const paired = await new CanvasGitStore(projectDir).checkpoint({
-    branch: 'main',
-    document: document('Source-paired canvas'),
-    reason: 'synthetic source pair',
-    source: { version: 1, commit: sourceHead },
-  })
-
-  const restoreInput = {
-    sourceBranch: 'main',
-    checkpoint: paired.commit,
-    newBranch: 'restore/source-unbound',
-  }
-  const restored = await versions.restoreAsNewBranch('.', restoreInput)
-  assert.equal(restored.ok, false)
-  assert.equal(restored.partial, true)
-  assert.equal(restored.sourceDegraded, true)
-  if (!restored.ok) {
-    assert.equal(restored.error.code, 'source_restore_unavailable')
-    assert.equal(restored.value?.canvas.document.nodes[0]?.title, 'Source-paired canvas')
-    assert.equal(restored.value?.sourceBranch, null)
-  }
-  assert.equal(
-    (await versions.getCanvas('.', 'restore/source-unbound')).canvas.document.nodes[0]?.title,
-    'Source-paired canvas',
-  )
-
-  const retried = await versions.restoreAsNewBranch('.', restoreInput)
-  assert.equal(retried.ok, false)
-  assert.equal(retried.partial, true)
-  if (!retried.ok) assert.equal(retried.error.code, 'source_restore_unavailable')
-  await versions.close()
-})
-
-test('branch reconciliation rejects a runtime layer without a canvas Git branch', async () => {
-  const projectDir = await temporaryProject()
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'invariant-base',
-    changeKind: 'node-created',
-    document: document('Base'),
-  })
-  await versions.manualCheckpoint('.', 'main', 'base')
-  await versions.saveCanvas('.', 'feature/runtime-only', {
-    baseRevision: 0,
-    mutationId: 'runtime-only',
-    changeKind: 'node-created',
-    document: document('Runtime only'),
-  })
-
-  const result = await versions.createBranch('.', { name: 'feature/runtime-only' })
-  assert.equal(result.ok, false)
-  if (!result.ok) assert.equal(result.error.code, 'invariant_conflict')
-  const branches = await versions.listBranches('.')
-  assert.ok(branches.ok)
-  assert.equal(branches.value.some((branch) => branch.name === 'feature/runtime-only'), false)
-  await versions.close()
-})
-
-test('delete retry converges after the canvas branch was removed before an error', async () => {
-  const projectDir = await temporaryProject()
-  const canvasGit = new FailAfterDeleteCanvasGitStore(projectDir)
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-    canvasGitFactory: () => canvasGit,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'canvas-delete-retry-base',
-    changeKind: 'node-created',
-    document: document('Base'),
-  })
-  await versions.manualCheckpoint('.', 'main', 'base')
-  assert.ok((await versions.createBranch('.', { name: 'feature/canvas-delete-retry' })).ok)
-  canvasGit.failAfterDelete('feature/canvas-delete-retry')
-
-  const failed = await versions.deleteBranch('.', 'feature/canvas-delete-retry')
-  assert.equal(failed.ok, false)
-  assert.equal(failed.partial, true)
-  const retried = await versions.deleteBranch('.', 'feature/canvas-delete-retry')
-  assert.ok(retried.ok)
-  assert.equal(retried.value.canvasDeleted, true)
-  assert.equal(retried.value.runtimeDeleted, true)
-  assert.equal((await versions.getCanvas('.', 'feature/canvas-delete-retry')).canvas.revision, 0)
-  await versions.close()
-})
-
-test('delete retry converges after runtime removal completed before an error', async () => {
-  const projectDir = await temporaryProject()
-  const canvases = new FailAfterRemoveCanvasStoreManager({ projectRoot: projectDir })
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-    canvasStoreManager: canvases,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'runtime-delete-retry-base',
-    changeKind: 'node-created',
-    document: document('Base'),
-  })
-  await versions.manualCheckpoint('.', 'main', 'base')
-  assert.ok((await versions.createBranch('.', { name: 'feature/runtime-delete-retry' })).ok)
-  canvases.failAfterRemove('feature/runtime-delete-retry')
-
-  const failed = await versions.deleteBranch('.', 'feature/runtime-delete-retry')
-  assert.equal(failed.ok, false)
-  assert.equal(failed.partial, true)
-  const retried = await versions.deleteBranch('.', 'feature/runtime-delete-retry')
-  assert.ok(retried.ok)
-  assert.equal(retried.value.canvasDeleted, true)
-  assert.equal(retried.value.runtimeDeleted, true)
-  await versions.close()
-})
-
-test('source delete safety is checked before any canvas layer is removed', async () => {
-  const projectDir = await temporaryProject()
-  await initializeSourceRepository(projectDir)
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'source-delete-safety-base',
-    changeKind: 'node-created',
-    document: document('Base'),
-  })
-  await versions.manualCheckpoint('.', 'main', 'base')
-  assert.ok((await versions.bindSource('.', 'main')).ok)
-  const created = await versions.createBranch('.', { name: 'feature/source-delete-safety' })
-  assert.ok(created.ok)
-  assert.ok(created.value.sourceBranch)
-  await writeFile(
-    path.join(created.value.sourceBranch.projectDir, 'unmerged.ts'),
-    'export const unmerged = true\n',
-    'utf8',
-  )
-  assert.ok((await versions.checkpointSource('.', 'feature/source-delete-safety', {
-    runId: 'source-delete-safety',
-    nodeTitle: 'Unmerged source',
-  })).ok)
-
-  const deleted = await versions.deleteBranch('.', 'feature/source-delete-safety')
-  assert.equal(deleted.ok, false)
-  assert.equal(deleted.partial, false)
-  if (!deleted.ok) assert.equal(deleted.error.code, 'branch_not_merged')
-  const branches = await versions.listBranches('.')
-  assert.ok(branches.ok)
-  assert.equal(
-    branches.value.some((branch) => branch.name === 'feature/source-delete-safety'),
-    true,
-  )
-  const sourceBranch = await versions.sourceBranch('.', 'feature/source-delete-safety')
-  assert.ok(sourceBranch.ok)
-  assert.ok(sourceBranch.value)
-  await versions.close()
-})
-
-test('delete retry converges after a source branch was removed before an error', async () => {
-  const projectDir = await temporaryProject()
-  await initializeSourceRepository(projectDir)
-  const sourceStore = new FailOnceSourceGitStore({
-    projectRoot: projectDir,
+test('coordinates create, switch, restore, history, and idempotent branch retries', async () => {
+  const { projectDir, workspace } = await harness()
+  const initial = await workspace.getCanvas(projectDir, 'main')
+  const oldCanvas = await workspace.commitCanvas(
     projectDir,
-  })
-  const versions = new WorkspaceVersionManager({
-    projectRoot: projectDir,
-    checkpointDelayMs: 60_000,
-    sourceGitManager: new SingleSourceGitManager(projectDir, sourceStore),
-  })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'source-delete-retry-base',
-    changeKind: 'node-created',
-    document: document('Base'),
-  })
-  await versions.manualCheckpoint('.', 'main', 'base')
-  assert.ok((await versions.bindSource('.', 'main')).ok)
-  assert.ok((await versions.createBranch('.', { name: 'feature/source-delete-retry' })).ok)
-  sourceStore.failAfterRemove('feature/source-delete-retry')
+    'main',
+    initial.canvas.revision,
+    'create-versioned-task',
+    createTask('task-versioned', 'Old'),
+  )
+  const oldCheckpoint = await workspace.manualCheckpoint(projectDir, 'main', 'old')
+  assert.equal(oldCheckpoint.ok, true)
+  if (!oldCheckpoint.ok) return
 
-  const failed = await versions.deleteBranch('.', 'feature/source-delete-retry')
-  assert.equal(failed.ok, false)
-  assert.equal(failed.partial, true)
-  const retried = await versions.deleteBranch('.', 'feature/source-delete-retry')
-  assert.ok(retried.ok)
-  assert.equal(retried.value.canvasDeleted, true)
-  assert.equal(retried.value.sourceDeleted, true)
-  assert.equal(retried.value.runtimeDeleted, true)
-  const source = await versions.sourceBranch('.', 'feature/source-delete-retry')
-  assert.ok(source.ok)
-  assert.equal(source.value, null)
-  await versions.close()
+  const current = await workspace.commitCanvas(
+    projectDir,
+    'main',
+    oldCanvas.canvas.revision,
+    'update-versioned-task',
+    updateGoal('task-versioned', 'Current goal'),
+  )
+  const currentCheckpoint = await workspace.manualCheckpoint(projectDir, 'main', 'current')
+  assert.equal(currentCheckpoint.ok, true)
+  assert.notEqual(
+    currentCheckpoint.ok ? currentCheckpoint.value.checkpoint.commit : '',
+    oldCheckpoint.value.checkpoint.commit,
+  )
+
+  const created = await workspace.createBranch(projectDir, {
+    name: 'feature/demo',
+    fromBranch: 'main',
+  })
+  assert.equal(created.ok, true)
+  if (!created.ok) return
+  assert.equal(created.value.canvas.document.tasks[0]?.goal, 'Current goal')
+  assert.equal(created.value.canvas.lastCheckpoint, created.value.branch.commit)
+  assert.equal(created.value.branch.worktree?.path.includes('feature/demo'), false)
+  assert.equal(
+    await workspace.sourceExecutionProjectDir(projectDir, 'feature/demo'),
+    await realpath(projectDir),
+  )
+
+  const createdRetry = await workspace.createBranch(projectDir, {
+    name: 'feature/demo',
+    fromBranch: 'main',
+  })
+  assert.equal(createdRetry.ok, true)
+  assert.equal(createdRetry.ok ? createdRetry.value.branch.commit : '', created.value.branch.commit)
+
+  const restored = await workspace.restoreAsNewBranch(projectDir, {
+    sourceBranch: 'main',
+    checkpoint: oldCheckpoint.value.checkpoint.commit.toUpperCase(),
+    newBranch: 'restore/old',
+  })
+  assert.equal(restored.ok, true)
+  if (!restored.ok) return
+  assert.equal(restored.value.canvas.document.tasks[0]?.goal, 'Old goal')
+  assert.equal(restored.value.canvas.lastCheckpoint, oldCheckpoint.value.checkpoint.commit)
+
+  const restoredRetry = await workspace.restoreAsNewBranch(projectDir, {
+    sourceBranch: 'main',
+    checkpoint: oldCheckpoint.value.checkpoint.commit,
+    newBranch: 'restore/old',
+  })
+  assert.equal(restoredRetry.ok, true)
+  const switched = await workspace.switchBranch(projectDir, 'restore/old')
+  assert.equal(switched.ok, true)
+  assert.equal(switched.ok ? switched.value.canvas.document.tasks[0]?.goal : '', 'Old goal')
+
+  const branches = await workspace.listBranches(projectDir)
+  assert.equal(branches.ok, true)
+  assert.deepEqual(
+    branches.ok ? branches.value.map((branch) => branch.name) : [],
+    ['feature/demo', 'main', 'restore/old'],
+  )
+  const history = await workspace.history(projectDir, { branch: 'main', limit: 10 })
+  assert.equal(history.ok, true)
+  assert.ok(history.ok && history.value.entries.length >= 2)
+  assert.equal(current.canvas.document.tasks[0]?.goal, 'Current goal')
 })
 
-test('previews and explicitly executes a canvas branch merge into durable runtime state', async () => {
-  const projectDir = await temporaryProject()
-  const versions = new WorkspaceVersionManager({ projectRoot: projectDir })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'merge-base',
-    changeKind: 'node-created',
-    document: document('Base'),
+test('rejects a stale merge preview then atomically applies a fresh semantic merge', async () => {
+  const { projectDir, workspace } = await harness()
+  const created = await workspace.createBranch(projectDir, {
+    name: 'feature/source',
+    fromBranch: 'main',
   })
-  await versions.manualCheckpoint('.', 'main', 'base')
-  const branch = await versions.createBranch('.', { name: 'feature/merge' })
-  assert.ok(branch.ok)
-  await versions.saveCanvas('.', 'feature/merge', {
-    baseRevision: branch.value.canvas.revision,
-    mutationId: 'feature-edit',
-    changeKind: 'node-updated',
-    document: document('Feature'),
-  })
+  assert.equal(created.ok, true)
+  if (!created.ok) return
+  const source = await workspace.commitCanvas(
+    projectDir,
+    'feature/source',
+    created.value.canvas.revision,
+    'create-source-task',
+    createTask('task-source', 'Source'),
+  )
+  const main = await workspace.getCanvas(projectDir, 'main')
+  await workspace.commitCanvas(
+    projectDir,
+    'main',
+    main.canvas.revision,
+    'create-target-task',
+    createTask('task-target', 'Target'),
+  )
 
-  const preview = await versions.previewMerge('.', {
-    sourceBranch: 'feature/merge',
+  const firstPreview = await workspace.previewMerge(projectDir, {
+    sourceBranch: 'feature/source',
     targetBranch: 'main',
   })
-  assert.ok(preview.ok)
-  assert.equal(preview.value.state, 'ready')
-  assert.equal(preview.value.source, null)
+  assert.equal(firstPreview.ok, true)
+  if (!firstPreview.ok) return
+  assert.equal(firstPreview.value.state, 'ready')
+  const changedTarget = await workspace.commitCanvas(
+    projectDir,
+    'main',
+    firstPreview.value.expectation.targetRevision,
+    'create-late-task',
+    createTask('task-late', 'Late'),
+  )
+  const stale = await workspace.executeMerge(projectDir, {
+    sourceBranch: 'feature/source',
+    targetBranch: 'main',
+    confirmed: true,
+    expected: firstPreview.value.expectation,
+  })
+  assert.equal(stale.ok, false)
+  assert.equal(stale.ok ? '' : stale.error.code, 'merge_preview_stale')
+  assert.equal(stale.partial, false)
 
-  const denied = await versions.executeMerge('.', {
-    sourceBranch: 'feature/merge',
+  const freshPreview = await workspace.previewMerge(projectDir, {
+    sourceBranch: 'feature/source',
+    targetBranch: 'main',
+  })
+  assert.equal(freshPreview.ok, true)
+  if (!freshPreview.ok) return
+  const merged = await workspace.executeMerge(projectDir, {
+    sourceBranch: 'feature/source',
+    targetBranch: 'main',
+    confirmed: true,
+    expected: freshPreview.value.expectation,
+  })
+  assert.equal(merged.ok, true)
+  if (!merged.ok) return
+  assert.equal(merged.value.state, 'merged')
+  assert.equal(merged.value.canvas.merged, true)
+  assert.deepEqual(
+    merged.value.canvasEnvelope?.document.tasks.map((task) => task.id),
+    ['task-late', 'task-source', 'task-target'],
+  )
+  assert.equal(
+    merged.value.canvasEnvelope?.lastCheckpoint,
+    merged.value.canvas.commit,
+  )
+  assert.equal(source.canvas.document.tasks[0]?.id, 'task-source')
+  assert.equal(changedTarget.canvas.document.tasks.length, 2)
+})
+
+test('reports semantic conflicts without mutating or dirtying the target branch', async () => {
+  const { projectDir, workspace } = await harness()
+  const main = await workspace.getCanvas(projectDir, 'main')
+  const base = await workspace.commitCanvas(
+    projectDir,
+    'main',
+    main.canvas.revision,
+    'create-shared-task',
+    createTask('task-shared', 'Base'),
+  )
+  await workspace.manualCheckpoint(projectDir, 'main', 'base')
+  const created = await workspace.createBranch(projectDir, {
+    name: 'feature/conflict',
+    fromBranch: 'main',
+  })
+  assert.equal(created.ok, true)
+  if (!created.ok) return
+  await workspace.commitCanvas(
+    projectDir,
+    'main',
+    base.canvas.revision,
+    'update-main-goal',
+    updateGoal('task-shared', 'Main goal'),
+  )
+  await workspace.commitCanvas(
+    projectDir,
+    'feature/conflict',
+    created.value.canvas.revision,
+    'update-feature-goal',
+    updateGoal('task-shared', 'Feature goal'),
+  )
+
+  const preview = await workspace.previewMerge(projectDir, {
+    sourceBranch: 'feature/conflict',
+    targetBranch: 'main',
+  })
+  assert.equal(preview.ok, true)
+  if (!preview.ok) return
+  assert.equal(preview.value.state, 'conflicts')
+  const execution = await workspace.executeMerge(projectDir, {
+    sourceBranch: 'feature/conflict',
+    targetBranch: 'main',
+    confirmed: true,
+    expected: preview.value.expectation,
+  })
+  assert.equal(execution.ok, true)
+  if (!execution.ok) return
+  assert.equal(execution.value.state, 'conflicts')
+  assert.equal(execution.value.canvas.merged, false)
+  assert.equal(execution.value.canvas.commit, preview.value.canvas.targetCommit)
+  assert.equal(execution.value.canvasEnvelope?.document.tasks[0]?.goal, 'Main goal')
+
+  const checkpoint = await workspace.manualCheckpoint(projectDir, 'main', 'after-conflict')
+  assert.equal(checkpoint.ok, true)
+  assert.equal(checkpoint.ok ? checkpoint.value.checkpoint.changed : true, false)
+})
+
+test('recovers a committed merge after runtime apply fails at the partial boundary', async () => {
+  const projectDir = await mkdtemp(path.join(tmpdir(), 'ggai-workspace-v2-recovery-'))
+  temporaryDirectories.push(projectDir)
+  const delegate = new CanvasCommandStoreManager({
+    projectRoot: projectDir,
+    acquireProjectLease: async (requested) => realpath(
+      path.isAbsolute(requested) ? requested : path.resolve(projectDir, requested),
+    ),
+  })
+  canvasManagers.push(delegate)
+  let failApply = false
+  const faulting: WorkspaceCanvasStoreManager = {
+    acquireProjectLease: (requested) => delegate.acquireProjectLease(requested),
+    hasSnapshot: (requested, branch) => delegate.hasSnapshot(requested, branch),
+    get: (requested, branch) => delegate.get(requested, branch),
+    readRevision: (requested, branch, revision) =>
+      delegate.readRevision(requested, branch, revision),
+    commit: (requested, branch, revision, mutationId, command) =>
+      delegate.commit(requested, branch, revision, mutationId, command),
+    commitLatest: (requested, branch, mutationId, command) =>
+      delegate.commitLatest(requested, branch, mutationId, command),
+    setLastCheckpoint: (requested, branch, revision, commit) =>
+      delegate.setLastCheckpoint(requested, branch, revision, commit),
+    materialize: (requested, branch, document, commit) =>
+      delegate.materialize(requested, branch, document, commit),
+    applyCheckpoint: async (requested, branch, document, commit, revision) => {
+      if (failApply) {
+        failApply = false
+        throw new Error('injected runtime apply failure')
+      }
+      return delegate.applyCheckpoint(requested, branch, document, commit, revision)
+    },
+  }
+  const workspace = new WorkspaceVersionManager({
+    projectRoot: projectDir,
+    checkpointDelayMs: 60_000,
+    canvasStoreManager: faulting,
+  })
+  workspaces.push(workspace)
+
+  const created = await workspace.createBranch(projectDir, {
+    name: 'feature/recover',
+    fromBranch: 'main',
+  })
+  assert.equal(created.ok, true)
+  if (!created.ok) return
+  await workspace.commitCanvas(
+    projectDir,
+    'feature/recover',
+    created.value.canvas.revision,
+    'create-recovery-source',
+    createTask('task-recovery-source'),
+  )
+  const main = await workspace.getCanvas(projectDir, 'main')
+  await workspace.commitCanvas(
+    projectDir,
+    'main',
+    main.canvas.revision,
+    'create-recovery-target',
+    createTask('task-recovery-target'),
+  )
+  const preview = await workspace.previewMerge(projectDir, {
+    sourceBranch: 'feature/recover',
+    targetBranch: 'main',
+  })
+  assert.equal(preview.ok, true)
+  if (!preview.ok) return
+
+  failApply = true
+  const partial = await workspace.executeMerge(projectDir, {
+    sourceBranch: 'feature/recover',
+    targetBranch: 'main',
+    confirmed: true,
+    expected: preview.value.expectation,
+  })
+  assert.equal(partial.ok, false)
+  assert.equal(partial.partial, true)
+  assert.equal(partial.ok ? '' : partial.error.code, 'versioning_failed')
+  assert.equal(partial.ok ? '' : partial.value?.state, 'partial')
+  const beforeRecovery = await delegate.get(projectDir, 'main')
+  assert.equal(beforeRecovery.lastCheckpoint, preview.value.canvas.targetCommit)
+
+  const restarted = new WorkspaceVersionManager({
+    projectRoot: projectDir,
+    checkpointDelayMs: 60_000,
+    canvasStoreManager: faulting,
+  })
+  workspaces.push(restarted)
+  const recovered = await restarted.getCanvas(projectDir, 'main')
+  assert.deepEqual(
+    recovered.canvas.document.tasks.map((task) => task.id),
+    ['task-recovery-source', 'task-recovery-target'],
+  )
+  assert.equal(recovered.canvas.lastCheckpoint, partial.ok ? '' : partial.value?.canvas.commit)
+  assert.equal(recovered.canvas.revision, beforeRecovery.revision + 1)
+})
+
+test('requires explicit confirmation and exact merge expectations', async () => {
+  const { projectDir, workspace } = await harness()
+  const created = await workspace.createBranch(projectDir, {
+    name: 'feature/confirm',
+    fromBranch: 'main',
+  })
+  assert.equal(created.ok, true)
+  if (!created.ok) return
+  const preview = await workspace.previewMerge(projectDir, {
+    sourceBranch: 'feature/confirm',
+    targetBranch: 'main',
+  })
+  assert.equal(preview.ok, true)
+  if (!preview.ok) return
+
+  const denied = await workspace.executeMerge(projectDir, {
+    sourceBranch: 'feature/confirm',
     targetBranch: 'main',
     confirmed: false,
     expected: preview.value.expectation,
   })
   assert.equal(denied.ok, false)
-  if (!denied.ok) assert.equal(denied.error.code, 'merge_confirmation_required')
+  assert.equal(denied.ok ? '' : denied.error.code, 'merge_confirmation_required')
 
-  const merged = await versions.executeMerge('.', {
-    sourceBranch: 'feature/merge',
+  const malformed = await workspace.executeMerge(projectDir, {
+    sourceBranch: 'feature/confirm',
     targetBranch: 'main',
     confirmed: true,
-    expected: preview.value.expectation,
+    expected: {
+      ...preview.value.expectation,
+      sourceCommit: 'not-a-commit',
+    },
   })
-  assert.ok(merged.ok)
-  assert.equal(merged.value.state, 'merged')
-  assert.equal(merged.value.canvas.merged, true)
-  assert.equal(merged.value.canvasEnvelope?.document.nodes[0]?.title, 'Feature')
-  assert.equal((await versions.getCanvas('.', 'main')).canvas.document.nodes[0]?.title, 'Feature')
-  await versions.close()
-})
-
-test('workspace merge reports conflicts without overwriting the target canvas', async () => {
-  const projectDir = await temporaryProject()
-  const versions = new WorkspaceVersionManager({ projectRoot: projectDir })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'conflict-base',
-    changeKind: 'node-created',
-    document: document('Base'),
-  })
-  await versions.manualCheckpoint('.', 'main', 'base')
-  const branch = await versions.createBranch('.', { name: 'feature/conflict' })
-  assert.ok(branch.ok)
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: (await versions.getCanvas('.', 'main')).canvas.revision,
-    mutationId: 'main-edit',
-    changeKind: 'node-updated',
-    document: document('Main'),
-  })
-  await versions.saveCanvas('.', 'feature/conflict', {
-    baseRevision: branch.value.canvas.revision,
-    mutationId: 'feature-conflict-edit',
-    changeKind: 'node-updated',
-    document: document('Feature'),
-  })
-
-  const preview = await versions.previewMerge('.', {
-    sourceBranch: 'feature/conflict',
-    targetBranch: 'main',
-  })
-  assert.ok(preview.ok)
-  assert.equal(preview.value.state, 'conflicts')
-  assert.equal(preview.value.canvas.resolution?.requiresExplicitApproval, true)
-
-  const result = await versions.executeMerge('.', {
-    sourceBranch: 'feature/conflict',
-    targetBranch: 'main',
-    confirmed: true,
-    expected: preview.value.expectation,
-  })
-  assert.ok(result.ok)
-  assert.equal(result.value.state, 'conflicts')
-  assert.equal(result.value.canvas.merged, false)
-  assert.equal((await versions.getCanvas('.', 'main')).canvas.document.nodes[0]?.title, 'Main')
-  await versions.close()
-})
-
-test('workspace merge coordinates bound source and canvas branches without touching user main', async () => {
-  const projectDir = await temporaryProject()
-  await git(projectDir, ['init', '--initial-branch=main'])
-  await writeFile(path.join(projectDir, 'README.md'), '# project\n', 'utf8')
-  await git(projectDir, ['add', 'README.md'])
-  await git(projectDir, [
-    '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
-    'commit', '-m', 'initial',
-  ])
-  const userHead = await git(projectDir, ['rev-parse', 'HEAD'])
-
-  const versions = new WorkspaceVersionManager({ projectRoot: projectDir })
-  await versions.saveCanvas('.', 'main', {
-    baseRevision: 0,
-    mutationId: 'source-merge-base',
-    changeKind: 'node-created',
-    document: document('Base'),
-  })
-  await versions.manualCheckpoint('.', 'main', 'base')
-  const binding = await versions.bindSource('.', 'main')
-  assert.ok(binding.ok)
-  const branch = await versions.createBranch('.', { name: 'feature/full-merge' })
-  assert.ok(branch.ok)
-  assert.ok(branch.value.sourceBranch)
-
-  await writeFile(
-    path.join(branch.value.sourceBranch.projectDir, 'feature.ts'),
-    'export const feature = true\n',
-    'utf8',
-  )
-  const sourceCheckpoint = await versions.checkpointSource('.', 'feature/full-merge', {
-    runId: 'run-full-merge',
-    nodeTitle: 'Build full feature',
-  })
-  assert.ok(sourceCheckpoint.ok)
-  await versions.saveCanvas('.', 'feature/full-merge', {
-    baseRevision: branch.value.canvas.revision,
-    mutationId: 'source-merge-canvas-edit',
-    changeKind: 'node-updated',
-    document: document('Feature'),
-  })
-
-  const preview = await versions.previewMerge('.', {
-    sourceBranch: 'feature/full-merge',
-    targetBranch: 'main',
-  })
-  assert.ok(preview.ok)
-  assert.equal(preview.value.canvas.state, 'ready')
-  assert.equal(preview.value.source?.state, 'ready')
-
-  await writeFile(
-    path.join(branch.value.sourceBranch.projectDir, 'after-preview.ts'),
-    'export const afterPreview = true\n',
-    'utf8',
-  )
-  await git(branch.value.sourceBranch.projectDir, ['add', 'after-preview.ts'])
-  await git(branch.value.sourceBranch.projectDir, [
-    '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
-    'commit', '-m', 'change source after preview',
-  ])
-  const stale = await versions.executeMerge('.', {
-    sourceBranch: 'feature/full-merge',
-    targetBranch: 'main',
-    confirmed: true,
-    expected: preview.value.expectation,
-  })
-  assert.equal(stale.ok, false)
-  if (!stale.ok) assert.equal(stale.error.code, 'merge_preview_stale')
-  const refreshed = await versions.previewMerge('.', {
-    sourceBranch: 'feature/full-merge',
-    targetBranch: 'main',
-  })
-  assert.ok(refreshed.ok)
-
-  const merged = await versions.executeMerge('.', {
-    sourceBranch: 'feature/full-merge',
-    targetBranch: 'main',
-    confirmed: true,
-    expected: refreshed.value.expectation,
-  })
-  assert.ok(merged.ok)
-  assert.equal(merged.value.state, 'merged')
-  assert.equal(merged.value.canvas.merged, true)
-  assert.equal(merged.value.source?.merged, true)
-  assert.equal(
-    await readFile(path.join(binding.value.projectDir, 'feature.ts'), 'utf8'),
-    'export const feature = true\n',
-  )
-  assert.equal(
-    await readFile(path.join(binding.value.projectDir, 'after-preview.ts'), 'utf8'),
-    'export const afterPreview = true\n',
-  )
-  assert.equal(await git(projectDir, ['rev-parse', 'HEAD']), userHead)
-  await versions.close()
-})
-
-test('all workspace operations share the same single-daemon project lease', async () => {
-  const projectDir = await temporaryProject()
-  const first = new WorkspaceVersionManager({ projectRoot: projectDir })
-  const second = new WorkspaceVersionManager({ projectRoot: projectDir })
-
-  assert.equal((await first.sourceStatus('.')).status, 'unavailable')
-  await assert.rejects(
-    second.sourceStatus('.'),
-    (error: unknown) => error instanceof Error && /another daemon process/u.test(error.message),
-  )
-
-  await first.close()
-  assert.equal((await second.sourceStatus('.')).status, 'unavailable')
-  await second.close()
+  assert.equal(malformed.ok, false)
+  assert.equal(malformed.ok ? '' : malformed.error.code, 'invalid_merge_expectation')
 })

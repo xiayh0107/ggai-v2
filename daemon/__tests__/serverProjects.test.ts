@@ -1,14 +1,13 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import type { AddressInfo } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { blankProjectCanvasModelMarker } from '../canvasModelMode.js'
+import { blankProjectCanvasInitializationMarker } from '../canvasInitialization.js'
 import {
   ProjectCatalog,
-  ROOT_WORKSPACE_PROJECT_ID,
   type WorkspaceProjectDescriptor,
 } from '../projectCatalog.js'
 import { createDaemonServer, type DaemonServer } from '../server.js'
@@ -25,14 +24,6 @@ interface ServerFixture {
 
 async function startServer(): Promise<ServerFixture & { setNow(value: number): void }> {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-server-projects-')))
-  await mkdir(path.join(root, '.gg'), { recursive: true })
-  await writeFile(
-    path.join(root, '.gg/canvas-model.json'),
-    `${JSON.stringify(blankProjectCanvasModelMarker(
-      ROOT_WORKSPACE_PROJECT_ID,
-      '2030-08-06T12:00:00.000Z',
-    ))}\n`,
-  )
   let now = Date.parse('2030-08-06T12:00:00.000Z')
   const ids = [PROJECT_A, PROJECT_B]
   const catalog = new ProjectCatalog(root, {
@@ -68,15 +59,8 @@ test('project HTTP routes create, list, open, summarize, and isolate real Canvas
     }
     assert.deepEqual(Object.keys(initial).sort(), ['projects', 'schemaVersion'])
     assert.equal(initial.schemaVersion, 1)
-    assert.deepEqual(initial.projects.map((project) => project.id), [ROOT_WORKSPACE_PROJECT_ID])
-    assertProjectShape(initial.projects[0])
-    assert.equal(initial.projects[0]?.state, 'ready')
-    assert.deepEqual(initial.projects[0]?.summary, {
-      taskCount: 0,
-      nodeCount: 0,
-      collectionCount: 0,
-    })
-    assert.ok(await readFile(path.join(fixture.root, '.gg/runtime/canvas-daemon.lock'), 'utf8'))
+    assert.deepEqual(initial.projects, [])
+    assert.ok(await readFile(path.join(fixture.root, '.gg/workspace/runtime/daemon.lock'), 'utf8'))
 
     fixture.setNow(Date.parse('2030-08-06T13:00:00.000Z'))
     const createdAResponse = await requestJson(fixture.baseUrl, 'POST', '/projects', {
@@ -146,6 +130,82 @@ test('project HTTP routes create, list, open, summarize, and isolate real Canvas
   }
 })
 
+test('project deletion drains opened stores and old projectDir requests cannot recreate it', async () => {
+  const fixture = await startServer()
+  try {
+    const created = await requestJson(fixture.baseUrl, 'POST', '/projects', {
+      title: '待删除项目',
+    }) as { project: WorkspaceProjectDescriptor }
+    const project = created.project
+    const projectPath = path.join(fixture.root, ...project.projectDir.split('/'))
+
+    await requestJson(fixture.baseUrl, 'POST', `/projects/${project.id}/open`)
+    await createTask(fixture.baseUrl, project.projectDir, 'task-before-delete', '删除前内容')
+
+    const removed = await requestJson(
+      fixture.baseUrl,
+      'DELETE',
+      `/projects/${project.id}`,
+    ) as { schemaVersion: number; deletedProjectId: string }
+    assert.deepEqual(removed, {
+      schemaVersion: 1,
+      deletedProjectId: project.id,
+    })
+    await assert.rejects(
+      readFile(path.join(projectPath, '.gg/canvas-model.json')),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT',
+    )
+
+    const listed = await requestJson(fixture.baseUrl, 'GET', '/projects') as {
+      projects: WorkspaceProjectDescriptor[]
+    }
+    assert.equal(listed.projects.some((entry) => entry.id === project.id), false)
+
+    const reopen = await fetch(`${fixture.baseUrl}/projects/${project.id}/open`, {
+      method: 'POST',
+    })
+    assert.equal(reopen.status, 404)
+    assert.equal(
+      (await reopen.json() as { error: { code: string } }).error.code,
+      'project_not_found',
+    )
+
+    const staleCanvas = await fetch(
+      `${fixture.baseUrl}/canvas?projectDir=${encodeURIComponent(project.projectDir)}&branch=main`,
+    )
+    assert.equal(staleCanvas.ok, false)
+    await assert.rejects(
+      readFile(path.join(projectPath, '.gg/canvas-model.json')),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT',
+    )
+
+    const legacyRootDelete = await fetch(
+      `${fixture.baseUrl}/projects/project_root`,
+      { method: 'DELETE' },
+    )
+    assert.equal(legacyRootDelete.status, 400)
+    assert.equal(
+      (await legacyRootDelete.json() as { error: { code: string } }).error.code,
+      'invalid_project_id',
+    )
+    const legacyRootOpen = await fetch(
+      `${fixture.baseUrl}/projects/project_root/open`,
+      { method: 'POST' },
+    )
+    assert.equal(legacyRootOpen.status, 400)
+    assert.equal(
+      (await legacyRootOpen.json() as { error: { code: string } }).error.code,
+      'invalid_project_id',
+    )
+    await assert.rejects(
+      readFile(path.join(fixture.root, '.gg/canvas-model.json'), 'utf8'),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT',
+    )
+  } finally {
+    await fixture.close()
+  }
+})
+
 test('project routes reject forged input and keep unavailable registered projects visible', async () => {
   const fixture = await startServer()
   try {
@@ -172,7 +232,7 @@ test('project routes reject forged input and keep unavailable registered project
     const projectPath = path.join(fixture.root, ...created.project.projectDir.split('/'))
     await writeFile(
       path.join(projectPath, '.gg/canvas-model.json'),
-      `${JSON.stringify(blankProjectCanvasModelMarker(
+      `${JSON.stringify(blankProjectCanvasInitializationMarker(
         PROJECT_B,
         '2030-08-06T13:00:00.000Z',
       ))}\n`,
@@ -213,14 +273,6 @@ test('project routes reject forged input and keep unavailable registered project
 
 test('project catalog and blank project identity survive a daemon restart', async () => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-server-project-restart-')))
-  await mkdir(path.join(root, '.gg'), { recursive: true })
-  await writeFile(
-    path.join(root, '.gg/canvas-model.json'),
-    `${JSON.stringify(blankProjectCanvasModelMarker(
-      ROOT_WORKSPACE_PROJECT_ID,
-      '2030-08-06T12:00:00.000Z',
-    ))}\n`,
-  )
   let first: { daemon: DaemonServer; baseUrl: string } | null = null
   let reopened: { daemon: DaemonServer; baseUrl: string } | null = null
   try {
@@ -272,7 +324,7 @@ function assertProjectShape(project: WorkspaceProjectDescriptor | undefined): vo
 
 async function requestJson(
   baseUrl: string,
-  method: 'GET' | 'POST',
+  method: 'GET' | 'POST' | 'DELETE',
   pathname: string,
   body?: unknown,
 ): Promise<unknown> {
@@ -335,7 +387,7 @@ async function getCanvas(baseUrl: string, projectDir: string): Promise<{
   document: { tasks: Array<{ title: string }> }
 }> {
   const response = await fetch(
-    `${baseUrl}/canvas/v2?projectDir=${encodeURIComponent(projectDir)}&branch=main`,
+    `${baseUrl}/canvas?projectDir=${encodeURIComponent(projectDir)}&branch=main`,
   )
   const source = await response.text()
   assert.equal(response.status, 200, source)

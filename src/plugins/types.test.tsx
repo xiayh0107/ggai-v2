@@ -1,11 +1,12 @@
 import { FileQuestion } from 'lucide-react'
 import { describe, expect, it } from 'vitest'
-import { MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN_V2 } from './artifactContracts'
+import { MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN } from './artifactContracts'
+import { LEGACY_NODE_CONTEXT_POLICY } from './contextContracts'
+import { defineNodeUi } from './uiContracts'
 import {
-  enabledArtifactCapabilitySnapshotV2,
+  enabledArtifactCapabilitySnapshot,
   getPlugin,
   listCreatablePlugins,
-  projectArtifactContentV2,
   registerPlugin,
   type NodePlugin,
   unregisterPlugin,
@@ -24,10 +25,10 @@ function plugin(
     defaultWidth: 300,
     initialPayload: () => ({}),
     isEmpty: () => true,
-    views: { Empty: () => null, Content: () => null },
+    ui: defineNodeUi('card'),
     instr: { placeholder: 'Test', actions: [] },
+    nodeContext: structuredClone(LEGACY_NODE_CONTEXT_POLICY),
     artifactClaims,
-    demoResult: () => null,
   }
 }
 
@@ -53,53 +54,35 @@ describe('browser plugin registry artifact boundary', () => {
     expect(() => registerPlugin(plugin(
       '@tests/excessive-claims',
       Array.from(
-        { length: MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN_V2 + 1 },
+        { length: MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN + 1 },
         () => ({ extensions: ['.txt'] }),
       ),
     ))).toThrow(/artifactClaims/u)
   })
 
-  it('stores canonical claims and exposes a content-only V2 projector', () => {
-    const subject = {
-      ...plugin('@tests/pure-projector', [{ extensions: ['.txt'], priority: 0 }]),
-      projectArtifact: ({ title }: { title: string }) => ({ title }),
-    } satisfies NodePlugin
+  it('rejects arbitrary plugin UI instead of accepting JSX or CSS hooks', () => {
+    expect(() => registerPlugin({
+      ...plugin('@tests/arbitrary-ui'),
+      ui: { schemaVersion: 1, template: 'card', className: 'bg-red-500' },
+    } as unknown as NodePlugin)).toThrow(/ui 无效/u)
+  })
+
+  it('stores canonical claims and a strict platform UI template', () => {
+    const subject = plugin('@tests/canonical-plugin', [{ extensions: ['.txt'], priority: 0 }])
     registerPlugin(subject)
 
     const registered = getPlugin(subject.id)
     expect(registered.artifactClaims).toEqual([{ extensions: ['.txt'] }])
-    expect(registered.projectArtifact?.({
-      runId: 'run-1',
-      artifactId: 'artifact-1',
-      mediaType: 'text/plain',
-      size: 10,
-      contentDigest: 'a'.repeat(64),
-      title: 'notes.txt',
-      url: 'http://127.0.0.1/artifact',
-    })).toEqual({ title: 'notes.txt' })
+    expect(registered.ui).toEqual(defineNodeUi('card'))
   })
 
-  it('sanitizes pure projections and keeps projection-only plugins out of creation', () => {
+  it('keeps projection-only plugins out of creation', () => {
     const subject = {
       ...plugin('@tests/projection-only', [{ extensions: ['.safe'] }]),
       creatable: false,
-      projectArtifact: () => ({ title: 'Projected', payload: { safe: true } }),
     } satisfies NodePlugin
     registerPlugin(subject)
     try {
-      const artifact = {
-        runId: 'run-1',
-        artifactId: `artifact_${'a'.repeat(64)}`,
-        mediaType: 'application/octet-stream',
-        size: 12,
-        contentDigest: 'b'.repeat(64),
-        title: 'result.safe',
-        url: 'http://127.0.0.1/artifact',
-      }
-      expect(projectArtifactContentV2(getPlugin(subject.id), artifact)).toEqual({
-        title: 'Projected',
-        payload: { safe: true },
-      })
       expect(listCreatablePlugins().map(({ id }) => id)).not.toContain(subject.id)
     } finally {
       unregisterPlugin(subject.id)
@@ -115,14 +98,14 @@ describe('browser plugin registry artifact boundary', () => {
     registerPlugin(protectedBuiltin)
     setPluginEnabled(disabled.id, false)
     try {
-      expect(enabledArtifactCapabilitySnapshotV2()).toMatchObject({
-        schemaVersion: 2,
-        plugins: expect.arrayContaining([{
+      const snapshot = enabledArtifactCapabilitySnapshot()
+      expect(snapshot.schemaVersion).toBe(2)
+      expect(snapshot.plugins).toEqual(expect.arrayContaining([expect.objectContaining({
           id: enabled.id,
           artifactClaims: [{ extensions: ['.enabled'] }],
-        }]),
-      })
-      const ids = enabledArtifactCapabilitySnapshotV2().plugins.map(({ id }) => id)
+          nodeContext: LEGACY_NODE_CONTEXT_POLICY,
+        })]))
+      const ids = snapshot.plugins.map(({ id }) => id)
       expect(ids).not.toContain(disabled.id)
       expect(ids).not.toContain('image')
     } finally {

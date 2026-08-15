@@ -15,6 +15,8 @@ export function workspaceProjectErrorMessage(error: unknown, fallback: string): 
         return '项目不存在或已经被移除。'
       case 'project_unavailable':
         return '项目当前不可用，请检查本地项目状态后重试。'
+      case 'project_busy':
+        return '项目正在运行或处理中，请结束相关任务后重试。'
       case 'daemon_instance_active':
         return '项目已在另一个本地服务中打开，请先关闭那个进程。'
       case 'daemon_lease_stale':

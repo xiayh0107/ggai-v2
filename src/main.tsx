@@ -4,9 +4,16 @@ import { BrowserRouter } from 'react-router'
 import './index.css'
 import App from './App.tsx'
 import { registerBuiltinPlugins } from '@/plugins/builtins'
+import { DAEMON_URL } from '@/agent/config'
+import { NodeDefinitionClient } from '@/node-studio/client'
+import { registerCustomNodePlugins } from '@/node-studio/runtime'
 
 // 注册全部内置节点插件（与社区 / 用户插件完全同构）
 registerBuiltinPlugins()
+
+void new NodeDefinitionClient({ baseUrl: DAEMON_URL }).list()
+  .then(registerCustomNodePlugins)
+  .catch(() => undefined)
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

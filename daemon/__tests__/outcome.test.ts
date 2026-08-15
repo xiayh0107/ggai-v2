@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { link, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -9,129 +9,88 @@ import {
   RUN_OUTCOME_RELATIVE_PATH,
 } from '../outcome.js'
 
-interface TestOutcome {
-  schemaVersion: number
-  suggestedActions: Array<{ id: string; label: string; prompt: string }>
-}
-
-function outcome(label = 'Summarize findings'): TestOutcome {
+function outcome(): Record<string, unknown> {
   return {
-    schemaVersion: 1,
-    suggestedActions: [
-      { id: 'summarize', label, prompt: 'Summarize the main findings.' },
-      { id: 'make-chart', label: 'Make a chart', prompt: 'Turn the key values into a chart.' },
-      { id: 'draft-brief', label: 'Draft a brief', prompt: 'Draft a concise stakeholder brief.' },
-    ],
+    schemaVersion: 2,
+    suggestedActions: [],
+    outputs: [{
+      key: 'source',
+      path: 'plot.R',
+      pluginId: 'code',
+      role: 'primary',
+    }],
+    taskProposals: [{
+      key: 'refine',
+      title: 'Refine plot',
+      prompt: 'Refine the generated plot.',
+      inputOutputKeys: ['source'],
+    }],
   }
 }
 
-async function fixture(): Promise<{ root: string; artifactDir: string; close(): Promise<void> }> {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-outcome-'))
-  const artifactDir = path.join(root, 'artifacts', 'run', 'node')
-  await mkdir(artifactDir, { recursive: true })
-  return {
-    root,
-    artifactDir,
-    async close() {
-      await rm(root, { recursive: true, force: true })
-    },
-  }
+async function fixture(): Promise<{ root: string; filesRoot: string }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-outcome-v2-'))
+  const filesRoot = path.join(root, 'artifacts', 'run', 'files')
+  await mkdir(filesRoot, { recursive: true })
+  return { root, filesRoot }
 }
 
-async function writeOutcome(artifactDir: string, value: unknown): Promise<string> {
-  const target = path.join(artifactDir, ...RUN_OUTCOME_RELATIVE_PATH.split('/'))
+async function writeOutcome(filesRoot: string, value: unknown): Promise<string> {
+  const target = path.join(filesRoot, ...RUN_OUTCOME_RELATIVE_PATH.split('/'))
   await mkdir(path.dirname(target), { recursive: true })
   await writeFile(target, `${JSON.stringify(value)}\n`, 'utf8')
   return target
 }
 
-test('reads a bounded, exact v1 run outcome', async () => {
+test('reads a bounded exact outcome sidecar and normalizes optional dependency arrays', async () => {
   const subject = await fixture()
   try {
-    await writeOutcome(subject.artifactDir, outcome())
-    assert.deepEqual(await readRunOutcome(subject.artifactDir), outcome())
+    await writeOutcome(subject.filesRoot, outcome())
+    const parsed = await readRunOutcome(subject.filesRoot)
+    assert.equal(parsed?.schemaVersion, 2)
+    assert.deepEqual(parsed?.outputs[0]?.derivedFrom, [])
+    assert.deepEqual(parsed?.taskProposals[0]?.dependsOn, [])
   } finally {
-    await subject.close()
+    await rm(subject.root, { recursive: true, force: true })
   }
 })
 
-test('missing, malformed, oversized, and unknown outcomes are non-fatal', async (t) => {
-  await t.test('missing', async () => {
-    const subject = await fixture()
-    try {
-      assert.equal(await readRunOutcome(subject.artifactDir), undefined)
-    } finally {
-      await subject.close()
-    }
-  })
+test('missing, malformed, unsupported, extra-field, and oversized outcome sidecars are ignored', async () => {
+  const subject = await fixture()
+  try {
+    assert.equal(await readRunOutcome(subject.filesRoot), undefined)
 
-  await t.test('malformed or non-exact schema', async () => {
-    const subject = await fixture()
-    try {
-      const target = await writeOutcome(subject.artifactDir, outcome())
-      await writeFile(target, '{not json', 'utf8')
-      assert.equal(await readRunOutcome(subject.artifactDir), undefined)
+    const target = await writeOutcome(subject.filesRoot, outcome())
+    await writeFile(target, '{not json', 'utf8')
+    assert.equal(await readRunOutcome(subject.filesRoot), undefined)
 
-      await writeOutcome(subject.artifactDir, { ...outcome(), unexpected: true })
-      assert.equal(await readRunOutcome(subject.artifactDir), undefined)
+    await writeOutcome(subject.filesRoot, { ...outcome(), schemaVersion: 3 })
+    assert.equal(await readRunOutcome(subject.filesRoot), undefined)
 
-      const duplicate = outcome()
-      duplicate.suggestedActions[1] = {
-        ...duplicate.suggestedActions[0] as TestOutcome['suggestedActions'][number],
-        id: 'different-id',
-      }
-      await writeOutcome(subject.artifactDir, duplicate)
-      assert.equal(await readRunOutcome(subject.artifactDir), undefined)
+    await writeOutcome(subject.filesRoot, { ...outcome(), runId: 'agent-owned' })
+    assert.equal(await readRunOutcome(subject.filesRoot), undefined)
 
-      const controlLabel = outcome()
-      controlLabel.suggestedActions[0] = {
-        ...controlLabel.suggestedActions[0] as TestOutcome['suggestedActions'][number],
-        label: 'Unsafe\nlabel',
-      }
-      await writeOutcome(subject.artifactDir, controlLabel)
-      assert.equal(await readRunOutcome(subject.artifactDir), undefined)
-    } finally {
-      await subject.close()
-    }
-  })
-
-  await t.test('oversized', async () => {
-    const subject = await fixture()
-    try {
-      const target = path.join(subject.artifactDir, ...RUN_OUTCOME_RELATIVE_PATH.split('/'))
-      await mkdir(path.dirname(target), { recursive: true })
-      await writeFile(target, Buffer.alloc(MAX_RUN_OUTCOME_BYTES + 1, 0x20))
-      assert.equal(await readRunOutcome(subject.artifactDir), undefined)
-    } finally {
-      await subject.close()
-    }
-  })
-
-  await t.test('unknown version', async () => {
-    const subject = await fixture()
-    try {
-      await writeOutcome(subject.artifactDir, { ...outcome(), schemaVersion: 2 })
-      assert.equal(await readRunOutcome(subject.artifactDir), undefined)
-    } finally {
-      await subject.close()
-    }
-  })
+    await writeFile(target, Buffer.alloc(MAX_RUN_OUTCOME_BYTES + 1, 0x20))
+    assert.equal(await readRunOutcome(subject.filesRoot), undefined)
+  } finally {
+    await rm(subject.root, { recursive: true, force: true })
+  }
 })
 
-test('symlinked outcome files and control directories are ignored', async (t) => {
+test('symlinked outcome sidecars and control directories are ignored', async (t) => {
   await t.test('sidecar symlink', async () => {
     const subject = await fixture()
-    const outside = await mkdtemp(path.join(os.tmpdir(), 'ggai-outcome-outside-'))
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'ggai-outcome-v2-outside-'))
     try {
       const outsideFile = path.join(outside, 'run-result.json')
-      await writeFile(outsideFile, JSON.stringify(outcome('Outside')), 'utf8')
-      const target = path.join(subject.artifactDir, ...RUN_OUTCOME_RELATIVE_PATH.split('/'))
+      await writeFile(outsideFile, JSON.stringify(outcome()), 'utf8')
+      const target = path.join(subject.filesRoot, ...RUN_OUTCOME_RELATIVE_PATH.split('/'))
       await mkdir(path.dirname(target), { recursive: true })
       await symlink(outsideFile, target)
-      assert.equal(await readRunOutcome(subject.artifactDir), undefined)
+      assert.equal(await readRunOutcome(subject.filesRoot), undefined)
     } finally {
       await Promise.all([
-        subject.close(),
+        rm(subject.root, { recursive: true, force: true }),
         rm(outside, { recursive: true, force: true }),
       ])
     }
@@ -139,20 +98,34 @@ test('symlinked outcome files and control directories are ignored', async (t) =>
 
   await t.test('control directory symlink', async () => {
     const subject = await fixture()
-    const outside = await mkdtemp(path.join(os.tmpdir(), 'ggai-outcome-dir-outside-'))
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'ggai-outcome-v2-dir-outside-'))
     try {
-      await writeFile(
-        path.join(outside, 'run-result.json'),
-        JSON.stringify(outcome('Outside directory')),
-        'utf8',
-      )
-      await symlink(outside, path.join(subject.artifactDir, '.ggai'), 'dir')
-      assert.equal(await readRunOutcome(subject.artifactDir), undefined)
+      await writeFile(path.join(outside, 'run-result.json'), JSON.stringify(outcome()), 'utf8')
+      await symlink(outside, path.join(subject.filesRoot, '.ggai'), 'dir')
+      assert.equal(await readRunOutcome(subject.filesRoot), undefined)
     } finally {
       await Promise.all([
-        subject.close(),
+        rm(subject.root, { recursive: true, force: true }),
         rm(outside, { recursive: true, force: true }),
       ])
     }
   })
+})
+
+test('a hard-linked outcome sidecar is treated as foreign and ignored', async () => {
+  const subject = await fixture()
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'ggai-outcome-v2-link-outside-'))
+  try {
+    const outsideFile = path.join(outside, 'run-result.json')
+    await writeFile(outsideFile, JSON.stringify(outcome()), 'utf8')
+    const target = path.join(subject.filesRoot, ...RUN_OUTCOME_RELATIVE_PATH.split('/'))
+    await mkdir(path.dirname(target), { recursive: true })
+    await link(outsideFile, target)
+    assert.equal(await readRunOutcome(subject.filesRoot), undefined)
+  } finally {
+    await Promise.all([
+      rm(subject.root, { recursive: true, force: true }),
+      rm(outside, { recursive: true, force: true }),
+    ])
+  }
 })
