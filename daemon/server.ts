@@ -1,13 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import {
-  createGenerationPreflightRoute,
-} from './http/routes/generationPreflight.js'
-import {
-  createHealthRoute,
-} from './http/routes/health.js'
-import {
-  createRuntimeRoute,
-} from './http/routes/runtime.js'
+import { createBoundedHttpRoutes } from './http/routes/index.js'
 import {
   createHttpRouter,
   setHttpSecurityHeaders,
@@ -53,14 +45,11 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   const context: HttpRouteContext = {
     projectRoot: options.projectRoot,
     registry: daemon.registry,
+    runs: daemon.runs,
     allowedOrigins: new Set(options.allowedOrigins ?? []),
     lifecycle,
   }
-  const router = createHttpRouter([
-    createHealthRoute(),
-    createRuntimeRoute(),
-    createGenerationPreflightRoute(),
-  ])
+  const router = createHttpRouter(createBoundedHttpRoutes())
 
   daemon.server.on('request', (request, response) => {
     void Promise.resolve(router(request, response, context))
