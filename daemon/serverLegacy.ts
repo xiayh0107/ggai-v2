@@ -39,6 +39,7 @@ import {
   CanvasSnapshotError,
 } from './canvasCommandStore.js'
 import { CanvasCommandStoreManager } from './canvasCommandStoreManager.js'
+import type { CapabilityExecutionScopes } from './capabilityScopes.js'
 import {
   parseCanvasConflictRecoveryRequest,
   parseCanvasCommandRequest,
@@ -138,6 +139,7 @@ export interface DaemonServerOptions {
   projectCatalog?: ProjectCatalog
   nodeDefinitionCatalog?: NodeDefinitionCatalog
   skillAssetCatalog?: SkillAssetCatalog
+  capabilityExecutionScopes?: CapabilityExecutionScopes
 }
 
 export interface DaemonServer {
@@ -184,6 +186,8 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   const runs = options.runManager ?? new RunManager({
     projectRoot: options.projectRoot,
     registry,
+    capabilityScopes: options.capabilityExecutionScopes,
+    capabilityProfile: () => registry.runtimeDiagnostics().profile,
     acquireProjectLease: (projectDir) => canvas.acquireProjectLease(projectDir),
     resolveSourceProjectDir: async ({ projectDir, canvasBranch, taskOwned, studioOwned }) => {
       if (!taskOwned && !studioOwned) {
@@ -1024,6 +1028,25 @@ async function route(
             'task does not exist at the requested revision',
             'task_not_found',
             404,
+          )
+        }
+        const [currentAttachments, currentSkills] = await Promise.all([
+          resolveRunIntentAttachments(
+            intent,
+            current.document,
+            context.runs,
+            projectDir,
+            pluginCapabilities,
+          ),
+          resolveRunIntentSkills(intent, current.document, context.skillAssets),
+        ])
+        if (JSON.stringify(currentAttachments) !== JSON.stringify(resolvedAttachments)
+          || currentSkills.digest !== resolvedSkills.digest
+          || JSON.stringify(currentSkills.skills) !== JSON.stringify(resolvedSkills.skills)) {
+          throw new ProtocolError(
+            'Task Run inputs changed before acceptance; retry from the current Canvas state',
+            'run_inputs_changed',
+            409,
           )
         }
       },

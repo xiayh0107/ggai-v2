@@ -9,6 +9,9 @@ import {
   createTaskRunPreflightRoute,
 } from './http/routes/taskRunPreflight.js'
 import {
+  createTaskRunReproducibilityRoute,
+} from './http/routes/taskRunReproducibility.js'
+import {
   createHttpRouter,
   setHttpSecurityHeaders,
   writeHttpJson,
@@ -48,6 +51,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   const context: HttpRouteContext = {
     projectRoot: options.projectRoot,
     registry: daemon.registry,
+    runs: daemon.runs,
     taskRunPreflight,
     allowedOrigins: new Set(options.allowedOrigins ?? []),
     lifecycle,
@@ -56,6 +60,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     createHealthRoute(),
     createRuntimeRoute(),
     createTaskRunPreflightRoute(),
+    createTaskRunReproducibilityRoute(),
   ])
 
   daemon.server.on('request', (request, response) => {

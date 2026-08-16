@@ -90,6 +90,11 @@ export class DaemonApplication {
   async #closeApplication(): Promise<void> {
     const errors: unknown[] = []
     try {
+      if (this.#daemon) await this.#daemon.runs.close()
+    } catch (error) {
+      errors.push(error)
+    }
+    try {
       await this.scopes.dispose()
     } catch (error) {
       errors.push(error)
@@ -110,6 +115,7 @@ export class DaemonApplication {
       ...this.config,
       registry: this.registry,
       skillAssetCatalog: this.skillAssets,
+      capabilityExecutionScopes: this.scopes,
     })
     return this.#daemon
   }

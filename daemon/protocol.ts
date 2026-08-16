@@ -86,6 +86,10 @@ export interface RunSummary {
   pluginCapabilityDigest?: string
   /** Exact Node-bound skill set and authority sources fixed at Run acceptance. */
   skillCapabilityDigest?: string
+  /** Digest of the immutable Run Capability Receipt pinned before transport start. */
+  capabilityReceiptDigest?: string
+  /** Friendly historical labels/counts captured at acceptance; contains no raw capability data. */
+  reproducibilitySnapshot?: RunReproducibilitySnapshot
   /** Internal product surface that owns a non-Canvas Run. */
   runKind?: 'node-studio'
   /** Optimistic concurrency base pinned when a Node Studio Run starts. */
@@ -97,6 +101,13 @@ export interface RunSummary {
   sessionId: string | null
   error?: string
   logAvailable?: boolean
+}
+
+export interface RunReproducibilitySnapshot {
+  generationService: string
+  skillCount: number
+  attachmentCount: number
+  capabilityProfileLabel: string
 }
 
 export interface RunClosePayload {

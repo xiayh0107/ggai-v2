@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AgentRegistry } from '../registry.js'
+import type { RunManager } from '../runs.js'
 import type { TaskRunPreflightService } from '../taskRunPreflight.js'
 
 const DEFAULT_BROWSER_ORIGINS = new Set([
@@ -11,6 +12,7 @@ const DEFAULT_BROWSER_ORIGINS = new Set([
 export interface HttpRouteContext {
   readonly projectRoot: string
   readonly registry: AgentRegistry
+  readonly runs: RunManager
   readonly taskRunPreflight: TaskRunPreflightService
   readonly allowedOrigins: Set<string>
   readonly lifecycle: { closing: boolean }

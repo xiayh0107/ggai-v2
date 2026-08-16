@@ -78,6 +78,27 @@ export function resolvedTaskSkillCapabilityDigest(
 
 export const EMPTY_SKILL_CAPABILITY_DIGEST = resolvedTaskSkillCapabilityDigest([])
 
+export function resolvedTaskAttachmentCapabilityDigest(
+  request: Pick<
+    ResolvedTaskRunRequest,
+    'attachments' | 'resolvedArtifactAttachments' | 'resolvedNodeAttachments'
+  >,
+): string {
+  const artifacts = structuredClone(request.resolvedArtifactAttachments)
+    .sort((left, right) => left.runId.localeCompare(right.runId)
+      || left.artifactId.localeCompare(right.artifactId))
+  const nodes = structuredClone(request.resolvedNodeAttachments)
+    .sort((left, right) => left.id.localeCompare(right.id))
+  return createHash('sha256')
+    .update('ggai.run-attachment-capabilities.v1\0', 'utf8')
+    .update(JSON.stringify({
+      intent: request.attachments,
+      artifacts,
+      nodes,
+    }), 'utf8')
+    .digest('hex')
+}
+
 export function pinResolvedTaskSkills(
   value: unknown,
   expectedDigest: unknown,
