@@ -150,7 +150,7 @@ function CanvasTaskRunPanelContent({
     || active
     || submitting
     || cancelling
-    || preflightState.status !== 'ready'
+    || preflightState.status === 'blocked'
   const ownedNodes = canvasState.document.nodes.filter((node) => node.homeTaskId === task.id)
   const outputPlugin = ownedNodes.length === 1 ? getPlugin(ownedNodes[0].type) : null
   const panelTitle = ownedNodes.length === 1

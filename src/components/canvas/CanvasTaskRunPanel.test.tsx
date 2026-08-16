@@ -32,6 +32,10 @@ import {
   CanvasRunLogViewerContext,
   type OpenCanvasRunLogViewer,
 } from '@/canvas/runLogViewerContext'
+import type {
+  ProjectArtifactCatalogApi,
+  ProjectArtifactResource,
+} from '@/resources/artifactCatalogClient'
 import CanvasTaskRunPanel from './CanvasTaskRunPanel'
 
 const task = {
@@ -191,6 +195,7 @@ async function renderHarness(input: {
   strict?: boolean
   openRunLogViewer?: OpenCanvasRunLogViewer
   preflightApi?: TaskRunPreflightApi
+  artifactCatalogApi?: Pick<ProjectArtifactCatalogApi, 'list'>
 } = {}) {
   const store = input.store ?? makeStore()
   const controller = input.controller ?? new FakeController()
@@ -205,7 +210,11 @@ async function renderHarness(input: {
         daemonClient={daemon}
         controllerFactory={controller.factory}
       >
-        <CanvasTaskRunPanel task={task} preflightApi={input.preflightApi ?? readyPreflightApi} />
+        <CanvasTaskRunPanel
+          task={task}
+          preflightApi={input.preflightApi ?? readyPreflightApi}
+          artifactCatalogApi={input.artifactCatalogApi}
+        />
       </CanvasTaskRunProvider>
     </CanvasProvider>
   )
@@ -334,6 +343,61 @@ describe('Canvas Task Run panel', () => {
     expect(submit.disabled).toBe(false)
     await act(async () => submit.click())
     expect(controller.runTaskMock).toHaveBeenCalledOnce()
+  })
+
+  it('forwards only verified artifact identity through preflight and Run intent', async () => {
+    const artifact: ProjectArtifactResource = {
+      runId: 'run-reference',
+      artifactId,
+      taskId: 'task-reference',
+      canvasBranch: branch,
+      relativePath: 'images/reference.png',
+      mediaType: 'image/png',
+      size: 2_048,
+      contentDigest: 'b'.repeat(64),
+      createdAt: 1_700_000_000_000,
+    }
+    const list = vi.fn(async () => ({
+      schemaVersion: 2 as const,
+      artifacts: [artifact],
+      truncated: false,
+      partial: false,
+      nextCursor: null,
+    }))
+    const check = vi.fn<TaskRunPreflightApi['check']>(
+      async () => ({ status: 'ready', issues: [] }),
+    )
+    const { controller, host } = await renderHarness({
+      artifactCatalogApi: { list },
+      preflightApi: { check },
+    })
+
+    await act(async () => required<HTMLButtonElement>(host, '[aria-label="添加附件"]').click())
+    await vi.waitFor(() => expect(list).toHaveBeenCalledOnce())
+    const picker = required<HTMLElement>(document.body, '[role="dialog"][aria-label="添加附件"]')
+    await vi.waitFor(() => expect(picker.textContent).toContain('reference.png'))
+    await act(async () => required<HTMLButtonElement>(picker, '[role="checkbox"]').click())
+
+    expect(required(host, '[aria-label="已添加附件"]').textContent).toContain('reference.png')
+    await vi.waitFor(() => expect(check.mock.calls.some(([input]) =>
+      input.attachments?.some((attachment) => attachment.kind === 'artifact'
+        && attachment.runId === artifact.runId
+        && attachment.artifactId === artifact.artifactId))).toBe(true))
+    await vi.waitFor(() => expect(host.getAttribute('data-preflight-status')).toBe('ready'))
+
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      `[aria-label="开始任务${task.title}"]`,
+    ).click())
+    expect(controller.runTaskMock).toHaveBeenCalledWith({
+      taskId: task.id,
+      agentId: 'codex',
+      attachments: [{
+        kind: 'artifact',
+        runId: artifact.runId,
+        artifactId: artifact.artifactId,
+      }],
+    })
   })
 
   it('keeps suggested actions as branch-local drafts and never auto-runs under StrictMode', async () => {

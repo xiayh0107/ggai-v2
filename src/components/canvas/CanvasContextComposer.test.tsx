@@ -287,10 +287,10 @@ describe('Canvas context composer', () => {
       signal: expect.any(AbortSignal),
     }))
     await vi.waitFor(() => {
-      expect(container?.textContent).toContain('reference.png')
+      expect(document.body.textContent).toContain('reference.png')
     })
     await act(async () => {
-      ;(container?.querySelector('[role="checkbox"]') as HTMLButtonElement).click()
+      ;(document.querySelector('[role="checkbox"]') as HTMLButtonElement).click()
     })
     expect(container?.querySelector('[aria-label="已添加附件"]')?.textContent)
       .toContain('reference.png')
