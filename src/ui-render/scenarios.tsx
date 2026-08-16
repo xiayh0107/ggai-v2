@@ -27,6 +27,10 @@ import type {
 } from '@/canvas/runController'
 import { CanvasStore } from '@/canvas/store'
 import CanvasTaskRunPanel from '@/components/canvas/CanvasTaskRunPanel'
+import type {
+  ProjectArtifactCatalogApi,
+  ProjectArtifactResource,
+} from '@/resources/artifactCatalogClient'
 
 interface UiRenderScenario {
   id: string
@@ -51,6 +55,30 @@ const BLOCKED: TaskRunPreflightResult = {
     retryable: true,
   }],
 }
+const RESOURCES: ProjectArtifactResource[] = [
+  {
+    runId: 'run-reference-image',
+    artifactId: `artifact_${'a'.repeat(64)}`,
+    taskId: 'task-reference',
+    canvasBranch: 'main',
+    relativePath: 'figures/reference-layout.png',
+    mediaType: 'image/png',
+    size: 248_320,
+    contentDigest: 'b'.repeat(64),
+    createdAt: 1_765_843_200_000,
+  },
+  {
+    runId: 'run-reference-table',
+    artifactId: `artifact_${'c'.repeat(64)}`,
+    taskId: 'task-reference-table',
+    canvasBranch: 'main',
+    relativePath: 'data/summary.csv',
+    mediaType: 'text/csv',
+    size: 18_432,
+    contentDigest: 'd'.repeat(64),
+    createdAt: 1_765_843_100_000,
+  },
+]
 
 const scenarios: readonly UiRenderScenario[] = [
   {
@@ -63,6 +91,18 @@ const scenarios: readonly UiRenderScenario[] = [
     title: '空输出节点 · 生成服务需要处理',
     render: () => <TaskRunScenario id="task-run-preflight-blocked" preflight={BLOCKED} />,
   },
+  {
+    id: 'task-run-attachments',
+    title: '空输出节点 · 从生成内容选择可信附件',
+    render: () => (
+      <TaskRunScenario
+        id="task-run-attachments"
+        preflight={READY}
+        initialAttachments={[RESOURCES[0]]}
+        initialAttachmentPickerOpen
+      />
+    ),
+  },
 ]
 
 export function getUiRenderScenario(id: string): UiRenderScenario {
@@ -74,9 +114,13 @@ export function getUiRenderScenario(id: string): UiRenderScenario {
 function TaskRunScenario({
   id,
   preflight,
+  initialAttachments = [],
+  initialAttachmentPickerOpen = false,
 }: {
   id: string
   preflight: TaskRunPreflightResult
+  initialAttachments?: readonly ProjectArtifactResource[]
+  initialAttachmentPickerOpen?: boolean
 }) {
   const store = useMemo(() => createStore(), [])
   const controller = useMemo(() => new RenderController(), [])
@@ -84,6 +128,7 @@ function TaskRunScenario({
   const preflightApi = useMemo<TaskRunPreflightApi>(() => ({
     check: async () => structuredClone(preflight),
   }), [preflight])
+  const artifactCatalogApi = useMemo(() => renderArtifactApi(), [])
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
 
   return (
@@ -99,7 +144,14 @@ function TaskRunScenario({
           controllerFactory={controller.factory}
         >
           <div className="w-[460px]">
-            <CanvasTaskRunPanel task={task} width={460} preflightApi={preflightApi} />
+            <CanvasTaskRunPanel
+              task={task}
+              width={460}
+              preflightApi={preflightApi}
+              artifactCatalogApi={artifactCatalogApi}
+              initialAttachments={initialAttachments}
+              initialAttachmentPickerOpen={initialAttachmentPickerOpen}
+            />
           </div>
         </CanvasTaskRunProvider>
       </CanvasProvider>
@@ -152,6 +204,18 @@ function renderDaemonClient(): CanvasTaskRunDaemonApi {
   return {
     resolvePermission: async () => undefined,
   } as unknown as CanvasTaskRunDaemonApi
+}
+
+function renderArtifactApi(): Pick<ProjectArtifactCatalogApi, 'list'> {
+  return {
+    list: async () => ({
+      schemaVersion: 2,
+      artifacts: structuredClone(RESOURCES),
+      truncated: false,
+      partial: false,
+      nextCursor: null,
+    }),
+  }
 }
 
 class RenderController implements CanvasTaskRunControllerLike {
