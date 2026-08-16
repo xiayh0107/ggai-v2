@@ -12,6 +12,10 @@ import {
 import { useCanvasState, useCanvasStore } from '@/canvas/hooks'
 import type { CanvasNode } from '@/canvas/model'
 import {
+  useOptionalCanvasWorkbenchController,
+  type CanvasWorkbenchSection,
+} from '@/canvas/workbenchController'
+import {
   getPluginRegistryVersion,
   subscribePlugins,
 } from '@/plugins/types'
@@ -20,8 +24,6 @@ import type { SkillAssetApi } from '@/skills/client'
 import CanvasWorkbenchNodes from './CanvasWorkbenchNodes'
 import CanvasWorkbenchResources from './CanvasWorkbenchResources'
 import CanvasWorkbenchSkills from './CanvasWorkbenchSkills'
-
-export type CanvasWorkbenchSection = 'search' | 'nodes' | 'resources' | 'skills'
 
 interface CanvasWorkbenchProps {
   projectId?: string
@@ -67,14 +69,24 @@ export default function CanvasWorkbench({
 }: CanvasWorkbenchProps) {
   const store = useCanvasStore()
   const state = useCanvasState()
+  const controller = useOptionalCanvasWorkbenchController()
   useSyncExternalStore(
     subscribePlugins,
     getPluginRegistryVersion,
     getPluginRegistryVersion,
   )
-  const [section, setSection] = useState<CanvasWorkbenchSection | null>(null)
-  const selectedNode = selectedCanvasNode(state.document.nodes, state.view.selection)
+  const [localSection, setLocalSection] = useState<CanvasWorkbenchSection | null>(null)
+  const section = controller?.section ?? localSection
+  const setSection = (next: CanvasWorkbenchSection | null) => {
+    if (!controller) {
+      setLocalSection(next)
+      return
+    }
+    if (next) controller.openSection(next)
+    else controller.closeSection()
+  }
   const sectionMeta = section ? SECTION_META[section] : null
+  const selectedNode = selectedCanvasNode(state.document.nodes, state.view.selection)
 
   const selectAndLocate = (node: CanvasNode) => {
     const zoom = state.view.camera.zoom
@@ -118,7 +130,9 @@ export default function CanvasWorkbench({
               aria-label={SECTION_META[item].label}
               aria-expanded={active}
               title={SECTION_META[item].label}
-              onClick={() => setSection(active ? null : item)}
+              onClick={() => controller
+                ? controller.toggleSection(item)
+                : setLocalSection(active ? null : item)}
               className={`flex h-9 w-9 items-center justify-center rounded-[9px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-gg-primary/35 ${
                 active
                   ? 'bg-gg-subtle text-gg-primary'

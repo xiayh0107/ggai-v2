@@ -18,6 +18,18 @@
       "title": "空输出节点 · 从生成内容选择可信附件",
       "viewport": { "width": 820, "height": 720 },
       "readySelector": "body:has([data-ui-render-scenario='task-run-attachments'][data-ui-render-settled='true']) > [role='dialog'][aria-label='添加附件'] [role='checkbox']"
+    },
+    {
+      "id": "task-run-skills-summary",
+      "title": "空输出节点 · Skills 摘要入口",
+      "viewport": { "width": 760, "height": 540 },
+      "readySelector": "[data-ui-render-scenario='task-run-skills-summary'][data-ui-render-settled='true'] [data-testid='canvas-task-skills-summary']"
+    },
+    {
+      "id": "task-run-skills-workbench",
+      "title": "空输出节点 · 打开既有节点 Skills 工作台",
+      "viewport": { "width": 1280, "height": 800 },
+      "readySelector": "[data-ui-render-scenario='task-run-skills-workbench'][data-ui-render-settled='true'] [aria-label='节点 Skills'] [aria-label='可用 Skills']"
     }
   ]
 }

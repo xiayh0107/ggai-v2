@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { StrictMode, act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { MemoryRouter } from 'react-router'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { TaskRunPreflightApi } from '@/agent/taskRunPreflightClient'
 import type {
@@ -28,6 +29,7 @@ import type {
 } from '@/canvas/runController'
 import { CanvasStore } from '@/canvas/store'
 import { taskComposerDraftKey } from '@/canvas/taskRunUi'
+import { CanvasWorkbenchControllerProvider } from '@/canvas/workbenchController'
 import {
   CanvasRunLogViewerContext,
   type OpenCanvasRunLogViewer,
@@ -36,7 +38,9 @@ import type {
   ProjectArtifactCatalogApi,
   ProjectArtifactResource,
 } from '@/resources/artifactCatalogClient'
+import type { SkillAssetApi } from '@/skills/client'
 import CanvasTaskRunPanel from './CanvasTaskRunPanel'
+import CanvasWorkbench from './CanvasWorkbench'
 
 const task = {
   id: 'task-1',
@@ -196,6 +200,7 @@ async function renderHarness(input: {
   openRunLogViewer?: OpenCanvasRunLogViewer
   preflightApi?: TaskRunPreflightApi
   artifactCatalogApi?: Pick<ProjectArtifactCatalogApi, 'list'>
+  skillApi?: SkillAssetApi
 } = {}) {
   const store = input.store ?? makeStore()
   const controller = input.controller ?? new FakeController()
@@ -203,19 +208,45 @@ async function renderHarness(input: {
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
+  const artifactCatalogApi = input.artifactCatalogApi ?? {
+    list: async () => ({
+      schemaVersion: 2 as const,
+      artifacts: [],
+      truncated: false,
+      partial: false,
+      nextCursor: null,
+    }),
+  }
+  const runSurface = (
+    <CanvasTaskRunProvider
+      store={store}
+      daemonClient={daemon}
+      controllerFactory={controller.factory}
+    >
+      <CanvasTaskRunPanel
+        task={task}
+        preflightApi={input.preflightApi ?? readyPreflightApi}
+        artifactCatalogApi={artifactCatalogApi}
+      />
+      {input.skillApi && (
+        <CanvasWorkbench
+          projectId="test-project"
+          artifactApi={{ ...artifactCatalogApi, artifactUrl: () => 'about:blank' }}
+          skillApi={input.skillApi}
+          onOpenHistory={() => undefined}
+        />
+      )}
+    </CanvasTaskRunProvider>
+  )
   const panel = (
     <CanvasProvider store={store}>
-      <CanvasTaskRunProvider
-        store={store}
-        daemonClient={daemon}
-        controllerFactory={controller.factory}
-      >
-        <CanvasTaskRunPanel
-          task={task}
-          preflightApi={input.preflightApi ?? readyPreflightApi}
-          artifactCatalogApi={input.artifactCatalogApi}
-        />
-      </CanvasTaskRunProvider>
+      {input.skillApi ? (
+        <MemoryRouter>
+          <CanvasWorkbenchControllerProvider skillApi={input.skillApi}>
+            {runSurface}
+          </CanvasWorkbenchControllerProvider>
+        </MemoryRouter>
+      ) : runSurface}
     </CanvasProvider>
   )
   const tree = input.openRunLogViewer
@@ -398,6 +429,57 @@ describe('Canvas Task Run panel', () => {
         artifactId: artifact.artifactId,
       }],
     })
+  })
+
+  it('opens the existing Node Skills workbench from the effective Skills summary', async () => {
+    const skillRef = {
+      skillId: 'figure-layout',
+      revision: 2,
+      digest: 'c'.repeat(64),
+    }
+    const list = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      assets: [{
+        schemaVersion: 1 as const,
+        ...skillRef,
+        title: '科研图形布局',
+        description: '保持图形层级清晰。',
+        entrypoint: 'SKILL.md' as const,
+        fileCount: 2,
+        totalBytes: 4_096,
+        importedAt: '2026-08-16T00:00:00.000Z',
+        archived: false,
+      }],
+      typeBindings: [{
+        schemaVersion: 1 as const,
+        nodeType: 'image',
+        revision: 3,
+        skills: [skillRef],
+        updatedAt: '2026-08-16T00:00:00.000Z',
+      }],
+    }))
+    const skillApi = {
+      list,
+      import: vi.fn(),
+      archive: vi.fn(),
+      updateTypeBindings: vi.fn(),
+    } as unknown as SkillAssetApi
+    const { store, host } = await renderHarness({
+      store: makeStore(canvasDocument(true)),
+      skillApi,
+    })
+
+    const summary = await vi.waitFor(() => required<HTMLButtonElement>(
+      host,
+      '[data-testid="canvas-task-skills-summary"]',
+    ))
+    expect(summary.textContent).toContain('Skills 1')
+    await act(async () => summary.click())
+
+    expect(store.getSnapshot().view.selection).toEqual([{ kind: 'node', id: 'node-1' }])
+    expect(required(container, '[aria-label="节点 Skills"]')).not.toBeNull()
+    await vi.waitFor(() => expect(required(container, '[aria-label="可用 Skills"]').textContent)
+      .toContain('科研图形布局'))
   })
 
   it('keeps suggested actions as branch-local drafts and never auto-runs under StrictMode', async () => {
