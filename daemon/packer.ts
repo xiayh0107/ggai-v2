@@ -637,6 +637,7 @@ async function prepareTaskRunContext(
     pluginCapabilities: request.pluginCapabilities,
     skillCapabilities: {
       digest: request.skillCapabilityDigest,
+      resolverDigest: request.skillResolverCapabilityDigest,
       skills,
     },
   }, null, 2)}\n`

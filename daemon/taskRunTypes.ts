@@ -245,6 +245,9 @@ export interface ResolvedTaskRunRequest extends RunIntent {
   resolvedSkills: ResolvedTaskSkill[]
   /** Digest of refs, display metadata, and authority sources fixed at Run acceptance. */
   skillCapabilityDigest: string
+  /** Workspace SkillResolver semantic digest and provider fixed at acceptance. */
+  skillResolverCapabilityDigest: string
+  skillResolverProvider: string
   /** Daemon-resolved immutable registry. Absent callers are pinned to built-ins at acceptance. */
   pluginCapabilities?: ProjectionPluginCapabilitySnapshot
   automationMode: 'confirm'

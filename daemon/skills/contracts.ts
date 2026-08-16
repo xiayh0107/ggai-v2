@@ -7,13 +7,16 @@ export interface SkillCatalogReader {
   resolve(refs: readonly SkillAssetRef[]): Promise<ResolvedSkillAsset[]>
 }
 
-export interface SkillResolution {
+export interface ResolvedSkillCapability {
   readonly assets: readonly ResolvedSkillAsset[]
   readonly digest: string
 }
 
+/** Compatibility name for providers compiled against the first capability slice. */
+export type SkillResolution = ResolvedSkillCapability
+
 export interface SkillResolver {
-  resolve(refs: readonly SkillAssetRef[]): Promise<SkillResolution>
+  resolve(refs: readonly SkillAssetRef[]): Promise<ResolvedSkillCapability>
 }
 
 export const SKILL_CATALOG_READER_SERVICE =

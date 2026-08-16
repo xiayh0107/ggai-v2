@@ -1,13 +1,12 @@
 import type { Server } from 'node:http'
 import { CapabilityExecutionScopes } from './capabilityScopes.js'
-import { createWorkspaceSkillResolverPlugin } from './plugins/skillResolver/workspace.js'
-import { ProjectionContributionRegistry, PROJECTION_CONTRIBUTION_REGISTRY_SERVICE } from './projectionContributions.js'
+import { ProjectionContributionRegistry } from './projectionContributions.js'
 import { AgentRegistry } from './registry.js'
 import { inspectRuntimeDoctor, type RuntimeDoctorReport } from './runtimeDoctor.js'
 import { createDaemonServer, type DaemonServer } from './server.js'
-import { SKILL_CATALOG_READER_SERVICE } from './skills/contracts.js'
 import { SkillAssetCatalog } from './skillAssets.js'
 import type { DaemonConfig } from './startupOptions.js'
+import { installWorkspaceCapabilityProviders } from './workspaceRuntime.js'
 
 export class DaemonApplication {
   readonly config: DaemonConfig
@@ -31,17 +30,10 @@ export class DaemonApplication {
     this.skillAssets = new SkillAssetCatalog(config.projectRoot)
     this.projectionContributions = new ProjectionContributionRegistry()
     const workspace = this.scopes.workspace(config.projectRoot)
-    workspace.services.provide(
-      SKILL_CATALOG_READER_SERVICE,
-      this.skillAssets,
-      '@ggai/skill-catalog-authority',
-    )
-    workspace.services.provide(
-      PROJECTION_CONTRIBUTION_REGISTRY_SERVICE,
-      this.projectionContributions,
-      '@ggai/projection-contribution-authority',
-    )
-    workspace.mountSync(createWorkspaceSkillResolverPlugin())
+    installWorkspaceCapabilityProviders(workspace, {
+      skillCatalog: this.skillAssets,
+      projectionContributions: this.projectionContributions,
+    })
   }
 
   get server(): Server {

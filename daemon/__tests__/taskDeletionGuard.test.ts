@@ -91,6 +91,8 @@ function taskRequest(
     resolvedNodeAttachments: [],
     resolvedSkills: [],
     skillCapabilityDigest: EMPTY_SKILL_CAPABILITY_DIGEST,
+    skillResolverCapabilityDigest: 'a'.repeat(64),
+    skillResolverProvider: '@ggai/test-skill-resolver',
     automationMode: 'confirm',
   }
 }

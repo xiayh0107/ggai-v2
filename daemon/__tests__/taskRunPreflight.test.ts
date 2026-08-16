@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { CanvasDocument, CanvasNode } from '../../src/canvas/model.js'
 import type { AgentDescriptor } from '../protocol.js'
+import type { SkillResolver } from '../skills/contracts.js'
 import {
   parseTaskRunPreflightRequest,
   TaskRunPreflightService,
@@ -64,6 +65,9 @@ test('preflight reports stable UI issues for service, continuity, and canvas sta
 
   const changed = await service({ revision: REQUEST.baseRevision + 1 }).inspect(REQUEST)
   assert.deepEqual(issueCodes(changed), ['canvas_revision_changed'])
+
+  const missingResolver = await service({ resolverMissing: true }).inspect(REQUEST)
+  assert.deepEqual(issueCodes(missingResolver), ['skill_unavailable'])
 })
 
 test('preflight validates Node attachments and effective Skills against the exact revision', async () => {
@@ -100,7 +104,8 @@ interface ServiceOverrides {
   revision?: number
   nodes?: CanvasNode[]
   sessionAgentId?: string
-  resolveSkills?: TaskRunPreflightDependencies['skillAssets']['resolve']
+  resolveSkills?: SkillResolver['resolve']
+  resolverMissing?: boolean
 }
 
 function service(overrides: ServiceOverrides = {}): TaskRunPreflightService {
@@ -149,7 +154,18 @@ function service(overrides: ServiceOverrides = {}): TaskRunPreflightService {
     },
     skillAssets: {
       typeBindings: async () => new Map(),
-      resolve: overrides.resolveSkills ?? (async () => []),
+    },
+    skillResolver: () => {
+      if (overrides.resolverMissing) throw new Error('resolver unavailable')
+      return {
+        resolver: {
+          resolve: overrides.resolveSkills ?? (async () => ({
+            assets: [],
+            digest: 'a'.repeat(64),
+          })),
+        },
+        provider: '@ggai/test-skill-resolver',
+      }
     },
   } as unknown as TaskRunPreflightDependencies
   return new TaskRunPreflightService(dependencies)

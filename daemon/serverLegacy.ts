@@ -6,7 +6,6 @@ import type { Socket } from 'node:net'
 import path from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { CanvasCommandError, type CanvasCommand } from '../src/canvas/commands.js'
-import { selectDirectTaskInputEdges } from '../src/canvas/contextEdges.js'
 import type {
   CanvasDocument,
   CanvasNode,
@@ -29,7 +28,6 @@ import type { NodeContextPolicy } from '../src/plugins/contextContracts.js'
 import {
   SKILL_ASSET_SCHEMA_VERSION,
   canonicalSkillAssetRefs,
-  effectiveNodeSkillRefs,
   isNodeTypeId,
   isSkillId,
 } from '../src/skills/contracts.js'
@@ -39,7 +37,7 @@ import {
   CanvasSnapshotError,
 } from './canvasCommandStore.js'
 import { CanvasCommandStoreManager } from './canvasCommandStoreManager.js'
-import type { CapabilityExecutionScopes } from './capabilityScopes.js'
+import { CapabilityExecutionScopes } from './capabilityScopes.js'
 import {
   parseCanvasConflictRecoveryRequest,
   parseCanvasCommandRequest,
@@ -77,6 +75,8 @@ import {
   projectDescriptorFromCanvasEnvelope,
 } from './projectCatalog.js'
 import { AgentRegistry } from './registry.js'
+import type { ServiceReader } from './runtime/services.js'
+import { SKILL_RESOLVER_SERVICE, type SkillResolver } from './skills/contracts.js'
 import { NodeDefinitionCatalog } from './nodeDefinitionCatalog.js'
 import {
   SkillAssetCatalog,
@@ -101,10 +101,9 @@ import {
   type ResolvedArtifactAttachment,
   type NodeStudioRunRequest,
   type ResolvedNodeAttachment,
-  type ResolvedSkillSource,
-  type ResolvedTaskSkill,
-  resolvedTaskSkillCapabilityDigest,
 } from './taskRunTypes.js'
+import { resolveRunIntentSkills } from './taskRunSkills.js'
+import { installWorkspaceCapabilityProviders } from './workspaceRuntime.js'
 import { TaskSessionsCorruptionError } from './taskSessions.js'
 import {
   WorkspaceVersionManager,
@@ -151,6 +150,7 @@ export interface DaemonServer {
   projects: ProjectCatalog
   nodeDefinitions: NodeDefinitionCatalog
   skillAssets: SkillAssetCatalog
+  workspaceCapabilities: ServiceReader
   close(): Promise<void>
 }
 
@@ -167,6 +167,18 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   }
   if (skillAssets.projectRoot !== path.resolve(options.projectRoot)) {
     throw new TypeError('skillAssetCatalog and daemon server must share a project root')
+  }
+  const capabilityExecutionScopes = options.capabilityExecutionScopes
+    ?? new CapabilityExecutionScopes(registry.runtimeServices)
+  const ownsCapabilityExecutionScopes = options.capabilityExecutionScopes === undefined
+  const workspaceCapabilities = capabilityExecutionScopes
+    .workspace(options.projectRoot)
+    .services
+  if (ownsCapabilityExecutionScopes) {
+    installWorkspaceCapabilityProviders(
+      capabilityExecutionScopes.workspace(options.projectRoot),
+      { skillCatalog: skillAssets },
+    )
   }
   const projectLeases = options.projectLeaseManager ?? new ProjectLeaseManager({
     projectRoot: options.projectRoot,
@@ -186,7 +198,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   const runs = options.runManager ?? new RunManager({
     projectRoot: options.projectRoot,
     registry,
-    capabilityScopes: options.capabilityExecutionScopes,
+    capabilityScopes: capabilityExecutionScopes,
     capabilityProfile: () => registry.runtimeDiagnostics().profile,
     acquireProjectLease: (projectDir) => canvas.acquireProjectLease(projectDir),
     resolveSourceProjectDir: async ({ projectDir, canvasBranch, taskOwned, studioOwned }) => {
@@ -223,6 +235,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
       projects,
       nodeDefinitions,
       skillAssets,
+      workspaceCapabilities,
       projectLeases,
       projectionCanvases,
       allowedOrigins,
@@ -244,6 +257,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     projects,
     nodeDefinitions,
     skillAssets,
+    workspaceCapabilities,
     close() {
       closePromise ??= closeDaemonServer(
         server,
@@ -255,6 +269,8 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
         projects,
         projectLeases,
         lifecycle,
+        capabilityExecutionScopes,
+        ownsCapabilityExecutionScopes,
       )
       return closePromise
     },
@@ -270,6 +286,7 @@ interface RouteContext {
   projects: ProjectCatalog
   nodeDefinitions: NodeDefinitionCatalog
   skillAssets: SkillAssetCatalog
+  workspaceCapabilities: ServiceReader
   projectLeases: ProjectLeaseManager
   projectionCanvases: CanvasProjectionCommitter
   allowedOrigins: Set<string>
@@ -999,10 +1016,13 @@ async function route(
       projectDir,
       pluginCapabilities,
     )
+    const skillResolver = requireWorkspaceSkillResolver(context.workspaceCapabilities)
     const resolvedSkills = await resolveRunIntentSkills(
       intent,
       envelope.document,
       context.skillAssets,
+      skillResolver.resolver,
+      skillResolver.provider,
     )
     const run = await context.runs.create({
       ...intent,
@@ -1012,6 +1032,8 @@ async function route(
       resolvedNodeAttachments: resolvedAttachments.nodes,
       resolvedSkills: resolvedSkills.skills,
       skillCapabilityDigest: resolvedSkills.digest,
+      skillResolverCapabilityDigest: resolvedSkills.resolverDigest,
+      skillResolverProvider: resolvedSkills.resolverProvider,
       pluginCapabilities,
       automationMode: 'confirm',
     }, {
@@ -1030,6 +1052,7 @@ async function route(
             404,
           )
         }
+        const currentResolver = requireWorkspaceSkillResolver(context.workspaceCapabilities)
         const [currentAttachments, currentSkills] = await Promise.all([
           resolveRunIntentAttachments(
             intent,
@@ -1038,10 +1061,18 @@ async function route(
             projectDir,
             pluginCapabilities,
           ),
-          resolveRunIntentSkills(intent, current.document, context.skillAssets),
+          resolveRunIntentSkills(
+            intent,
+            current.document,
+            context.skillAssets,
+            currentResolver.resolver,
+            currentResolver.provider,
+          ),
         ])
         if (JSON.stringify(currentAttachments) !== JSON.stringify(resolvedAttachments)
           || currentSkills.digest !== resolvedSkills.digest
+          || currentSkills.resolverDigest !== resolvedSkills.resolverDigest
+          || currentSkills.resolverProvider !== resolvedSkills.resolverProvider
           || JSON.stringify(currentSkills.skills) !== JSON.stringify(resolvedSkills.skills)) {
           throw new ProtocolError(
             'Task Run inputs changed before acceptance; retry from the current Canvas state',
@@ -1727,6 +1758,22 @@ function assertServerOpen(context: RouteContext): void {
   }
 }
 
+function requireWorkspaceSkillResolver(services: ServiceReader): {
+  resolver: SkillResolver
+  provider: string
+} {
+  const resolver = services.get(SKILL_RESOLVER_SERVICE)
+  const provider = services.ownerOf(SKILL_RESOLVER_SERVICE)
+  if (!resolver || !provider) {
+    throw new ProtocolError(
+      'Workspace Skill Resolver capability is unavailable',
+      'run_skill_unavailable',
+      409,
+    )
+  }
+  return { resolver, provider }
+}
+
 function workspaceProjectionCommitter(
   versions: WorkspaceVersionManager,
 ): CanvasProjectionCommitter {
@@ -1753,6 +1800,8 @@ async function closeDaemonServer(
   projects: ProjectCatalog,
   projectLeases: ProjectLeaseManager,
   lifecycle: { closing: boolean },
+  capabilityExecutionScopes: CapabilityExecutionScopes,
+  ownsCapabilityExecutionScopes: boolean,
 ): Promise<void> {
   lifecycle.closing = true
   const serverClosed = new Promise<void>((resolve, reject) => {
@@ -1767,6 +1816,7 @@ async function closeDaemonServer(
   try {
     // Runs emit their final durable close before versioning and leases close.
     await runs.close()
+    if (ownsCapabilityExecutionScopes) await capabilityExecutionScopes.dispose()
     await registry.dispose()
     await serverClosed
     await versions.close()
@@ -2179,96 +2229,6 @@ export async function resolveRunIntentAttachments(
     })
   }
   return { artifacts, nodes }
-}
-
-export async function resolveRunIntentSkills(
-  intent: RunIntent,
-  document: CanvasDocument,
-  catalog: Pick<SkillAssetCatalog, 'typeBindings' | 'resolve'>,
-): Promise<{ skills: ResolvedTaskSkill[]; digest: string }> {
-  const nodesById = new Map(document.nodes.map((node) => [node.id, node]))
-  const participation = new Map<string, { node: CanvasNode; roles: Set<ResolvedSkillSource['role']> }>()
-  const participate = (node: CanvasNode, role: ResolvedSkillSource['role']) => {
-    const existing = participation.get(node.id)
-    if (existing) existing.roles.add(role)
-    else participation.set(node.id, { node, roles: new Set([role]) })
-  }
-
-  for (const node of document.nodes) {
-    if (node.homeTaskId === intent.taskId) participate(node, 'target')
-  }
-  for (const edge of selectDirectTaskInputEdges(document.edges, intent.taskId)) {
-    if (edge.from.kind === 'node') participate(requireRunSkillNode(nodesById, edge.from.id), 'context')
-  }
-  for (const attachment of intent.attachments) {
-    if (attachment.kind === 'node') {
-      participate(requireRunSkillNode(nodesById, attachment.nodeId), 'attachment')
-    }
-  }
-
-  const typeBindings = await catalog.typeBindings(
-    [...new Set([...participation.values()].map(({ node }) => node.type))],
-  )
-  const requested = new Map<string, { ref: ReturnType<typeof effectiveNodeSkillRefs>[number]; sources: ResolvedSkillSource[] }>()
-  for (const { node, roles } of participation.values()) {
-    const refs = effectiveNodeSkillRefs(typeBindings.get(node.type) ?? [], node.skillBindings)
-    for (const ref of refs) {
-      const existing = requested.get(ref.skillId)
-      if (existing && (existing.ref.revision !== ref.revision
-        || existing.ref.digest !== ref.digest)) {
-        throw new ProtocolError(
-          `participating Nodes bind conflicting revisions of skill ${ref.skillId}`,
-          'skill_binding_conflict',
-          409,
-        )
-      }
-      const entry = existing ?? { ref, sources: [] }
-      for (const role of roles) {
-        if (!entry.sources.some((source) => source.nodeId === node.id && source.role === role)) {
-          entry.sources.push({ kind: 'node', nodeId: node.id, nodeType: node.type, role })
-        }
-      }
-      requested.set(ref.skillId, entry)
-    }
-  }
-
-  const entries = [...requested.values()]
-    .sort((left, right) => left.ref.skillId.localeCompare(right.ref.skillId))
-    .map((entry) => ({
-      ...entry,
-      sources: entry.sources.sort((left, right) =>
-        left.nodeId.localeCompare(right.nodeId) || left.role.localeCompare(right.role)),
-    }))
-  let assets
-  try {
-    assets = await catalog.resolve(entries.map((entry) => entry.ref))
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Run skills are unavailable'
-    throw new ProtocolError(
-      message,
-      message.includes('exceed') ? 'run_skills_too_large' : 'run_skill_unavailable',
-      message.includes('exceed') ? 413 : 409,
-    )
-  }
-  const sourcesById = new Map(entries.map((entry) => [entry.ref.skillId, entry.sources]))
-  const skills: ResolvedTaskSkill[] = assets.map((asset) => ({
-    ...asset,
-    sources: structuredClone(sourcesById.get(asset.ref.skillId) ?? []),
-  }))
-  const digest = resolvedTaskSkillCapabilityDigest(skills)
-  return { skills, digest }
-}
-
-function requireRunSkillNode(nodes: Map<string, CanvasNode>, nodeId: string): CanvasNode {
-  const node = nodes.get(nodeId)
-  if (!node) {
-    throw new ProtocolError(
-      `skill authority references a missing Node: ${nodeId}`,
-      'attachment_not_found',
-      404,
-    )
-  }
-  return node
 }
 
 function snapshotExplicitNodeAttachment(

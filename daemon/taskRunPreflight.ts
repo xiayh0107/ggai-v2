@@ -8,8 +8,9 @@ import type {
 } from './runs.js'
 import {
   resolveRunIntentAttachments,
-  resolveRunIntentSkills,
 } from './serverLegacy.js'
+import { resolveRunIntentSkills } from './taskRunSkills.js'
+import type { SkillResolver } from './skills/contracts.js'
 import type { SkillAssetCatalog } from './skillAssets.js'
 import {
   parseRunIntent,
@@ -52,7 +53,8 @@ export interface TaskRunPreflightDependencies {
     'inspectTaskRunAvailability' | 'listTaskSessions' | 'lookupRunArtifact'
   >
   versions: Pick<WorkspaceVersionManager, 'getCanvas'>
-  skillAssets: Pick<SkillAssetCatalog, 'typeBindings' | 'resolve'>
+  skillAssets: Pick<SkillAssetCatalog, 'typeBindings'>
+  skillResolver(): { resolver: SkillResolver; provider: string }
 }
 
 const ISSUE_COPY: Record<TaskRunPreflightIssueCode, {
@@ -119,12 +121,14 @@ export class TaskRunPreflightService {
   readonly #runs: TaskRunPreflightDependencies['runs']
   readonly #versions: TaskRunPreflightDependencies['versions']
   readonly #skillAssets: TaskRunPreflightDependencies['skillAssets']
+  readonly #skillResolver: TaskRunPreflightDependencies['skillResolver']
 
   constructor(dependencies: TaskRunPreflightDependencies) {
     this.#registry = dependencies.registry
     this.#runs = dependencies.runs
     this.#versions = dependencies.versions
     this.#skillAssets = dependencies.skillAssets
+    this.#skillResolver = dependencies.skillResolver
   }
 
   async inspect(
@@ -197,7 +201,14 @@ export class TaskRunPreflightService {
       return report(issues)
     }
     try {
-      await resolveRunIntentSkills(intent, envelope.document, this.#skillAssets)
+      const skillResolver = this.#skillResolver()
+      await resolveRunIntentSkills(
+        intent,
+        envelope.document,
+        this.#skillAssets,
+        skillResolver.resolver,
+        skillResolver.provider,
+      )
     } catch {
       addIssue('skill_unavailable')
     }

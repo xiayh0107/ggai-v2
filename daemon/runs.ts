@@ -91,6 +91,7 @@ const FALLBACK_CAPABILITY_PROFILE: CapabilityProfileSnapshot = Object.freeze({
 
 const PROJECTION_CAPABILITY_RECEIPT_KEY = 'ggai.projection-capabilities.v2'
 const SKILL_CAPABILITY_RECEIPT_KEY = 'ggai.skill-capabilities.v1'
+const SKILL_RESOLVER_CAPABILITY_RECEIPT_KEY = 'ggai.skill-resolver.v1'
 const ATTACHMENT_CAPABILITY_RECEIPT_KEY = 'ggai.run-attachments.v1'
 
 type BufferedStreamMessage = RunStreamMessage & { id: number }
@@ -278,6 +279,12 @@ export class RunManager {
         request.resolvedSkills,
         request.skillCapabilityDigest,
       )
+      if (!/^[0-9a-f]{64}$/u.test(request.skillResolverCapabilityDigest)) {
+        throw new TypeError('Task Run Skill Resolver digest is invalid')
+      }
+      if (!request.skillResolverProvider || request.skillResolverProvider.length > 240) {
+        throw new TypeError('Task Run Skill Resolver provider is invalid')
+      }
       request = structuredClone({ ...request, pluginCapabilities, resolvedSkills })
     }
     const transport = this.#registry.resolve(request.agentId)
@@ -2004,6 +2011,8 @@ function runRequestIdentity(request: RunExecutionRequest): string {
     attachments: request.attachments,
     materializationPolicy: request.materializationPolicy,
     pluginCapabilityDigest: requirePinnedPluginCapabilities(request).digest,
+    skillResolverCapabilityDigest: request.skillResolverCapabilityDigest,
+    skillResolverProvider: request.skillResolverProvider,
   })
 }
 
@@ -2018,6 +2027,10 @@ function semanticCapabilitiesForTaskRun(
     key: SKILL_CAPABILITY_RECEIPT_KEY,
     provider: '@ggai/core-run-acceptance',
     digest: request.skillCapabilityDigest,
+  }, {
+    key: SKILL_RESOLVER_CAPABILITY_RECEIPT_KEY,
+    provider: request.skillResolverProvider,
+    digest: request.skillResolverCapabilityDigest,
   }, {
     key: ATTACHMENT_CAPABILITY_RECEIPT_KEY,
     provider: '@ggai/core-run-acceptance',
