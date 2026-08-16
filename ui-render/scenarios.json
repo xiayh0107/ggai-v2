@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "scenarios": [
+    {
+      "id": "task-run-draft",
+      "title": "空输出节点 · 默认运行面板",
+      "viewport": { "width": 760, "height": 520 }
+    }
+  ]
+}
