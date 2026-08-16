@@ -1,5 +1,5 @@
+/* eslint-disable react-refresh/only-export-components -- dedicated deterministic render registry */
 import {
-  useEffect,
   useMemo,
   useSyncExternalStore,
   type ReactElement,
@@ -13,11 +13,9 @@ import {
 import { CanvasProvider } from '@/canvas/provider'
 import {
   CanvasTaskRunProvider,
-  type CanvasTaskRunControllerFactoryInput,
   type CanvasTaskRunControllerLike,
 } from '@/canvas/runProvider'
 import type {
-  CanvasRunTaskInput,
   CanvasTaskRunClose,
   CanvasTaskRunHandle,
   CanvasTaskRunLogEntry,
@@ -58,23 +56,10 @@ function TaskRunDraftScenario() {
   const daemonClient = useMemo(renderDaemonClient, [])
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
 
-  useEffect(() => {
-    if (state.hydration.status !== 'ready') return
-    let cancelled = false
-    void document.fonts.ready.then(() => new Promise<void>((resolve) => {
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
-    })).then(() => {
-      if (!cancelled) document.documentElement.dataset.uiRenderReady = 'true'
-    })
-    return () => {
-      cancelled = true
-      delete document.documentElement.dataset.uiRenderReady
-    }
-  }, [state.hydration.status])
-
   return (
     <div
       data-ui-render-scenario="task-run-draft"
+      data-ui-render-settled={state.hydration.status === 'ready' ? 'true' : 'false'}
       className="flex h-screen w-screen items-center justify-center overflow-hidden bg-gg-bg p-12 font-sans text-gg-ink"
     >
       <CanvasProvider store={store}>
@@ -140,11 +125,9 @@ function renderDaemonClient(): CanvasTaskRunDaemonApi {
 }
 
 class RenderController implements CanvasTaskRunControllerLike {
-  readonly factory = (
-    _input: CanvasTaskRunControllerFactoryInput,
-  ): CanvasTaskRunControllerLike => this
+  readonly factory = (): CanvasTaskRunControllerLike => this
 
-  runTask(_input: CanvasRunTaskInput): Promise<CanvasTaskRunHandle> {
+  runTask(): Promise<CanvasTaskRunHandle> {
     return Promise.reject(new Error('UI render scenarios do not start real Runs'))
   }
 
@@ -152,19 +135,19 @@ class RenderController implements CanvasTaskRunControllerLike {
     return Promise.resolve([])
   }
 
-  cancelTask(_taskId: string): Promise<CanvasTaskRunClose | null> {
+  cancelTask(): Promise<CanvasTaskRunClose | null> {
     return Promise.resolve(null)
   }
 
-  getRunLog(_runId: string): readonly CanvasTaskRunLogEntry[] {
+  getRunLog(): readonly CanvasTaskRunLogEntry[] {
     return []
   }
 
-  readTaskRunSummary(_runId: string): Promise<CanvasTaskRunSummary> {
+  readTaskRunSummary(): Promise<CanvasTaskRunSummary> {
     return Promise.reject(new Error('The baseline scenario has no historical Run'))
   }
 
-  readTaskRunLog(_runId: string, _afterEventId: number) {
+  readTaskRunLog() {
     return Promise.resolve({ entries: [], nextEventId: null, closed: false })
   }
 

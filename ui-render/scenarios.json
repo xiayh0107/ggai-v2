@@ -4,7 +4,8 @@
     {
       "id": "task-run-draft",
       "title": "空输出节点 · 默认运行面板",
-      "viewport": { "width": 760, "height": 520 }
+      "viewport": { "width": 760, "height": 520 },
+      "readySelector": "[data-ui-render-scenario='task-run-draft'][data-ui-render-settled='true']"
     }
   ]
 }

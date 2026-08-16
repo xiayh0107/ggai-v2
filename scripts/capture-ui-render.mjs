@@ -26,6 +26,9 @@ try {
     const target = new URL('/ui-render/index.html', baseUrl)
     target.searchParams.set('scenario', scenario.id)
     const filename = path.join(outputDir, `${scenario.id}.png`)
+    const readySelector = typeof scenario.readySelector === 'string'
+      ? scenario.readySelector
+      : `[data-ui-render-scenario='${scenario.id}']`
     await runCommand(npxCommand(), [
       '--yes',
       'playwright@1.55.0',
@@ -35,9 +38,9 @@ try {
       '--viewport-size',
       `${scenario.viewport.width},${scenario.viewport.height}`,
       '--wait-for-selector',
-      "html[data-ui-render-ready='true']",
+      readySelector,
       '--wait-for-timeout',
-      '150',
+      '200',
       target.toString(),
       filename,
     ])
