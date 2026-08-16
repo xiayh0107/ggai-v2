@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import { DAEMON_URL } from '@/agent/config'
 import { useCanvasState, useCanvasStore } from '@/canvas/hooks'
+import { CanvasWorkbenchControllerProvider } from '@/canvas/workbenchController'
 import {
   useCanvasBranchNavigation,
   type CanvasBranchNavigationCommit,
@@ -107,13 +108,15 @@ export default function CanvasShell({
         </div>
       </header>
       <div className="absolute inset-x-0 bottom-0 top-[52px]">
-        <CanvasStage />
-        <CanvasWorkbench
-          projectId={projectId}
-          artifactApi={artifactApi}
-          skillApi={skillApi}
-          onOpenHistory={() => setVersioningOpen(true)}
-        />
+        <CanvasWorkbenchControllerProvider skillApi={skillApi}>
+          <CanvasStage />
+          <CanvasWorkbench
+            projectId={projectId}
+            artifactApi={artifactApi}
+            skillApi={skillApi}
+            onOpenHistory={() => setVersioningOpen(true)}
+          />
+        </CanvasWorkbenchControllerProvider>
       </div>
       {versioningOpen && (
         <CanvasVersioningPanel

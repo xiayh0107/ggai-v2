@@ -11,6 +11,7 @@ import {
   RefreshCw,
   ShieldCheck,
   Square,
+  WandSparkles,
   X,
 } from 'lucide-react'
 import {
@@ -39,11 +40,13 @@ import type {
   CanvasTaskRunLifecycleSnapshot,
 } from '@/canvas/runProvider'
 import { taskComposerDraftKey } from '@/canvas/taskRunUi'
+import { effectiveTaskSkillRefs } from '@/canvas/taskSkills'
 import { useOpenCanvasRunLogViewer } from '@/canvas/runLogViewerContext'
 import type {
   CanvasTaskRunPhase,
   CanvasTaskRuntime,
 } from '@/canvas/selectors'
+import { useOptionalCanvasWorkbenchController } from '@/canvas/workbenchController'
 import { getPlugin } from '@/plugins/types'
 import {
   ProjectArtifactCatalogClient,
@@ -94,6 +97,7 @@ function CanvasTaskRunPanelContent({
 }: CanvasTaskRunPanelProps & { lifecycle: CanvasTaskRunLifecycle }) {
   const store = useCanvasStore()
   const openRunLogViewer = useOpenCanvasRunLogViewer()
+  const workbenchController = useOptionalCanvasWorkbenchController()
   const canvasState = useCanvasState()
   const runState = useLifecycleSnapshot(lifecycle)
   const preflightApi = useMemo(
@@ -133,6 +137,7 @@ function CanvasTaskRunPanelContent({
   const [attachments, setAttachments] = useState<ProjectArtifactResource[]>(
     () => [...initialAttachments],
   )
+  const [skillCount, setSkillCount] = useState(0)
   const attachmentScopeKey = `${canvasState.scope.projectDir}\u0000${canvasState.scope.branch}\u0000${task.id}`
   const attachmentScopeRef = useRef(attachmentScopeKey)
   const wasActiveRef = useRef(false)
@@ -152,9 +157,10 @@ function CanvasTaskRunPanelContent({
     || cancelling
     || preflightState.status !== 'ready'
   const ownedNodes = canvasState.document.nodes.filter((node) => node.homeTaskId === task.id)
-  const outputPlugin = ownedNodes.length === 1 ? getPlugin(ownedNodes[0].type) : null
-  const panelTitle = ownedNodes.length === 1
-    ? `使用“${ownedNodes[0].title}”作为输出槽`
+  const skillTargetNode = ownedNodes.length === 1 ? ownedNodes[0] : null
+  const outputPlugin = skillTargetNode ? getPlugin(skillTargetNode.type) : null
+  const panelTitle = skillTargetNode
+    ? `使用“${skillTargetNode.title}”作为输出槽`
     : '任务提示词'
 
   useEffect(() => {
@@ -174,6 +180,39 @@ function CanvasTaskRunPanelContent({
     wasActiveRef.current = false
     setAttachments([])
   }, [active])
+
+  useEffect(() => {
+    const skillApi = workbenchController?.skillApi
+    if (!skillApi || !skillTargetNode || canvasState.hydration.status !== 'ready') {
+      setSkillCount(0)
+      return
+    }
+    const controller = new AbortController()
+    void skillApi.list(controller.signal).then(
+      (catalog) => {
+        if (controller.signal.aborted) return
+        try {
+          setSkillCount(effectiveTaskSkillRefs(
+            canvasState.document,
+            task.id,
+            catalog.typeBindings,
+          ).length)
+        } catch {
+          setSkillCount(0)
+        }
+      },
+      () => {
+        if (!controller.signal.aborted) setSkillCount(0)
+      },
+    )
+    return () => controller.abort()
+  }, [
+    canvasState.document,
+    canvasState.hydration.status,
+    skillTargetNode,
+    task.id,
+    workbenchController?.skillApi,
+  ])
 
   useEffect(() => {
     const revision = canvasState.envelope?.revision
@@ -271,6 +310,12 @@ function CanvasTaskRunPanelContent({
         return next
       })
     }
+  }
+
+  const openSkills = () => {
+    if (active || !skillTargetNode || !workbenchController) return
+    store.setSelection([{ kind: 'node', id: skillTargetNode.id }])
+    workbenchController.openSection('skills')
   }
 
   const preflightNotice = preflightState.status === 'blocked'
@@ -414,6 +459,20 @@ function CanvasTaskRunPanelContent({
               <span className="rounded-full border border-gg-line bg-white px-2.5 py-1 text-[10px] text-gg-muted">
                 {outputPlugin.label}
               </span>
+            )}
+            {skillTargetNode && skillCount > 0 && workbenchController && (
+              <button
+                type="button"
+                data-testid="canvas-task-skills-summary"
+                disabled={active}
+                aria-label={`打开节点 Skills，共 ${skillCount} 个`}
+                title={active ? '生成期间 Skills 已锁定' : '打开节点 Skills'}
+                onClick={openSkills}
+                className="flex items-center gap-1 rounded-full border border-gg-line bg-white px-2.5 py-1 text-[10px] text-gg-muted outline-none hover:border-gg-primary/35 hover:text-gg-primary focus-visible:ring-2 focus-visible:ring-gg-primary/30 disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                <WandSparkles size={10} aria-hidden="true" />
+                Skills {skillCount}
+              </button>
             )}
             {active && (
               <span

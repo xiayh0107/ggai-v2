@@ -1,9 +1,11 @@
 /* eslint-disable react-refresh/only-export-components -- dedicated deterministic render registry */
 import {
+  useEffect,
   useMemo,
   useSyncExternalStore,
   type ReactElement,
 } from 'react'
+import { MemoryRouter } from 'react-router'
 import type { CanvasTaskRunDaemonApi } from '@/agent/taskRunClient'
 import type {
   TaskRunPreflightApi,
@@ -26,11 +28,18 @@ import type {
   CanvasTaskRunSummary,
 } from '@/canvas/runController'
 import { CanvasStore } from '@/canvas/store'
+import {
+  CanvasWorkbenchControllerProvider,
+  type CanvasWorkbenchSection,
+} from '@/canvas/workbenchController'
 import CanvasTaskRunPanel from '@/components/canvas/CanvasTaskRunPanel'
+import CanvasWorkbench from '@/components/canvas/CanvasWorkbench'
 import type {
   ProjectArtifactCatalogApi,
   ProjectArtifactResource,
 } from '@/resources/artifactCatalogClient'
+import type { SkillAssetApi, SkillAssetCatalogPayload } from '@/skills/client'
+import type { SkillAssetRef, SkillAssetSummary } from '@/skills/contracts'
 
 interface UiRenderScenario {
   id: string
@@ -53,6 +62,51 @@ const BLOCKED: TaskRunPreflightResult = {
     code: 'generation_service_unauthenticated',
     message: '生成服务尚未登录，请完成登录后重试。',
     retryable: true,
+  }],
+}
+const TYPE_SKILL: SkillAssetRef = {
+  skillId: 'figure-layout',
+  revision: 2,
+  digest: 'e'.repeat(64),
+}
+const INSTANCE_SKILL: SkillAssetRef = {
+  skillId: 'journal-style',
+  revision: 1,
+  digest: 'f'.repeat(64),
+}
+const SKILL_ASSETS: SkillAssetSummary[] = [
+  {
+    schemaVersion: 1,
+    ...TYPE_SKILL,
+    title: '科研图形布局',
+    description: '将证据、结论与图例组织成清晰的期刊级图形。',
+    entrypoint: 'SKILL.md',
+    fileCount: 3,
+    totalBytes: 12_480,
+    importedAt: '2026-08-16T00:00:00.000Z',
+    archived: false,
+  },
+  {
+    schemaVersion: 1,
+    ...INSTANCE_SKILL,
+    title: '期刊视觉规范',
+    description: '约束字体、留白、图例和注释层级。',
+    entrypoint: 'SKILL.md',
+    fileCount: 2,
+    totalBytes: 8_192,
+    importedAt: '2026-08-15T23:00:00.000Z',
+    archived: false,
+  },
+]
+const SKILL_CATALOG: SkillAssetCatalogPayload = {
+  schemaVersion: 1,
+  assets: SKILL_ASSETS,
+  typeBindings: [{
+    schemaVersion: 1,
+    nodeType: 'image',
+    revision: 4,
+    skills: [TYPE_SKILL],
+    updatedAt: '2026-08-16T00:10:00.000Z',
   }],
 }
 const RESOURCES: ProjectArtifactResource[] = [
@@ -103,6 +157,23 @@ const scenarios: readonly UiRenderScenario[] = [
       />
     ),
   },
+  {
+    id: 'task-run-skills-summary',
+    title: '空输出节点 · Skills 摘要入口',
+    render: () => <TaskRunScenario id="task-run-skills-summary" preflight={READY} withSkills />,
+  },
+  {
+    id: 'task-run-skills-workbench',
+    title: '空输出节点 · 打开既有节点 Skills 工作台',
+    render: () => (
+      <TaskRunScenario
+        id="task-run-skills-workbench"
+        preflight={READY}
+        withSkills
+        workbenchSection="skills"
+      />
+    ),
+  },
 ]
 
 export function getUiRenderScenario(id: string): UiRenderScenario {
@@ -116,11 +187,15 @@ function TaskRunScenario({
   preflight,
   initialAttachments = [],
   initialAttachmentPickerOpen = false,
+  withSkills = false,
+  workbenchSection = null,
 }: {
   id: string
   preflight: TaskRunPreflightResult
   initialAttachments?: readonly ProjectArtifactResource[]
   initialAttachmentPickerOpen?: boolean
+  withSkills?: boolean
+  workbenchSection?: CanvasWorkbenchSection | null
 }) {
   const store = useMemo(() => createStore(), [])
   const controller = useMemo(() => new RenderController(), [])
@@ -129,33 +204,68 @@ function TaskRunScenario({
     check: async () => structuredClone(preflight),
   }), [preflight])
   const artifactCatalogApi = useMemo(() => renderArtifactApi(), [])
+  const skillApi = useMemo(() => renderSkillApi(), [])
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
 
-  return (
-    <div
-      data-ui-render-scenario={id}
-      data-ui-render-settled={state.hydration.status === 'ready' ? 'true' : 'false'}
-      className="flex h-screen w-screen items-center justify-center overflow-hidden bg-gg-bg p-12 font-sans text-gg-ink"
-    >
-      <CanvasProvider store={store}>
-        <CanvasTaskRunProvider
-          store={store}
-          daemonClient={daemonClient}
-          controllerFactory={controller.factory}
-        >
-          <div className="w-[460px]">
-            <CanvasTaskRunPanel
-              task={task}
-              width={460}
-              preflightApi={preflightApi}
-              artifactCatalogApi={artifactCatalogApi}
-              initialAttachments={initialAttachments}
-              initialAttachmentPickerOpen={initialAttachmentPickerOpen}
-            />
-          </div>
-        </CanvasTaskRunProvider>
-      </CanvasProvider>
+  useEffect(() => {
+    if (!withSkills || state.hydration.status !== 'ready') return
+    if (state.view.selection.length === 1
+      && state.view.selection[0]?.kind === 'node'
+      && state.view.selection[0].id === 'node-ui-render') return
+    store.setSelection([{ kind: 'node', id: 'node-ui-render' }])
+  }, [state.hydration.status, state.view.selection, store, withSkills])
+
+  const panel = (
+    <div className={workbenchSection ? 'absolute right-12 top-28 w-[460px]' : 'w-[460px]'}>
+      <CanvasTaskRunPanel
+        task={task}
+        width={460}
+        preflightApi={preflightApi}
+        artifactCatalogApi={artifactCatalogApi}
+        initialAttachments={initialAttachments}
+        initialAttachmentPickerOpen={initialAttachmentPickerOpen}
+      />
     </div>
+  )
+  const runSurface = (
+    <CanvasTaskRunProvider
+      store={store}
+      daemonClient={daemonClient}
+      controllerFactory={controller.factory}
+    >
+      {panel}
+      {workbenchSection && (
+        <CanvasWorkbench
+          projectId="ui-render-project"
+          artifactApi={artifactCatalogApi}
+          skillApi={skillApi}
+          onOpenHistory={() => undefined}
+        />
+      )}
+    </CanvasTaskRunProvider>
+  )
+
+  return (
+    <MemoryRouter>
+      <div
+        data-ui-render-scenario={id}
+        data-ui-render-settled={state.hydration.status === 'ready' ? 'true' : 'false'}
+        className={`relative h-screen w-screen overflow-hidden bg-gg-bg font-sans text-gg-ink ${
+          workbenchSection ? '' : 'flex items-center justify-center p-12'
+        }`}
+      >
+        <CanvasProvider store={store}>
+          {withSkills ? (
+            <CanvasWorkbenchControllerProvider
+              skillApi={skillApi}
+              initialSection={workbenchSection}
+            >
+              {runSurface}
+            </CanvasWorkbenchControllerProvider>
+          ) : runSurface}
+        </CanvasProvider>
+      </div>
+    </MemoryRouter>
   )
 }
 
@@ -196,6 +306,7 @@ function createDocument(): CanvasDocument {
     artifactRefs: [],
     homeTaskId: task.id,
     origin: { kind: 'user' },
+    skillBindings: { inheritType: true, skills: [INSTANCE_SKILL] },
   })
   return document
 }
@@ -206,7 +317,7 @@ function renderDaemonClient(): CanvasTaskRunDaemonApi {
   } as unknown as CanvasTaskRunDaemonApi
 }
 
-function renderArtifactApi(): Pick<ProjectArtifactCatalogApi, 'list'> {
+function renderArtifactApi(): ProjectArtifactCatalogApi {
   return {
     list: async () => ({
       schemaVersion: 2,
@@ -215,6 +326,18 @@ function renderArtifactApi(): Pick<ProjectArtifactCatalogApi, 'list'> {
       partial: false,
       nextCursor: null,
     }),
+    artifactUrl: () => 'about:blank',
+  }
+}
+
+function renderSkillApi(): SkillAssetApi {
+  return {
+    list: async () => structuredClone(SKILL_CATALOG),
+    import: async () => Promise.reject(new Error('UI render does not import Skills')),
+    archive: async () => Promise.reject(new Error('UI render does not archive Skills')),
+    updateTypeBindings: async () => Promise.reject(
+      new Error('UI render does not update type bindings'),
+    ),
   }
 }
 
