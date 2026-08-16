@@ -2,6 +2,7 @@
 import { StrictMode, act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import type { TaskRunPreflightApi } from '@/agent/taskRunPreflightClient'
 import type {
   TaskRunHttpClient,
   DaemonProjectionOutput,
@@ -31,6 +32,10 @@ import {
   CanvasRunLogViewerContext,
   type OpenCanvasRunLogViewer,
 } from '@/canvas/runLogViewerContext'
+import type {
+  ProjectArtifactCatalogApi,
+  ProjectArtifactResource,
+} from '@/resources/artifactCatalogClient'
 import CanvasTaskRunPanel from './CanvasTaskRunPanel'
 
 const task = {
@@ -44,6 +49,9 @@ const projectDir = '/workspace/project'
 const branch = 'main'
 const artifactId = `artifact_${'a'.repeat(64)}`
 const planId = `plan_${'b'.repeat(64)}`
+const readyPreflightApi: TaskRunPreflightApi = {
+  check: async () => ({ status: 'ready', issues: [] }),
+}
 
 let root: Root | null = null
 let container: HTMLDivElement | null = null
@@ -186,6 +194,8 @@ async function renderHarness(input: {
   daemon?: TaskRunHttpClient
   strict?: boolean
   openRunLogViewer?: OpenCanvasRunLogViewer
+  preflightApi?: TaskRunPreflightApi
+  artifactCatalogApi?: Pick<ProjectArtifactCatalogApi, 'list'>
 } = {}) {
   const store = input.store ?? makeStore()
   const controller = input.controller ?? new FakeController()
@@ -200,7 +210,11 @@ async function renderHarness(input: {
         daemonClient={daemon}
         controllerFactory={controller.factory}
       >
-        <CanvasTaskRunPanel task={task} />
+        <CanvasTaskRunPanel
+          task={task}
+          preflightApi={input.preflightApi ?? readyPreflightApi}
+          artifactCatalogApi={input.artifactCatalogApi}
+        />
       </CanvasTaskRunProvider>
     </CanvasProvider>
   )
@@ -293,6 +307,99 @@ function trayOutput(overrides: Partial<DaemonProjectionOutput> = {}): DaemonProj
 }
 
 describe('Canvas Task Run panel', () => {
+  it('blocks submission only for an explicit preflight issue and can retry', async () => {
+    const check = vi.fn(async () => ({
+      status: 'blocked' as const,
+      issues: [{
+        code: 'generation_service_unauthenticated' as const,
+        message: '生成服务尚未登录，请完成登录后重试。',
+        retryable: true,
+      }],
+    }))
+    const { host } = await renderHarness({ preflightApi: { check } })
+
+    await vi.waitFor(() => expect(host.getAttribute('data-preflight-status')).toBe('blocked'))
+    const notice = required<HTMLElement>(host, '[data-testid="canvas-generation-preflight-notice"]')
+    expect(notice.getAttribute('role')).toBe('status')
+    expect(notice.textContent).toContain('生成服务尚未登录')
+    expect(host.querySelector('[role="alert"]')).toBeNull()
+    expect(required<HTMLButtonElement>(host, `[aria-label="开始任务${task.title}"]`).disabled)
+      .toBe(true)
+
+    await act(async () => required<HTMLButtonElement>(notice, 'button').click())
+    await vi.waitFor(() => expect(check).toHaveBeenCalledTimes(2))
+  })
+
+  it('keeps submission available when advisory preflight cannot be reached', async () => {
+    const check = vi.fn(async () => {
+      throw new Error('daemon unavailable')
+    })
+    const { controller, host } = await renderHarness({ preflightApi: { check } })
+
+    await vi.waitFor(() => expect(host.getAttribute('data-preflight-status')).toBe('error'))
+    expect(required<HTMLElement>(host, '[data-testid="canvas-generation-preflight-notice"]')
+      .getAttribute('role')).toBe('status')
+    const submit = required<HTMLButtonElement>(host, `[aria-label="开始任务${task.title}"]`)
+    expect(submit.disabled).toBe(false)
+    await act(async () => submit.click())
+    expect(controller.runTaskMock).toHaveBeenCalledOnce()
+  })
+
+  it('forwards only verified artifact identity through preflight and Run intent', async () => {
+    const artifact: ProjectArtifactResource = {
+      runId: 'run-reference',
+      artifactId,
+      taskId: 'task-reference',
+      canvasBranch: branch,
+      relativePath: 'images/reference.png',
+      mediaType: 'image/png',
+      size: 2_048,
+      contentDigest: 'b'.repeat(64),
+      createdAt: 1_700_000_000_000,
+    }
+    const list = vi.fn(async () => ({
+      schemaVersion: 2 as const,
+      artifacts: [artifact],
+      truncated: false,
+      partial: false,
+      nextCursor: null,
+    }))
+    const check = vi.fn<TaskRunPreflightApi['check']>(
+      async () => ({ status: 'ready', issues: [] }),
+    )
+    const { controller, host } = await renderHarness({
+      artifactCatalogApi: { list },
+      preflightApi: { check },
+    })
+
+    await act(async () => required<HTMLButtonElement>(host, '[aria-label="添加附件"]').click())
+    await vi.waitFor(() => expect(list).toHaveBeenCalledOnce())
+    const picker = required<HTMLElement>(document.body, '[role="dialog"][aria-label="添加附件"]')
+    await vi.waitFor(() => expect(picker.textContent).toContain('reference.png'))
+    await act(async () => required<HTMLButtonElement>(picker, '[role="checkbox"]').click())
+
+    expect(required(host, '[aria-label="已添加附件"]').textContent).toContain('reference.png')
+    await vi.waitFor(() => expect(check.mock.calls.some(([input]) =>
+      input.attachments?.some((attachment) => attachment.kind === 'artifact'
+        && attachment.runId === artifact.runId
+        && attachment.artifactId === artifact.artifactId))).toBe(true))
+    await vi.waitFor(() => expect(host.getAttribute('data-preflight-status')).toBe('ready'))
+
+    await act(async () => required<HTMLButtonElement>(
+      host,
+      `[aria-label="开始任务${task.title}"]`,
+    ).click())
+    expect(controller.runTaskMock).toHaveBeenCalledWith({
+      taskId: task.id,
+      agentId: 'codex',
+      attachments: [{
+        kind: 'artifact',
+        runId: artifact.runId,
+        artifactId: artifact.artifactId,
+      }],
+    })
+  })
+
   it('keeps suggested actions as branch-local drafts and never auto-runs under StrictMode', async () => {
     const { store, controller, host } = await renderHarness({ strict: true })
     const beforeDocument = structuredClone(store.getSnapshot().document)
@@ -390,7 +497,10 @@ describe('Canvas Task Run panel', () => {
     expect(composer.readOnly).toBe(true)
     expect(composer.disabled).toBe(false)
     expect(host.textContent).not.toContain('运行日志 · 0')
-    expect(host.textContent).toContain('生成中')
+    expect(host.textContent).toContain('正在生成图表')
+    expect(host.textContent).not.toContain('生成中')
+    expect(host.querySelectorAll('[role="status"]')).toHaveLength(1)
+    expect(primaryAction.querySelector('.animate-spin')).toBeNull()
 
     await act(async () => required<HTMLButtonElement>(
       host,

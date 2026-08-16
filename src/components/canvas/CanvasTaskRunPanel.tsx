@@ -155,7 +155,7 @@ function CanvasTaskRunPanelContent({
     || active
     || submitting
     || cancelling
-    || preflightState.status !== 'ready'
+    || preflightState.status === 'blocked'
   const ownedNodes = canvasState.document.nodes.filter((node) => node.homeTaskId === task.id)
   const skillTargetNode = ownedNodes.length === 1 ? ownedNodes[0] : null
   const outputPlugin = skillTargetNode ? getPlugin(skillTargetNode.type) : null
@@ -474,20 +474,6 @@ function CanvasTaskRunPanelContent({
                 Skills {skillCount}
               </button>
             )}
-            {active && (
-              <span
-                role="status"
-                aria-live="polite"
-                className="ml-1 flex items-center gap-1 text-[9.5px] text-gg-primary"
-              >
-                <Loader2
-                  size={11}
-                  className="animate-spin motion-reduce:animate-none"
-                  aria-hidden="true"
-                />
-                {cancelling ? '正在取消' : '生成中'}
-              </span>
-            )}
           </>
         )}
         footerActions={(
@@ -540,21 +526,15 @@ function CanvasTaskRunPanelContent({
               className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gg-primary text-white outline-none hover:bg-gg-select focus-visible:ring-2 focus-visible:ring-gg-primary/35 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-45"
             >
               {active ? (
-                <>
+                cancelling ? (
                   <Loader2
-                    size={16}
+                    size={14}
                     className="animate-spin motion-reduce:animate-none"
                     aria-hidden="true"
                   />
-                  {!cancelling && (
-                    <Square
-                      size={6}
-                      fill="currentColor"
-                      className="absolute"
-                      aria-hidden="true"
-                    />
-                  )}
-                </>
+                ) : (
+                  <Square size={10} fill="currentColor" aria-hidden="true" />
+                )
               ) : submitting ? (
                 <Loader2 size={14} className="animate-spin motion-reduce:animate-none" />
               ) : (
@@ -728,7 +708,8 @@ function GenerationPreflightNotice({
 }) {
   return (
     <div
-      role="alert"
+      role="status"
+      aria-live="polite"
       data-testid="canvas-generation-preflight-notice"
       className="mb-1.5 flex items-start gap-2 rounded-[10px] border border-[#F4C7C3] bg-[#FFF8F7] px-2.5 py-2"
     >
