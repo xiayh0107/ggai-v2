@@ -19,7 +19,7 @@ await rm(outputDir, { recursive: true, force: true })
 await mkdir(outputDir, { recursive: true })
 
 const server = options.baseUrl ? null : startVite(options.port)
-const baseUrl = options.baseUrl ?? `http://127.0.0.1:${options.port}`
+const baseUrl = options.baseUrl || `http://127.0.0.1:${options.port}`
 try {
   await waitForServer(`${baseUrl}/ui-render/index.html`)
   for (const scenario of scenarios) {

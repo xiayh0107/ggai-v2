@@ -53,7 +53,7 @@ export function getUiRenderScenario(id: string): UiRenderScenario {
 function TaskRunDraftScenario() {
   const store = useMemo(() => createStore(), [])
   const controller = useMemo(() => new RenderController(), [])
-  const daemonClient = useMemo(renderDaemonClient, [])
+  const daemonClient = useMemo(() => renderDaemonClient(), [])
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
 
   return (
