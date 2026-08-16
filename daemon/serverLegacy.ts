@@ -1030,6 +1030,25 @@ async function route(
             404,
           )
         }
+        const [currentAttachments, currentSkills] = await Promise.all([
+          resolveRunIntentAttachments(
+            intent,
+            current.document,
+            context.runs,
+            projectDir,
+            pluginCapabilities,
+          ),
+          resolveRunIntentSkills(intent, current.document, context.skillAssets),
+        ])
+        if (JSON.stringify(currentAttachments) !== JSON.stringify(resolvedAttachments)
+          || currentSkills.digest !== resolvedSkills.digest
+          || JSON.stringify(currentSkills.skills) !== JSON.stringify(resolvedSkills.skills)) {
+          throw new ProtocolError(
+            'Task Run inputs changed before acceptance; retry from the current Canvas state',
+            'run_inputs_changed',
+            409,
+          )
+        }
       },
     })
     writeJson(response, 202, { runId: run.runId })
