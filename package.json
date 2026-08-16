@@ -35,6 +35,8 @@
     "test:startup": "node --test scripts/*.test.mjs",
     "test:daemon": "npm run build:daemon:test && node --test dist-daemon-test/daemon/__tests__/*.test.js",
     "test:ui": "vitest run src/",
+    "ui:render:serve": "vite --host 127.0.0.1 --port 4173 --strictPort",
+    "ui:render:capture": "node scripts/capture-ui-render.mjs",
     "lint": "eslint .",
     "lint:core": "eslint daemon src/agent src/canvas src/components/canvas --max-warnings=0",
     "architecture:check": "node scripts/check-app-architecture.mjs",
