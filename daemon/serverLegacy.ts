@@ -2004,10 +2004,10 @@ function parseRunIntentForServer(value: unknown): RunIntent {
   }
 }
 
-async function resolveRunIntentAttachments(
+export async function resolveRunIntentAttachments(
   intent: RunIntent,
   document: CanvasDocument,
-  runs: RunManager,
+  runs: Pick<RunManager, 'lookupRunArtifact'>,
   projectDir: string,
   pluginCapabilities: ProjectionPluginCapabilitySnapshot,
 ): Promise<{
@@ -2158,10 +2158,10 @@ async function resolveRunIntentAttachments(
   return { artifacts, nodes }
 }
 
-async function resolveRunIntentSkills(
+export async function resolveRunIntentSkills(
   intent: RunIntent,
   document: CanvasDocument,
-  catalog: SkillAssetCatalog,
+  catalog: Pick<SkillAssetCatalog, 'typeBindings' | 'resolve'>,
 ): Promise<{ skills: ResolvedTaskSkill[]; digest: string }> {
   const nodesById = new Map(document.nodes.map((node) => [node.id, node]))
   const participation = new Map<string, { node: CanvasNode; roles: Set<ResolvedSkillSource['role']> }>()

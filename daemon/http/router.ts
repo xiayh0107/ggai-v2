@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AgentRegistry } from '../registry.js'
+import type { TaskRunPreflightService } from '../taskRunPreflight.js'
 
 const DEFAULT_BROWSER_ORIGINS = new Set([
   'http://localhost:3000',
@@ -10,6 +11,7 @@ const DEFAULT_BROWSER_ORIGINS = new Set([
 export interface HttpRouteContext {
   readonly projectRoot: string
   readonly registry: AgentRegistry
+  readonly taskRunPreflight: TaskRunPreflightService
   readonly allowedOrigins: Set<string>
   readonly lifecycle: { closing: boolean }
 }
@@ -72,4 +74,30 @@ export function writeHttpJson(response: ServerResponse, status: number, body: un
     'Cache-Control': 'no-store',
   })
   response.end(payload)
+}
+
+export class HttpJsonRequestError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'HttpJsonRequestError'
+  }
+}
+
+export async function readHttpJson(
+  request: IncomingMessage,
+  maxBytes = 256 * 1024,
+): Promise<unknown> {
+  const chunks: Buffer[] = []
+  let total = 0
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    total += buffer.byteLength
+    if (total > maxBytes) throw new HttpJsonRequestError('request body is too large')
+    chunks.push(buffer)
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+  } catch {
+    throw new HttpJsonRequestError('request body must be valid JSON')
+  }
 }

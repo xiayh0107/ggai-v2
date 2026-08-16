@@ -44,6 +44,22 @@ test('bounded HTTP routes preserve health and expose runtime diagnostics', async
     schemaVersion: 1,
     projects: [],
   })
+
+  const invalidPreflight = await requestJson(port, '/task-runs/preflight', 'POST', {
+    taskId: 'task-1',
+    agentId: 'codex',
+    canvasBranch: 'main',
+    baseRevision: 0,
+    attachments: [],
+    providerId: '@private/provider',
+  })
+  assert.equal(invalidPreflight.status, 400)
+  assert.deepEqual(invalidPreflight.body, {
+    error: {
+      code: 'invalid_task_run_preflight',
+      message: 'Task Run preflight request has unsupported fields',
+    },
+  })
 })
 
 test('new routes preserve the localhost CORS boundary', async (t) => {
@@ -106,5 +122,41 @@ function getJson(
     })
     outgoing.once('error', reject)
     outgoing.end()
+  })
+}
+
+function requestJson(
+  port: number,
+  pathname: string,
+  method: string,
+  body: unknown,
+): Promise<{ status: number; body: unknown }> {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body)
+    const outgoing = request({
+      host: '127.0.0.1',
+      port,
+      path: pathname,
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    }, (response) => {
+      const chunks: Buffer[] = []
+      response.on('data', (chunk: Buffer) => chunks.push(chunk))
+      response.on('end', () => {
+        try {
+          resolve({
+            status: response.statusCode ?? 0,
+            body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown,
+          })
+        } catch (error) {
+          reject(error)
+        }
+      })
+    })
+    outgoing.once('error', reject)
+    outgoing.end(payload)
   })
 }
