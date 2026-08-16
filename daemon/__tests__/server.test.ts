@@ -8,6 +8,7 @@ import type { RunSummary } from '../protocol.js'
 import { AgentRegistry } from '../registry.js'
 import { RunLogStore } from '../runLogs.js'
 import { createDaemonServer, type DaemonServer } from '../server.js'
+import { PROJECTION_CONTRIBUTION_REGISTRY_SERVICE } from '../projectionContributions.js'
 
 interface TestDaemon {
   root: string
@@ -253,6 +254,16 @@ test('Canvas HTTP retries remain exactly once after an intervening mutation', as
 test('plugin capability handshake pins strict data before accepting a Run', async () => {
   const fixture = await startTestDaemon()
   const headers = { 'Content-Type': 'application/json' }
+  const runtimeContributions = fixture.daemon.workspaceCapabilities
+    .require(PROJECTION_CONTRIBUTION_REGISTRY_SERVICE)
+  let releaseRuntime = runtimeContributions.register(
+    '@runtime/notebook-provider',
+    '1.0.0',
+    [{
+      id: '@runtime/report',
+      artifactClaims: [{ extensions: ['.report'], priority: 15 }],
+    }],
+  )
   try {
     const capabilityResponse = await fetch(`${fixture.baseUrl}/plugin-capabilities`, {
       method: 'PUT',
@@ -272,9 +283,9 @@ test('plugin capability handshake pins strict data before accepting a Run', asyn
       digest: string
       pluginCount: number
     }
-    assert.equal(capability.schemaVersion, 2)
+    assert.equal(capability.schemaVersion, 3)
     assert.match(capability.digest, /^[0-9a-f]{64}$/u)
-    assert.ok(capability.pluginCount > 6)
+    assert.ok(capability.pluginCount > 7)
 
     const override = await fetch(`${fixture.baseUrl}/plugin-capabilities`, {
       method: 'PUT',
@@ -347,6 +358,11 @@ test('plugin capability handshake pins strict data before accepting a Run', asyn
     assert.equal(accepted.status, 202, await accepted.text())
     await waitFor(async () =>
       (await fixture.daemon.runs.getPersisted(intent.runId))?.status === 'done')
+    await waitFor(async () => (await fixture.daemon.runs.inspectTaskRunAvailability(
+      '.',
+      intent.canvasBranch,
+      intent.taskId,
+    )) === 'ready')
     assert.equal(
       (await fixture.daemon.runs.getPersisted(intent.runId))?.pluginCapabilityDigest,
       capability.digest,
@@ -362,6 +378,43 @@ test('plugin capability handshake pins strict data before accepting a Run', asyn
       ), 'utf8'),
       /@community\/notebook/u,
     )
+
+    releaseRuntime()
+    releaseRuntime = runtimeContributions.register(
+      '@runtime/notebook-provider',
+      '2.0.0',
+      [{
+        id: '@runtime/report',
+        artifactClaims: [{ extensions: ['.report'], priority: 15 }],
+      }],
+    )
+    const refreshedRevision = (await fixture.daemon.versions.getCanvas('.', 'main'))
+      .canvas.revision
+    const refreshedIntent = {
+      ...intent,
+      runId: 'run-plugin-capabilities-refreshed',
+      baseRevision: refreshedRevision,
+    }
+    const refreshed = await fetch(
+      `${fixture.baseUrl}/runs?pluginCapabilityDigest=${capability.digest}`,
+      { method: 'POST', headers, body: JSON.stringify(refreshedIntent) },
+    )
+    assert.equal(refreshed.status, 202, await refreshed.text())
+    await waitFor(async () =>
+      (await fixture.daemon.runs.getPersisted(refreshedIntent.runId))?.status === 'done')
+    const refreshedSummary = await fixture.daemon.runs.getPersisted(refreshedIntent.runId)
+    assert.notEqual(refreshedSummary?.pluginCapabilityDigest, capability.digest)
+    const refreshedSnapshot = JSON.parse(await readFile(path.join(
+      fixture.root,
+      '.gg',
+      'runtime',
+      'plugin-capabilities-v3',
+      `${refreshedSummary?.pluginCapabilityDigest}.json`,
+    ), 'utf8')) as {
+      plugins: Array<{ source: { kind: string; providerVersion?: string } }>
+    }
+    assert.ok(refreshedSnapshot.plugins.some((plugin) =>
+      plugin.source.kind === 'runtime-plugin' && plugin.source.providerVersion === '2.0.0'))
 
     const runLogs = new RunLogStore(fixture.root)
     await waitFor(async () =>
@@ -386,7 +439,7 @@ test('plugin capability handshake pins strict data before accepting a Run', asyn
       fixture.root,
       '.gg',
       'runtime',
-      'plugin-capabilities-v2',
+      'plugin-capabilities-v3',
       `${capability.digest}.json`,
     )
     await writeFile(snapshotPath, '{damaged snapshot\n', 'utf8')
@@ -403,6 +456,7 @@ test('plugin capability handshake pins strict data before accepting a Run', asyn
       'plugin_capabilities_unavailable')
     assert.equal(await new RunLogStore(fixture.root).summary('run-damaged-capability'), null)
   } finally {
+    releaseRuntime()
     await fixture.close()
   }
 })

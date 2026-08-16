@@ -23,7 +23,7 @@ export function createProjectionContributionPlugin(options: {
     inject: [PROJECTION_CONTRIBUTION_REGISTRY_SERVICE],
     activate(context) {
       return context.require(PROJECTION_CONTRIBUTION_REGISTRY_SERVICE)
-        .register(context.pluginId, options.contributions)
+        .register(context.pluginId, options.version, options.contributions)
     },
   }
 }

@@ -131,7 +131,7 @@ describe('DaemonTaskRunClient', () => {
       const url = new URL(String(input))
       if (url.pathname === '/plugin-capabilities') {
         capabilityBody = JSON.parse(String(init?.body)) as Record<string, unknown>
-        return response({ schemaVersion: 2, digest: CAPABILITY_DIGEST, pluginCount: 7 })
+        return response({ schemaVersion: 3, digest: CAPABILITY_DIGEST, pluginCount: 7 })
       }
       requestUrl = url
       requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>
@@ -265,7 +265,7 @@ describe('DaemonTaskRunClient', () => {
     const requests: string[] = []
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       requests.push(new URL(String(input)).pathname)
-      return response({ schemaVersion: 2, digest: 'not-a-digest', pluginCount: 7 })
+      return response({ schemaVersion: 3, digest: 'not-a-digest', pluginCount: 7 })
     })
     const { adapter } = subject(fetchMock)
 
@@ -387,7 +387,7 @@ describe('DaemonTaskRunClient', () => {
       const url = new URL(String(input))
       requests.push({ method: init?.method ?? 'GET', pathname: url.pathname })
       if (url.pathname === '/plugin-capabilities' && init?.method === 'PUT') {
-        return response({ schemaVersion: 2, digest: CAPABILITY_DIGEST, pluginCount: 7 })
+        return response({ schemaVersion: 3, digest: CAPABILITY_DIGEST, pluginCount: 7 })
       }
       if (url.pathname === '/runs' && init?.method === 'POST') {
         throw new TypeError('network response was lost')

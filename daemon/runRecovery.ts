@@ -2,7 +2,8 @@ import path from 'node:path'
 import type { ArtifactManifest } from './artifactManifest.js'
 import {
   BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
-  type ProjectionPluginCapabilitySnapshot,
+  projectionPluginContracts,
+  type RecoverableProjectionPluginCapabilitySnapshot,
 } from './pluginCapabilities.js'
 import type { ProjectionPluginContract } from './projectionPlan.js'
 import type { ProjectionPlanRecord } from './projectionPlanStore.js'
@@ -38,7 +39,7 @@ export interface RecoverInterruptedTaskRunsOptions {
   /** Resolves the registry digest persisted in summary.json. */
   pluginCapabilities?(
     digest: string | undefined,
-  ): Promise<ProjectionPluginCapabilitySnapshot>
+  ): Promise<RecoverableProjectionPluginCapabilitySnapshot>
   /** Verifies the immutable receipt fixed in the summary before settlement recovery. */
   capabilityReceipt?(runId: string, digest: string | undefined): Promise<void>
   /** Runs only after the reconstructed close is durable. */
@@ -158,7 +159,7 @@ export async function recoverInterruptedTaskRuns(
     }
 
     if (manifest) {
-      let pluginCapabilities = structuredClone(
+      let pluginCapabilities: RecoverableProjectionPluginCapabilitySnapshot = structuredClone(
         BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
       )
       if (options.pluginCapabilities) {
@@ -175,7 +176,7 @@ export async function recoverInterruptedTaskRuns(
             taskId: summary.taskId,
             runId: summary.runId,
             manifest,
-            plugins: pluginCapabilities.plugins,
+            plugins: projectionPluginContracts(pluginCapabilities),
           })
         if (recovered.disposition === 'closed') {
           report.closedPlans += 1

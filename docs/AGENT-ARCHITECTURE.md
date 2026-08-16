@@ -76,18 +76,21 @@ project/
 ## 三、固定插件能力
 
 节点插件的 React renderer 不进入 Agent 上下文。浏览器只把启用的 data-only artifact claims
-与 `nodeContext` 投影策略注册到 `PUT /plugin-capabilities`。daemon 固定内置能力、合并 community
-声明、规范化并返回 digest；内容寻址快照保存于：
+与 `nodeContext` 投影策略注册到 `PUT /plugin-capabilities`。daemon 在 Workspace acceptance
+路径重新读取受信 runtime contributions，合并不可覆盖的 builtins 与 community 声明，并固定
+带 provenance 的 v3：
 
 ```text
-.gg/runtime/plugin-capabilities-v2/<digest>.json
+.gg/runtime/plugin-capabilities-v3/<digest>.json
 ```
 
-Run 接受时按 digest 严格加载并固定完整快照，随后把同一快照写入 `pack.json` 和
+每项来源是 builtin version、runtime provider ID/version 或 browser-community。Run 接受时重新
+验证并固定完整快照，随后把同一 v3 digest 写入 Capability Receipt，并把快照写入 `pack.json` 和
 `plugin-capabilities.json`。Agent outcome 的 `pluginId` 必须属于该 registry，且 artifact path/MIME
 必须满足 claim；Node 输入则按同一快照中的 `nodeContext` 做确定性正文裁剪、payload 字段选择与
 artifact identity 过滤。每个输入携带 `contextProjection` receipt。这样插件热更新不会改变已经
-运行或正在恢复的 Run 的分类与上下文语义。
+运行或正在恢复的 Run 的分类与上下文语义。历史 `plugin-capabilities-v2` 只在 crash recovery
+中读取；新 Run 不会接受或写入 v2。
 
 ## 四、固定 Node Skills
 

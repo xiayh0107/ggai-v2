@@ -55,10 +55,15 @@ import { CanvasGitError } from './canvasGit.js'
 import { readExactFileBytes } from './atomic-file.js'
 import { PermissionPolicyError } from './permissions.js'
 import {
-  BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
   ProjectionPluginCapabilityStore,
+  browserCommunityProjectionClaims,
+  projectionPluginContracts,
+  resolveProjectionPluginCapabilitySnapshot,
   type ProjectionPluginCapabilitySnapshot,
 } from './pluginCapabilities.js'
+import {
+  workspaceProjectionContributionSnapshot,
+} from './projectionContributions.js'
 import {
   parseCanvasBranch,
   parsePermissionDecision,
@@ -961,7 +966,10 @@ async function route(
       snapshot = await context.projectLeases.withProjectOperation(
         projectDir,
         async (leasedProjectDir) => new ProjectionPluginCapabilityStore(leasedProjectDir)
-          .register(await readJson(request)),
+          .register(
+            await readJson(request),
+            workspaceProjectionContributionSnapshot(context.workspaceCapabilities),
+          ),
       )
     } catch (error) {
       if (error instanceof TypeError) {
@@ -976,7 +984,7 @@ async function route(
       )
     }
     writeJson(response, 200, {
-      schemaVersion: 2,
+      schemaVersion: 3,
       digest: snapshot.digest,
       pluginCount: snapshot.plugins.length,
     })
@@ -995,9 +1003,15 @@ async function route(
     const intent = parseRunIntentForServer(raw)
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
     const capabilityDigest = optionalPluginCapabilityDigest(url)
-    const pluginCapabilities = capabilityDigest
-      ? await loadPluginCapabilitiesForRun(context, projectDir, capabilityDigest)
-      : structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT)
+    const browserClaims = capabilityDigest
+      ? browserCommunityProjectionClaims(
+          await loadPluginCapabilitiesForRun(context, projectDir, capabilityDigest),
+        )
+      : { schemaVersion: 2 as const, plugins: [] }
+    const pluginCapabilities = resolveProjectionPluginCapabilitySnapshot(
+      browserClaims,
+      workspaceProjectionContributionSnapshot(context.workspaceCapabilities),
+    )
     assertServerOpen(context)
     const envelope = (await context.versions.getCanvas(
       projectDir,
@@ -1053,13 +1067,17 @@ async function route(
           )
         }
         const currentResolver = requireWorkspaceSkillResolver(context.workspaceCapabilities)
+        const currentPluginCapabilities = resolveProjectionPluginCapabilitySnapshot(
+          browserClaims,
+          workspaceProjectionContributionSnapshot(context.workspaceCapabilities),
+        )
         const [currentAttachments, currentSkills] = await Promise.all([
           resolveRunIntentAttachments(
             intent,
             current.document,
             context.runs,
             projectDir,
-            pluginCapabilities,
+            currentPluginCapabilities,
           ),
           resolveRunIntentSkills(
             intent,
@@ -1069,7 +1087,8 @@ async function route(
             currentResolver.provider,
           ),
         ])
-        if (JSON.stringify(currentAttachments) !== JSON.stringify(resolvedAttachments)
+        if (currentPluginCapabilities.digest !== pluginCapabilities.digest
+          || JSON.stringify(currentAttachments) !== JSON.stringify(resolvedAttachments)
           || currentSkills.digest !== resolvedSkills.digest
           || currentSkills.resolverDigest !== resolvedSkills.resolverDigest
           || currentSkills.resolverProvider !== resolvedSkills.resolverProvider
@@ -2100,8 +2119,9 @@ export async function resolveRunIntentAttachments(
   const nodes: ResolvedNodeAttachment[] = []
   const contentBudget = { remaining: MAX_RESOLVED_NODE_ATTACHMENT_CONTENT_BYTES }
   let nodeArtifactRefCount = 0
+  const projectionPlugins = projectionPluginContracts(pluginCapabilities)
   const nodeContextPolicies = new Map<string, NodeContextPolicy>(
-    pluginCapabilities.plugins.flatMap((plugin) =>
+    projectionPlugins.flatMap((plugin) =>
       plugin.nodeContext ? [[plugin.id, plugin.nodeContext] as const] : []),
   )
 
@@ -2162,7 +2182,7 @@ export async function resolveRunIntentAttachments(
   const contextPack = compileTaskContext({
     document,
     taskId: intent.taskId,
-    nodeContextPolicies: pluginCapabilities.plugins.flatMap((plugin) =>
+    nodeContextPolicies: projectionPlugins.flatMap((plugin) =>
       plugin.nodeContext ? [{ id: plugin.id, nodeContext: plugin.nodeContext }] : []),
   })
   for (const reference of taskContextArtifactRefs(contextPack)) {

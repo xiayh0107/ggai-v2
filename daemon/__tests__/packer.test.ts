@@ -300,7 +300,7 @@ test('Task Run packs bounded full-edge outputs with daemon-verified artifact pat
         }>
       }
       verifiedArtifactAttachments: Array<{ projectRelativePath: string; contentDigest: string }>
-      pluginCapabilities: { digest: string; plugins: Array<{ id: string }> }
+      pluginCapabilities: { digest: string; plugins: Array<{ pluginId: string }> }
       skillCapabilities: { digest: string; skills: Array<{ title: string; directory: string }> }
     }
 
@@ -342,7 +342,7 @@ test('Task Run packs bounded full-edge outputs with daemon-verified artifact pat
       json.pluginCapabilities.digest,
       BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT.digest,
     )
-    assert.ok(json.pluginCapabilities.plugins.some(({ id }) => id === 'file'))
+    assert.ok(json.pluginCapabilities.plugins.some(({ pluginId }) => pluginId === 'file'))
     assert.match(rendered, /Fixed plugin capabilities for this run/u)
     assert.match(rendered, /Explicit node attachments for this run/u)
     assert.match(rendered, /persisted Canvas revision 7/u)

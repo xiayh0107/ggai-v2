@@ -13,7 +13,8 @@
 | 运行记录 | `.gg/runtime/runs/<runId>/events.jsonl`、`events.idx`、`summary.json` | durable SSE 事件、终态 close、分页索引，以及固化实际 prompt/baseRevision 的 Run 摘要 | 是 |
 | Task 会话 | `.gg/runtime/task-sessions-v2.json` | `canvasBranch + taskId + agentId` 到 Agent session 的映射 | 是 |
 | ProjectionPlan | `.gg/runtime/projection-plans/<branch-hash>.json` | daemon 生成的 pending/dismissed 可信计划 | 是 |
-| 插件能力 | `.gg/runtime/plugin-capabilities-v2/<digest>.json` | Run 接受时固定的、内容寻址的 artifact claim 快照 | 是 |
+| 插件能力 v3 | `.gg/runtime/plugin-capabilities-v3/<digest>.json` | 新 Run 接受时固定的、带 provenance 的 projection capability 快照 | 是 |
+| 历史插件能力 v2 | `.gg/runtime/plugin-capabilities-v2/<digest>.json` | 仅供旧 Run crash recovery 读取 | 是，只读 |
 | Canvas 历史 | `.gg/canvas-state-v2/`、`.gg/canvas-worktrees-v2/` | 规范化 Task/Node/Collection/Edge/receipt Git checkpoint | 历史事实源 |
 | Artifact | `artifacts/.branches/<branch-hash>/<runId>/files/<relative-path>` | Run-owned 不可变文件 | 是 |
 

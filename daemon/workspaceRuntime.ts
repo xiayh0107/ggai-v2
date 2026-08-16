@@ -1,7 +1,7 @@
 import type { WorkspaceCapabilityScope } from './capabilityScopes.js'
 import { createWorkspaceSkillResolverPlugin } from './plugins/skillResolver/workspace.js'
 import {
-  type ProjectionContributionRegistry,
+  ProjectionContributionRegistry,
   PROJECTION_CONTRIBUTION_REGISTRY_SERVICE,
 } from './projectionContributions.js'
 import {
@@ -22,12 +22,10 @@ export function installWorkspaceCapabilityProviders(
     input.skillCatalog,
     '@ggai/skill-catalog-authority',
   )
-  if (input.projectionContributions) {
-    workspace.services.provide(
-      PROJECTION_CONTRIBUTION_REGISTRY_SERVICE,
-      input.projectionContributions,
-      '@ggai/projection-contribution-authority',
-    )
-  }
+  workspace.services.provide(
+    PROJECTION_CONTRIBUTION_REGISTRY_SERVICE,
+    input.projectionContributions ?? new ProjectionContributionRegistry(),
+    '@ggai/projection-contribution-authority',
+  )
   workspace.mountSync(createWorkspaceSkillResolverPlugin())
 }
