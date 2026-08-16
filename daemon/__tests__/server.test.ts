@@ -539,16 +539,6 @@ test('RunIntent executes only against the exact persisted Canvas revision', asyn
     assert.equal(close.projectionPlan.status, 'complete')
     assert.equal(close.projectionPlan.outputs[0]?.pluginId, 'text')
     assert.deepEqual(close.projectionPlan.taskProposals, [])
-    const pendingPlanResponse = await fetch(
-      `${fixture.baseUrl}/projection-plans/${close.projectionPlan.planId}?projectDir=.&branch=main`,
-    )
-    const pendingPlanText = await pendingPlanResponse.text()
-    assert.equal(pendingPlanResponse.status, 200, pendingPlanText)
-    assert.deepEqual(JSON.parse(pendingPlanText), {
-      plan: close.projectionPlan,
-      suggestedActions: close.suggestedActions,
-    })
-
     const rejectedLogDeletion = await fetch(
       `${fixture.baseUrl}/runs/${intent.runId}/log?projectDir=.`,
       { method: 'DELETE' },
@@ -567,14 +557,6 @@ test('RunIntent executes only against the exact persisted Canvas revision', asyn
     const retainedLogPage = await retainedLog.json() as typeof logPage
     const retainedClose = retainedLogPage?.entries.find((entry) => entry.event === 'close')?.data
     assert.deepEqual(retainedClose, close)
-    const retainedPlanResponse = await fetch(
-      `${fixture.baseUrl}/projection-plans/${close.projectionPlan.planId}?projectDir=.&branch=main`,
-    )
-    assert.equal(retainedPlanResponse.status, 200)
-    assert.deepEqual(await retainedPlanResponse.json(), {
-      plan: close.projectionPlan,
-      suggestedActions: close.suggestedActions,
-    })
     const retainedArtifact = close.artifactManifest.entries[0]!
     const retainedManifestEntryResponse = await fetch(
       `${fixture.baseUrl}/runs/${intent.runId}/artifacts/${retainedArtifact.artifactId}/metadata`,
@@ -610,6 +592,14 @@ test('RunIntent executes only against the exact persisted Canvas revision', asyn
     assert.equal(
       materializedCanvas.document.nodes[0]?.artifactRefs[0]?.artifactId,
       close.artifactManifest.entries[0]?.artifactId,
+    )
+    const settledPlanResponse = await fetch(
+      `${fixture.baseUrl}/projection-plans/${close.projectionPlan.planId}?projectDir=.&branch=main`,
+    )
+    assert.equal(settledPlanResponse.status, 404)
+    assert.equal(
+      (await settledPlanResponse.json() as { error: { code: string } }).error.code,
+      'projection_plan_not_found',
     )
     const materializationReplay = await fetch(`${fixture.baseUrl}/canvas/commands`, {
       method: 'POST',
