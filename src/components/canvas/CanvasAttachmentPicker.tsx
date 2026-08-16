@@ -1,5 +1,12 @@
 import { File, Image, Loader2, X } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react'
+import { createPortal } from 'react-dom'
 import type {
   ProjectArtifactCatalogApi,
   ProjectArtifactResource,
@@ -19,7 +26,18 @@ export interface CanvasAttachmentPickerProps {
   onClose: () => void
 }
 
-/** Project-scoped resource chooser. It owns catalog loading, limits, and resource identity. */
+interface FloatingPosition {
+  left: number
+  top: number
+}
+
+const VIEWPORT_MARGIN = 16
+const TRIGGER_GAP = 8
+
+/**
+ * Project-scoped resource chooser. It owns catalog loading, limits, resource
+ * identity and a viewport-aware portal so Canvas shells cannot clip it.
+ */
 export default function CanvasAttachmentPicker({
   api,
   projectDir,
@@ -31,6 +49,9 @@ export default function CanvasAttachmentPicker({
   const [resources, setResources] = useState<ProjectArtifactResource[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [position, setPosition] = useState<FloatingPosition | null>(null)
+  const pickerRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -48,12 +69,93 @@ export default function CanvasAttachmentPicker({
     return () => controller.abort()
   }, [api, branch, projectDir])
 
+  useLayoutEffect(() => {
+    const picker = pickerRef.current
+    if (!picker) return
+    triggerRef.current = findExpandedAttachmentTrigger()
+
+    const updatePosition = () => {
+      const popup = pickerRef.current
+      if (!popup) return
+      const trigger = triggerRef.current ?? findExpandedAttachmentTrigger()
+      triggerRef.current = trigger
+      const width = popup.offsetWidth
+      const height = popup.offsetHeight
+      const viewportWidth = globalThis.innerWidth
+      const viewportHeight = globalThis.innerHeight
+
+      if (!trigger) {
+        setPosition({
+          left: Math.max(VIEWPORT_MARGIN, Math.round((viewportWidth - width) / 2)),
+          top: Math.max(VIEWPORT_MARGIN, Math.round((viewportHeight - height) / 2)),
+        })
+        return
+      }
+
+      const rect = trigger.getBoundingClientRect()
+      const availableAbove = rect.top - VIEWPORT_MARGIN - TRIGGER_GAP
+      const availableBelow = viewportHeight - rect.bottom - VIEWPORT_MARGIN - TRIGGER_GAP
+      const placeAbove = availableAbove >= height || availableAbove >= availableBelow
+      const preferredTop = placeAbove
+        ? rect.top - TRIGGER_GAP - height
+        : rect.bottom + TRIGGER_GAP
+      const maxTop = Math.max(VIEWPORT_MARGIN, viewportHeight - VIEWPORT_MARGIN - height)
+      const maxLeft = Math.max(VIEWPORT_MARGIN, viewportWidth - VIEWPORT_MARGIN - width)
+      setPosition({
+        left: clamp(rect.left, VIEWPORT_MARGIN, maxLeft),
+        top: clamp(preferredTop, VIEWPORT_MARGIN, maxTop),
+      })
+    }
+
+    updatePosition()
+    const frame = requestAnimationFrame(updatePosition)
+    const resizeObserver = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(updatePosition)
+    resizeObserver?.observe(picker)
+    globalThis.addEventListener('resize', updatePosition)
+    globalThis.addEventListener('scroll', updatePosition, true)
+    return () => {
+      cancelAnimationFrame(frame)
+      resizeObserver?.disconnect()
+      globalThis.removeEventListener('resize', updatePosition)
+      globalThis.removeEventListener('scroll', updatePosition, true)
+    }
+  }, [])
+
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      onClose()
+      triggerRef.current?.focus()
+    }
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      if (pickerRef.current?.contains(target) || triggerRef.current?.contains(target)) return
+      onClose()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('pointerdown', onPointerDown)
+    }
+  }, [onClose])
+
   const selectedKeys = new Set(selected.map(artifactKey))
-  return (
+  const style: CSSProperties = position
+    ? { left: position.left, top: position.top }
+    : { left: VIEWPORT_MARGIN, top: VIEWPORT_MARGIN, visibility: 'hidden' }
+
+  return createPortal(
     <div
+      ref={pickerRef}
       role="dialog"
       aria-label="添加附件"
-      className="absolute bottom-[calc(100%+8px)] left-0 z-50 w-[min(360px,calc(100vw-48px))] rounded-[14px] border border-gg-line bg-white p-2.5 shadow-float"
+      style={style}
+      className="fixed z-[100] w-[min(360px,calc(100vw-48px))] rounded-[14px] border border-gg-line bg-white p-2.5 shadow-float"
     >
       <div className="mb-2 flex items-start justify-between gap-3 px-1">
         <div>
@@ -63,7 +165,10 @@ export default function CanvasAttachmentPicker({
         <button
           type="button"
           aria-label="关闭附件选择"
-          onClick={onClose}
+          onClick={() => {
+            onClose()
+            triggerRef.current?.focus()
+          }}
           className="flex h-6 w-6 items-center justify-center rounded-[7px] text-gg-muted outline-none hover:bg-gg-subtle focus-visible:ring-2 focus-visible:ring-gg-primary/30"
         >
           <X size={13} aria-hidden="true" />
@@ -120,7 +225,8 @@ export default function CanvasAttachmentPicker({
           )
         })}
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -128,6 +234,21 @@ export function AttachmentTypeIcon({ mediaType, size }: { mediaType: string; siz
   return mediaType.startsWith('image/')
     ? <Image size={size} aria-hidden="true" />
     : <File size={size} aria-hidden="true" />
+}
+
+function findExpandedAttachmentTrigger(): HTMLElement | null {
+  const active = document.activeElement
+  if (active instanceof HTMLElement
+    && active.matches('[aria-haspopup="dialog"][aria-expanded="true"]')) {
+    return active
+  }
+  return [...document.querySelectorAll<HTMLElement>(
+    '[aria-haspopup="dialog"][aria-expanded="true"]',
+  )].find((element) => element.getClientRects().length > 0) ?? null
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(Math.max(value, minimum), maximum)
 }
 
 function formatBytes(size: number): string {

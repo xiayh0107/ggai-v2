@@ -12,6 +12,12 @@
       "title": "空输出节点 · 生成服务需要处理",
       "viewport": { "width": 760, "height": 580 },
       "readySelector": "[data-ui-render-scenario='task-run-preflight-blocked'][data-ui-render-settled='true'] [data-preflight-status='blocked']"
+    },
+    {
+      "id": "task-run-attachments",
+      "title": "空输出节点 · 从生成内容选择可信附件",
+      "viewport": { "width": 820, "height": 720 },
+      "readySelector": "body:has([data-ui-render-scenario='task-run-attachments'][data-ui-render-settled='true']) > [role='dialog'][aria-label='添加附件'] [role='checkbox']"
     }
   ]
 }
