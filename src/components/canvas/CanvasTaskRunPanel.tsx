@@ -115,7 +115,7 @@ function CanvasTaskRunPanelContent({
     || active
     || submitting
     || cancelling
-    || preflightState.status !== 'ready'
+    || preflightState.status === 'blocked'
   const ownedNodes = canvasState.document.nodes.filter((node) => node.homeTaskId === task.id)
   const outputPlugin = ownedNodes.length === 1 ? getPlugin(ownedNodes[0].type) : null
   const panelTitle = ownedNodes.length === 1
@@ -222,12 +222,14 @@ function CanvasTaskRunPanelContent({
         message: preflightState.issues[0]?.message ?? '当前暂时无法开始生成。',
         additional: Math.max(0, preflightState.issues.length - 1),
         retryable: preflightState.issues.some((issue) => issue.retryable),
+        urgent: true,
       }
     : preflightState.status === 'error'
       ? {
           message: '暂时无法确认生成服务状态，请重新检测。',
           additional: 0,
           retryable: true,
+          urgent: false,
         }
       : null
 
@@ -256,6 +258,7 @@ function CanvasTaskRunPanelContent({
                 additional={preflightNotice.additional}
                 retryable={preflightNotice.retryable}
                 checking={preflightState.status === 'checking'}
+                urgent={preflightNotice.urgent}
                 onRetry={() => setPreflightAttempt((attempt) => attempt + 1)}
               />
             )}
@@ -557,17 +560,20 @@ function GenerationPreflightNotice({
   additional,
   retryable,
   checking,
+  urgent,
   onRetry,
 }: {
   message: string
   additional: number
   retryable: boolean
   checking: boolean
+  urgent: boolean
   onRetry(): void
 }) {
   return (
     <div
-      role="alert"
+      role={urgent ? 'alert' : 'status'}
+      aria-live={urgent ? 'assertive' : 'polite'}
       data-testid="canvas-generation-preflight-notice"
       className="mb-1.5 flex items-start gap-2 rounded-[10px] border border-[#F4C7C3] bg-[#FFF8F7] px-2.5 py-2"
     >
