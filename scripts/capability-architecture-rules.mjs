@@ -33,6 +33,7 @@ const CONCRETE_AGENT_TRANSPORT_MODULES = new Set([
 const CAPABILITY_COMPOSITION_ROOTS = new Set([
   'daemon/agentRuntime.ts',
   'daemon/application.ts',
+  'daemon/workspaceRuntime.ts',
 ])
 const PLUGIN_HOST_MODULE = 'daemon/runtime/pluginHost'
 

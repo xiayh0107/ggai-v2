@@ -21,6 +21,9 @@ RunCapabilityReceipt
 Receipt 不序列化 service instance、函数、路径授权、环境变量或凭证。Profile、services 和 semantic
 capability 都会 canonicalize 后再计算 SHA-256；不同注册顺序产生相同 receipt。
 
+Task Run 当前记录 `ggai.skill-resolver.v1` 的 Workspace provider 与 resolver semantic digest，并另行
+记录带 Node authority sources 的 Core Skill capability digest。这样 provider 热更新不会改写历史语义。
+
 ## Durable store
 
 `RunCapabilityReceiptStore` 将 receipt 幂等固定到：

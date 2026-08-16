@@ -275,6 +275,8 @@ test('Task Run packs bounded full-edge outputs with daemon-verified artifact pat
     pluginCapabilities: BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
     resolvedSkills,
     skillCapabilityDigest: resolvedTaskSkillCapabilityDigest(resolvedSkills),
+    skillResolverCapabilityDigest: 'a'.repeat(64),
+    skillResolverProvider: '@ggai/test-skill-resolver',
     automationMode: 'confirm',
   }
 

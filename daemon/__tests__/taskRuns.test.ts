@@ -95,6 +95,8 @@ function request(
     resolvedNodeAttachments: [],
     resolvedSkills: [],
     skillCapabilityDigest: EMPTY_SKILL_CAPABILITY_DIGEST,
+    skillResolverCapabilityDigest: 'a'.repeat(64),
+    skillResolverProvider: '@ggai/test-skill-resolver',
     automationMode: 'confirm',
   }
 }
@@ -626,7 +628,7 @@ test('Task acceptance pins a receipt before transport and closes its Run scope a
     await waitFor(() => scopes.snapshot().workspaces[0]?.runs.length === 0)
     assert.equal(transportObservedPinnedState, true)
     assert.equal(scopes.snapshot().workspaces[0]?.runs.length, 0)
-    assert.equal((await receipts.get(accepted.runId))?.semanticCapabilities.length, 3)
+    assert.equal((await receipts.get(accepted.runId))?.semanticCapabilities.length, 4)
     assert.deepEqual(await manager.getTaskRunReproducibility(accepted.runId), {
       runId: accepted.runId,
       reproducible: true,

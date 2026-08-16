@@ -104,6 +104,7 @@ POST /runs RunIntent + digest               │
 daemon 从 branch/revision 读取 Task + typed-edge inputs
        │
        ├─> 解析显式 Node/artifact attachments，复验 closed manifest
+       ├─> Workspace SkillResolver 解析 exact refs，Core 固定已验证 bytes
        ├─> 创建 Run capability scope，固定 receipt
        ├─> receiptStore.pin() ──> durable summary
        ├─> .gg/context/runs/<runId>/pack.{md,json}
