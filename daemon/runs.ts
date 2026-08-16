@@ -10,6 +10,11 @@ import { artifactRunRelativeDir, isArtifactControlPath } from './artifactPaths.j
 import { canvasBranchStorageId } from './canvasBranch.js'
 import { readLegacyRunOutcome } from './legacyOutcome.js'
 import { readRunOutcome } from './outcome.js'
+import { RunCapabilityReceiptStore } from './capabilityReceipt.js'
+import {
+  CapabilityExecutionScopes,
+  type RunCapabilityScope,
+} from './capabilityScopes.js'
 import { listArtifactSnapshot, prepareRunContext } from './packer.js'
 import {
   BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
@@ -28,6 +33,7 @@ import {
 import type {
   DaemonRunStatus,
   RunClosePayload,
+  RunReproducibilitySnapshot,
   RunStreamMessage,
   RunSummary,
 } from './protocol.js'
@@ -54,12 +60,15 @@ import {
   isNodeStudioRunRequest,
   isResolvedTaskRunRequest,
   pinResolvedTaskSkills,
+  resolvedTaskAttachmentCapabilityDigest,
   requestedRunSessionId,
   runTargetId,
   type RunExecutionRequest,
 } from './taskRunTypes.js'
 import { parseTaskId } from './taskRunProtocol.js'
 import type { AgentProcessTransport } from './transport/types.js'
+import { ServiceScope } from './runtime/services.js'
+import type { CapabilityProfileSnapshot } from './runtime/composition.js'
 import { watchArtifacts, type ArtifactWatcher } from './watcher.js'
 import type { ProjectionPlan, ProjectionSettlement } from './projectionPlan.js'
 import {
@@ -73,6 +82,16 @@ const FINISHED_RUN_LIMIT = 50
 const MAX_ACTIVE_RUNS = 4
 const MAX_SUBSCRIBERS_PER_RUN = 8
 const WATCHER_SETTLE_MS = 350
+const FALLBACK_CAPABILITY_PROFILE: CapabilityProfileSnapshot = Object.freeze({
+  schemaVersion: 1,
+  id: '@ggai/fallback-agent-runtime',
+  version: '1.0.0',
+  bundles: Object.freeze([]),
+})
+
+const PROJECTION_CAPABILITY_RECEIPT_KEY = 'ggai.projection-capabilities.v2'
+const SKILL_CAPABILITY_RECEIPT_KEY = 'ggai.skill-capabilities.v1'
+const ATTACHMENT_CAPABILITY_RECEIPT_KEY = 'ggai.run-attachments.v1'
 
 type BufferedStreamMessage = RunStreamMessage & { id: number }
 
@@ -106,6 +125,7 @@ interface InternalRun {
   acceptanceState: 'pending' | 'accepted' | 'rejected'
   acceptanceError?: unknown
   logStore: RunLogStore
+  capabilityScope: RunCapabilityScope | null
   logError?: unknown
 }
 
@@ -137,6 +157,19 @@ export interface RunManagerOptions {
   }) => Promise<string | null>
   /** Test seam for deterministic artifact settlement without OS watcher limits. */
   watchArtifacts?: typeof watchArtifacts
+  /** Application-owned scope tree; omitted callers receive an isolated fallback tree. */
+  capabilityScopes?: CapabilityExecutionScopes
+  /** Snapshots the active profile at the acceptance boundary. */
+  capabilityProfile?: () => CapabilityProfileSnapshot
+}
+
+export type TaskRunReproducibilityReadModel = {
+  runId: string
+  reproducible: boolean
+  generationService: string
+  skills: { count: number }
+  attachments: { count: number }
+  capabilityProfile: { label: string }
 }
 
 export interface RunFinishedEvent {
@@ -194,6 +227,9 @@ export class RunManager {
   readonly #onProjectionPlanReady?: (event: ProjectionPlanReadyEvent) => Promise<void>
   readonly #resolveSourceProjectDir?: RunManagerOptions['resolveSourceProjectDir']
   readonly #watchArtifacts: typeof watchArtifacts
+  readonly #capabilityScopes: CapabilityExecutionScopes
+  readonly #ownsCapabilityScopes: boolean
+  readonly #capabilityProfile: () => CapabilityProfileSnapshot
   readonly #runs = new Map<string, InternalRun>()
   readonly #tasks = new Map<string, Promise<void>>()
   readonly #sessionStores = new Map<string, SessionStore>()
@@ -203,6 +239,7 @@ export class RunManager {
   readonly #pluginCapabilityStores = new Map<string, ProjectionPluginCapabilityStore>()
   readonly #runLogStores = new Map<string, RunLogStore>()
   readonly #runLogRecovery = new Map<string, Promise<void>>()
+  readonly #capabilityReceiptStores = new Map<string, RunCapabilityReceiptStore>()
   readonly #pendingCreates = new Map<string, PendingRunCreation>()
   readonly #branchRunLeases = new Map<string, Set<string>>()
   readonly #branchMutationLeases = new Set<string>()
@@ -220,6 +257,12 @@ export class RunManager {
     this.#onProjectionPlanReady = options.onProjectionPlanReady
     this.#resolveSourceProjectDir = options.resolveSourceProjectDir
     this.#watchArtifacts = options.watchArtifacts ?? watchArtifacts
+    this.#ownsCapabilityScopes = options.capabilityScopes === undefined
+    this.#capabilityScopes = options.capabilityScopes ?? new CapabilityExecutionScopes(
+      this.#registry.runtimeServices ?? new ServiceScope({ label: 'run-manager-fallback' }),
+    )
+    this.#capabilityProfile = options.capabilityProfile
+      ?? (() => this.#registry.runtimeDiagnostics?.().profile ?? FALLBACK_CAPABILITY_PROFILE)
   }
 
   async create(
@@ -328,6 +371,7 @@ export class RunManager {
       validateReserved,
     } = input
     let leaseTransferred = false
+    let unownedCapabilityScope: RunCapabilityScope | null = null
     try {
       await validateReserved?.()
       this.#assertOpen()
@@ -381,6 +425,44 @@ export class RunManager {
         )
       }
       const targetId = runTargetId(request)
+      const descriptor = (await this.#registry.probe())
+        .find((candidate) => candidate.id === request.agentId)
+      if (!descriptor?.available) {
+        throw new ProtocolError(
+          descriptor?.detail || `agent is unavailable: ${request.agentId}`,
+          'agent_unavailable',
+          503,
+        )
+      }
+      this.#assertOpen()
+      await assertManagedPaths(
+        scope,
+        targetId,
+        runId,
+        canvasBranch,
+        isResolvedTaskRunRequest(request),
+        isResolvedTaskRunRequest(request) || isNodeStudioRunRequest(request),
+      )
+
+      let capabilityReceiptDigest: string | undefined
+      let reproducibilitySnapshot: RunReproducibilitySnapshot | undefined
+      if (isResolvedTaskRunRequest(request)) {
+        unownedCapabilityScope = this.#capabilityScopes
+          .workspace(this.#projectRoot)
+          .run(runId)
+        const receipt = unownedCapabilityScope.acceptCapabilities(
+          this.#capabilityProfile(),
+          semanticCapabilitiesForTaskRun(request),
+        )
+        const pinnedReceipt = await this.#capabilityReceipts(projectDir).pin(receipt)
+        capabilityReceiptDigest = pinnedReceipt.digest
+        reproducibilitySnapshot = {
+          generationService: descriptor.label,
+          skillCount: request.resolvedSkills.length,
+          attachmentCount: request.attachments.length,
+          capabilityProfileLabel: capabilityProfileLabel(pinnedReceipt.profile.id),
+        }
+      }
       const summary: RunSummary = {
         runId,
         ...(isResolvedTaskRunRequest(request) ? {
@@ -395,6 +477,8 @@ export class RunManager {
           ? {
               pluginCapabilityDigest: requirePinnedPluginCapabilities(request).digest,
               skillCapabilityDigest: request.skillCapabilityDigest,
+              capabilityReceiptDigest,
+              reproducibilitySnapshot,
             }
           : {}),
         ...(isNodeStudioRunRequest(request) ? {
@@ -434,28 +518,12 @@ export class RunManager {
         resolveAcceptance: acceptance.resolve,
         acceptanceState: 'pending',
         logStore,
+        capabilityScope: unownedCapabilityScope,
       }
+      unownedCapabilityScope = null
       this.#runs.set(runId, run)
       try {
         await logStore.start(summary)
-        const descriptor = (await this.#registry.probe())
-          .find((candidate) => candidate.id === request.agentId)
-        if (!descriptor?.available) {
-          throw new ProtocolError(
-            descriptor?.detail || `agent is unavailable: ${request.agentId}`,
-            'agent_unavailable',
-            503,
-          )
-        }
-        this.#assertOpen()
-        await assertManagedPaths(
-          scope,
-          targetId,
-          runId,
-          canvasBranch,
-          isResolvedTaskRunRequest(request),
-          isResolvedTaskRunRequest(request) || isNodeStudioRunRequest(request),
-        )
         run.acceptanceState = 'accepted'
         run.resolveAcceptance()
       } catch (error) {
@@ -472,6 +540,7 @@ export class RunManager {
         run.acceptanceError = rejection
         run.resolveAcceptance()
         if (error instanceof RunLogExistsError) {
+          await run.capabilityScope?.dispose().catch(() => undefined)
           this.#runs.delete(runId)
           throw rejection
         }
@@ -492,6 +561,7 @@ export class RunManager {
       leaseTransferred = true
       return { ...summary }
     } finally {
+      await unownedCapabilityScope?.dispose().catch(() => undefined)
       if (!leaseTransferred) this.#releaseRunReservation(reservation, runId)
     }
   }
@@ -505,6 +575,38 @@ export class RunManager {
     const { projectDir, store } = await this.#persistentRunStore(projectDirRequest)
     const active = this.#runs.get(runId)
     return active?.projectDir === projectDir ? { ...active.summary } : store.summary(runId)
+  }
+
+  async getTaskRunReproducibility(
+    runId: string,
+    projectDirRequest = '.',
+  ): Promise<TaskRunReproducibilityReadModel | null> {
+    const projectDir = await this.#leaseProject(projectDirRequest)
+    const summary = await this.getPersisted(runId, projectDir)
+    if (!summary?.taskId) return null
+    const snapshot = summary.reproducibilitySnapshot ?? {
+      generationService: '未知生成服务',
+      skillCount: 0,
+      attachmentCount: 0,
+      capabilityProfileLabel: '历史生成环境',
+    }
+    let reproducible = false
+    if (summary.capabilityReceiptDigest && summary.reproducibilitySnapshot) {
+      try {
+        const receipt = await this.#capabilityReceipts(projectDir).get(runId)
+        reproducible = receipt?.digest === summary.capabilityReceiptDigest
+      } catch {
+        reproducible = false
+      }
+    }
+    return {
+      runId,
+      reproducible,
+      generationService: snapshot.generationService,
+      skills: { count: snapshot.skillCount },
+      attachments: { count: snapshot.attachmentCount },
+      capabilityProfile: { label: snapshot.capabilityProfileLabel },
+    }
   }
 
   async listRunHistory(
@@ -889,6 +991,7 @@ export class RunManager {
     this.#runLogStores.delete(projectDir)
     this.#runLogRecovery.delete(projectDir)
     this.#pluginCapabilityStores.delete(projectDir)
+    this.#capabilityReceiptStores.delete(projectDir)
     for (const key of this.#artifactStores.keys()) {
       if (projectScopedLeaseKey(key, projectDir)) this.#artifactStores.delete(key)
     }
@@ -911,6 +1014,7 @@ export class RunManager {
     await Promise.allSettled([...this.#pendingCreates.values()].map((pending) => pending.promise))
     await Promise.allSettled(this.#tasks.values())
     await Promise.allSettled([...this.#runLogStores.values()].map((store) => store.flush()))
+    if (this.#ownsCapabilityScopes) await this.#capabilityScopes.dispose()
   }
 
   async #execute(run: InternalRun): Promise<void> {
@@ -1272,7 +1376,6 @@ export class RunManager {
     this.#broadcast(run, buffered)
     run.closed = true
     run.listeners.clear()
-    run.resolveClosed()
     if (this.#onRunFinished) {
       try {
         await this.#onRunFinished({
@@ -1285,6 +1388,8 @@ export class RunManager {
         // deliberately best-effort and reports degradation through its own API.
       }
     }
+    await run.capabilityScope?.dispose().catch(() => undefined)
+    run.resolveClosed()
   }
 
   async #collectTerminalArtifacts(
@@ -1403,6 +1508,13 @@ export class RunManager {
           canvasBranch,
         ),
         pluginCapabilities: (digest) => this.#pluginCapabilities(projectDir).recover(digest),
+        capabilityReceipt: async (runId, expectedDigest) => {
+          if (!expectedDigest) return
+          const receipt = await this.#capabilityReceipts(projectDir).get(runId)
+          if (!receipt || receipt.digest !== expectedDigest) {
+            throw new Error('Run capability receipt is missing or does not match its summary')
+          }
+        },
         ...(this.#onProjectionPlanReady
           ? { onProjectionPlanReady: this.#onProjectionPlanReady }
           : {}),
@@ -1417,6 +1529,15 @@ export class RunManager {
     if (!store) {
       store = new ProjectionPluginCapabilityStore(projectDir)
       this.#pluginCapabilityStores.set(projectDir, store)
+    }
+    return store
+  }
+
+  #capabilityReceipts(projectDir: string): RunCapabilityReceiptStore {
+    let store = this.#capabilityReceiptStores.get(projectDir)
+    if (!store) {
+      store = new RunCapabilityReceiptStore(projectDir)
+      this.#capabilityReceiptStores.set(projectDir, store)
     }
     return store
   }
@@ -1884,6 +2005,31 @@ function runRequestIdentity(request: RunExecutionRequest): string {
     materializationPolicy: request.materializationPolicy,
     pluginCapabilityDigest: requirePinnedPluginCapabilities(request).digest,
   })
+}
+
+function semanticCapabilitiesForTaskRun(
+  request: Extract<RunExecutionRequest, { schemaVersion: 2 }>,
+) {
+  return [{
+    key: PROJECTION_CAPABILITY_RECEIPT_KEY,
+    provider: '@ggai/core-run-acceptance',
+    digest: requirePinnedPluginCapabilities(request).digest,
+  }, {
+    key: SKILL_CAPABILITY_RECEIPT_KEY,
+    provider: '@ggai/core-run-acceptance',
+    digest: request.skillCapabilityDigest,
+  }, {
+    key: ATTACHMENT_CAPABILITY_RECEIPT_KEY,
+    provider: '@ggai/core-run-acceptance',
+    digest: resolvedTaskAttachmentCapabilityDigest(request),
+  }]
+}
+
+function capabilityProfileLabel(profileId: string): string {
+  if (profileId === '@ggai/default-agent-runtime') return '默认生成环境'
+  if (profileId === '@ggai/empty-agent-runtime') return '空生成环境'
+  if (profileId === '@ggai/fallback-agent-runtime') return '兼容生成环境'
+  return '自定义生成环境'
 }
 
 function pinProjectionPluginCapabilities(

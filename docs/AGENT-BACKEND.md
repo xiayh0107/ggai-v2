@@ -73,6 +73,7 @@ daemon/
 | POST | `/canvas/merges/preview`、`/canvas/merges` | 语义 merge 预览与确认执行 |
 | PUT | `/plugin-capabilities?projectDir=` | 注册 community data-only claims，返回固定 digest |
 | POST | `/task-runs/preflight?projectDir=` | 只读检查 Agent、revision、附件与 Skills；结果不是启动票据 |
+| GET | `/task-runs/:runId/reproducibility?projectDir=` | 读取不暴露 digest/provider 的历史运行环境摘要 |
 | POST | `/runs?projectDir=&pluginCapabilityDigest=` | 启动严格 `RunIntent`；成功为 HTTP 202 |
 | GET | `/runs?projectDir=&taskId=&branch=` | 查询 Task Run 历史 |
 | GET | `/runs/:id`、`/runs/:id/log` | Run summary 与永久日志分页 |
@@ -103,6 +104,8 @@ POST /runs RunIntent + digest               │
 daemon 从 branch/revision 读取 Task + typed-edge inputs
        │
        ├─> 解析显式 Node/artifact attachments，复验 closed manifest
+       ├─> 创建 Run capability scope，固定 receipt
+       ├─> receiptStore.pin() ──> durable summary
        ├─> .gg/context/runs/<runId>/pack.{md,json}
        ├─> 固定 plugin-capabilities.json
        ├─> 查 task session，spawn/resume transport
@@ -153,6 +156,7 @@ project/
 │   │   ├── runs/<runId>/{events.jsonl,events.idx,summary.json} # 固化 prompt/baseRevision
 │   │   ├── projection-plans/<branch-hash>.json
 │   │   ├── plugin-capabilities-v2/<digest>.json
+│   │   ├── capability-receipts-v1/<runId>.json
 │   │   ├── task-sessions-v2.json
 │   │   └── canvas-daemon.lock
 │   ├── canvas-state-v2/                  # 独立 Canvas Git

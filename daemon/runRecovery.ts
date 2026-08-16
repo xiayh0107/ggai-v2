@@ -39,6 +39,8 @@ export interface RecoverInterruptedTaskRunsOptions {
   pluginCapabilities?(
     digest: string | undefined,
   ): Promise<ProjectionPluginCapabilitySnapshot>
+  /** Verifies the immutable receipt fixed in the summary before settlement recovery. */
+  capabilityReceipt?(runId: string, digest: string | undefined): Promise<void>
   /** Runs only after the reconstructed close is durable. */
   onProjectionPlanReady?(input: {
     plan: ProjectionPlanRecord['plan']
@@ -52,6 +54,7 @@ export interface InterruptedTaskRunRecoveryFailure {
   stage:
     | 'manifest'
     | 'plugin-capabilities'
+    | 'capability-receipt'
     | 'projection-plan'
     | 'run-log'
     | 'projection-hook'
@@ -82,6 +85,14 @@ export async function recoverInterruptedTaskRuns(
   }
 
   for (const { summary } of candidates) {
+    if (options.capabilityReceipt) {
+      try {
+        await options.capabilityReceipt(summary.runId, summary.capabilityReceiptDigest)
+      } catch (error) {
+        report.failures.push(failure(summary.runId, 'capability-receipt', error))
+        continue
+      }
+    }
     try {
       // A terminal close is the authoritative settlement boundary. In
       // particular, a crash after close+materialization but before summary

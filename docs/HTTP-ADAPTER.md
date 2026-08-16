@@ -15,6 +15,7 @@ Registry、RunManager、Catalog 或 PluginHost。
 - `GET /health`
 - `GET /runtime`
 - `POST /task-runs/preflight`
+- `GET /task-runs/:runId/reproducibility`
 
 迁移规则：
 

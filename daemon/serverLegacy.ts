@@ -39,6 +39,7 @@ import {
   CanvasSnapshotError,
 } from './canvasCommandStore.js'
 import { CanvasCommandStoreManager } from './canvasCommandStoreManager.js'
+import type { CapabilityExecutionScopes } from './capabilityScopes.js'
 import {
   parseCanvasConflictRecoveryRequest,
   parseCanvasCommandRequest,
@@ -138,6 +139,7 @@ export interface DaemonServerOptions {
   projectCatalog?: ProjectCatalog
   nodeDefinitionCatalog?: NodeDefinitionCatalog
   skillAssetCatalog?: SkillAssetCatalog
+  capabilityExecutionScopes?: CapabilityExecutionScopes
 }
 
 export interface DaemonServer {
@@ -184,6 +186,8 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   const runs = options.runManager ?? new RunManager({
     projectRoot: options.projectRoot,
     registry,
+    capabilityScopes: options.capabilityExecutionScopes,
+    capabilityProfile: () => registry.runtimeDiagnostics().profile,
     acquireProjectLease: (projectDir) => canvas.acquireProjectLease(projectDir),
     resolveSourceProjectDir: async ({ projectDir, canvasBranch, taskOwned, studioOwned }) => {
       if (!taskOwned && !studioOwned) {

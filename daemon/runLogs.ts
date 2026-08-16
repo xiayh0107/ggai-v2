@@ -797,6 +797,13 @@ function decodeSummary(source: string, expectedRunId: string): RunSummary {
     || (record.skillCapabilityDigest !== undefined
       && (typeof record.skillCapabilityDigest !== 'string'
         || !/^[0-9a-f]{64}$/u.test(record.skillCapabilityDigest)))
+    || (record.capabilityReceiptDigest !== undefined
+      && (typeof record.capabilityReceiptDigest !== 'string'
+        || !/^[0-9a-f]{64}$/u.test(record.capabilityReceiptDigest)))
+    || (record.reproducibilitySnapshot !== undefined
+      && !isRunReproducibilitySnapshot(record.reproducibilitySnapshot))
+    || ((record.capabilityReceiptDigest === undefined)
+      !== (record.reproducibilitySnapshot === undefined))
     || (record.runKind !== undefined && record.runKind !== 'node-studio')
     || (nodeStudioOwned
       ? record.taskId !== undefined
@@ -840,6 +847,12 @@ function decodeSummary(source: string, expectedRunId: string): RunSummary {
     ...(record.skillCapabilityDigest === undefined
       ? {}
       : { skillCapabilityDigest: record.skillCapabilityDigest }),
+    ...(record.capabilityReceiptDigest === undefined
+      ? {}
+      : { capabilityReceiptDigest: record.capabilityReceiptDigest }),
+    ...(record.reproducibilitySnapshot === undefined
+      ? {}
+      : { reproducibilitySnapshot: structuredClone(record.reproducibilitySnapshot) }),
     ...(nodeStudioOwned ? {
       runKind: 'node-studio' as const,
       baseDefinitionId: record.baseDefinitionId,
@@ -852,6 +865,24 @@ function decodeSummary(source: string, expectedRunId: string): RunSummary {
     ...(record.error === undefined ? {} : { error: record.error }),
     ...(record.logAvailable === undefined ? {} : { logAvailable: record.logAvailable }),
   } as RunSummary
+}
+
+function isRunReproducibilitySnapshot(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  return Object.keys(record).length === 4
+    && typeof record.generationService === 'string'
+    && record.generationService.length > 0
+    && record.generationService.length <= 160
+    && Number.isSafeInteger(record.skillCount)
+    && Number(record.skillCount) >= 0
+    && Number(record.skillCount) <= 32
+    && Number.isSafeInteger(record.attachmentCount)
+    && Number(record.attachmentCount) >= 0
+    && Number(record.attachmentCount) <= 32
+    && typeof record.capabilityProfileLabel === 'string'
+    && record.capabilityProfileLabel.length > 0
+    && record.capabilityProfileLabel.length <= 160
 }
 
 function isRunStatus(value: unknown): value is RunSummary['status'] {

@@ -33,7 +33,15 @@ capability 都会 canonicalize 后再计算 SHA-256；不同注册顺序产生�
 `O_NOFOLLOW`、canonical project root 和完整 digest 复验。Receipt 字节一旦写入，不随 provider 热更新
 改变。
 
-`RunCapabilityScope.acceptCapabilities()` 已能从实际 scope 生成 receipt。后续 RunManager 接线只需要
-在 acceptance lease 内调用该方法并 `pin()`，而不是重新从全局 registry 推断历史能力。
+`RunManager` 在 Task acceptance reservation 内完成 revision、附件与 Skill 复验后创建 Run scope，
+调用 `acceptCapabilities()` 并在 durable summary 之前 `pin()`。Receipt 写入失败时不会创建 summary，
+更不会启动 Agent transport。同一 `runId` 只能固定同一 digest；最终 settlement 后 Run scope 关闭。
 
-该机制不修改 Canvas UI、样式、交互或 Node 持久模型。
+新 Task Run summary 保存 `capabilityReceiptDigest` 与一份不含实现细节的友好历史快照。crash recovery
+在重建 close/ProjectionPlan 前复验同一 receipt；缺失或 digest 不一致的新版 Run fail closed，旧版未带
+receipt 的 summary 仍按历史兼容路径恢复。
+
+`GET /task-runs/:runId/reproducibility` 只返回生成服务名称、Skill/附件数量和生成环境标签。完整
+receipt、provider/service identity 与原始 digest 仍只属于内部持久协议和开发诊断。
+
+该机制不修改 Canvas Node 持久模型，也不会把完整 receipt 写入 Node。

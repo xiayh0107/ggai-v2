@@ -5,7 +5,9 @@ import type { AddressInfo } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { createRunCapabilityReceipt, RunCapabilityReceiptStore } from '../capabilityReceipt.js'
 import { AgentRegistry } from '../registry.js'
+import { RunLogStore } from '../runLogs.js'
 import { createDaemonServer } from '../server.js'
 
 test('bounded HTTP routes preserve health and expose runtime diagnostics', async (t) => {
@@ -60,6 +62,15 @@ test('bounded HTTP routes preserve health and expose runtime diagnostics', async
       message: 'Task Run preflight request has unsupported fields',
     },
   })
+
+  const missingReproducibility = await getJson(
+    port,
+    '/task-runs/missing-run/reproducibility',
+  )
+  assert.equal(missingReproducibility.status, 404)
+  assert.deepEqual(missingReproducibility.body, {
+    error: { code: 'task_run_not_found', message: 'Task Run does not exist' },
+  })
 })
 
 test('new routes preserve the localhost CORS boundary', async (t) => {
@@ -77,6 +88,61 @@ test('new routes preserve the localhost CORS boundary', async (t) => {
   assert.deepEqual(response.body, {
     error: { code: 'origin_denied', message: 'request origin is not allowed' },
   })
+})
+
+test('Task Run reproducibility route exposes only the friendly verified read model', async (t) => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-http-repro-')))
+  const runId = 'run-reproducible'
+  const receipt = createRunCapabilityReceipt({
+    runId,
+    profile: {
+      schemaVersion: 1,
+      id: '@ggai/default-agent-runtime',
+      version: '1.0.0',
+      bundles: [],
+    },
+    services: [],
+  })
+  await new RunCapabilityReceiptStore(root).pin(receipt)
+  await new RunLogStore(root).start({
+    runId,
+    taskId: 'task-reproducible',
+    nodeId: 'task-reproducible',
+    agentId: 'codex',
+    canvasBranch: 'main',
+    capabilityReceiptDigest: receipt.digest,
+    reproducibilitySnapshot: {
+      generationService: 'Codex',
+      skillCount: 3,
+      attachmentCount: 2,
+      capabilityProfileLabel: '默认生成环境',
+    },
+    status: 'done',
+    startedAt: 1,
+    finishedAt: 2,
+    sessionId: null,
+  })
+  const daemon = createDaemonServer({ projectRoot: root })
+  t.after(async () => {
+    await daemon.close()
+    await rm(root, { recursive: true, force: true })
+  })
+  await listen(daemon.server)
+
+  const response = await getJson(
+    addressPort(daemon.server.address()),
+    `/task-runs/${runId}/reproducibility`,
+  )
+  assert.equal(response.status, 200)
+  assert.deepEqual(response.body, {
+    runId,
+    reproducible: true,
+    generationService: 'Codex',
+    skills: { count: 3 },
+    attachments: { count: 2 },
+    capabilityProfile: { label: '默认生成环境' },
+  })
+  assert.equal(JSON.stringify(response.body).includes(receipt.digest), false)
 })
 
 function listen(server: ReturnType<typeof createDaemonServer>['server']): Promise<void> {

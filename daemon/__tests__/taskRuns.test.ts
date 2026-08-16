@@ -13,11 +13,14 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import type { CanvasDocument } from '../../src/canvas/model.js'
+import { createRunCapabilityReceipt, RunCapabilityReceiptStore } from '../capabilityReceipt.js'
+import { CapabilityExecutionScopes } from '../capabilityScopes.js'
 import { ProtocolError } from '../protocol.js'
 import { resolveProjectionPluginCapabilitySnapshot } from '../pluginCapabilities.js'
 import type { AgentRegistry } from '../registry.js'
 import { RunLogStore } from '../runLogs.js'
 import { RunManager } from '../runs.js'
+import { ServiceScope } from '../runtime/services.js'
 import { RunArtifactStore } from '../runArtifactStorage.js'
 import {
   EMPTY_SKILL_CAPABILITY_DIGEST,
@@ -567,6 +570,126 @@ test('Task acceptance fails before durable summary when capability pinning is un
     assert.equal(transportStarted, false)
     assert.equal(await new RunLogStore(root).summary(input.runId), null)
     assert.deepEqual(await readdir(outside), [])
+  } finally {
+    await manager.close()
+    await Promise.all([
+      rm(root, { recursive: true, force: true }),
+      rm(outside, { recursive: true, force: true }),
+    ])
+  }
+})
+
+test('Task acceptance pins a receipt before transport and closes its Run scope after settlement', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-task-run-receipt-')))
+  const scopes = new CapabilityExecutionScopes(new ServiceScope({ label: 'test-runtime' }))
+  const receipts = new RunCapabilityReceiptStore(root)
+  let transportObservedPinnedState = false
+  const transport: AgentProcessTransport = {
+    kind: 'codex',
+    async run(options): Promise<TransportRunResult> {
+      const summary = await new RunLogStore(root).summary(options.runId)
+      const receipt = await receipts.get(options.runId)
+      transportObservedPinnedState = Boolean(
+        receipt
+        && summary?.capabilityReceiptDigest === receipt.digest
+        && scopes.snapshot().workspaces[0]?.runs.some((run) => run.runId === options.runId),
+      )
+      options.onEvent({ type: 'done', stopReason: 'end_turn' })
+      return { sessionId: null }
+    },
+    async cancel() {
+      return false
+    },
+  }
+  const manager = new RunManager({
+    projectRoot: root,
+    registry: registry(transport),
+    capabilityScopes: scopes,
+    capabilityProfile: () => ({
+      schemaVersion: 1,
+      id: '@ggai/default-agent-runtime',
+      version: '1.0.0',
+      bundles: [],
+    }),
+  })
+
+  try {
+    const accepted = await manager.create(request('task-run-receipt'))
+    assert.match(accepted.capabilityReceiptDigest ?? '', /^[0-9a-f]{64}$/u)
+    assert.deepEqual(accepted.reproducibilitySnapshot, {
+      generationService: 'Controlled',
+      skillCount: 0,
+      attachmentCount: 0,
+      capabilityProfileLabel: '默认生成环境',
+    })
+    await waitFor(() => manager.get(accepted.runId)?.status === 'done')
+    await waitFor(() => scopes.snapshot().workspaces[0]?.runs.length === 0)
+    assert.equal(transportObservedPinnedState, true)
+    assert.equal(scopes.snapshot().workspaces[0]?.runs.length, 0)
+    assert.equal((await receipts.get(accepted.runId))?.semanticCapabilities.length, 3)
+    assert.deepEqual(await manager.getTaskRunReproducibility(accepted.runId), {
+      runId: accepted.runId,
+      reproducible: true,
+      generationService: 'Controlled',
+      skills: { count: 0 },
+      attachments: { count: 0 },
+      capabilityProfile: { label: '默认生成环境' },
+    })
+  } finally {
+    await manager.close()
+    await scopes.dispose()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a conflicting receipt or unsafe receipt store prevents transport and durable summary', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-task-run-receipt-fail-')))
+  const outside = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-task-run-receipt-out-')))
+  let transportStarts = 0
+  const transport: AgentProcessTransport = {
+    kind: 'codex',
+    async run(): Promise<TransportRunResult> {
+      transportStarts += 1
+      return { sessionId: null }
+    },
+    async cancel() {
+      return false
+    },
+  }
+  const conflictingRunId = 'task-run-conflicting-receipt'
+  await new RunCapabilityReceiptStore(root).pin(createRunCapabilityReceipt({
+    runId: conflictingRunId,
+    profile: {
+      schemaVersion: 1,
+      id: '@ggai/foreign-runtime',
+      version: '1.0.0',
+      bundles: [],
+    },
+    services: [],
+  }))
+  const manager = new RunManager({ projectRoot: root, registry: registry(transport) })
+  try {
+    await assert.rejects(
+      manager.create(request(conflictingRunId)),
+      /already exists with another digest/u,
+    )
+    assert.equal(transportStarts, 0)
+    assert.equal(await new RunLogStore(root).summary(conflictingRunId), null)
+
+    await rm(path.join(root, '.gg', 'runtime', 'capability-receipts-v1'), {
+      recursive: true,
+      force: true,
+    })
+    await symlink(outside, path.join(root, '.gg', 'runtime', 'capability-receipts-v1'), 'dir')
+    await assert.rejects(
+      manager.create(request('task-run-unsafe-receipt-store')),
+      /unsafe capability receipt root/u,
+    )
+    assert.equal(transportStarts, 0)
+    assert.equal(
+      await new RunLogStore(root).summary('task-run-unsafe-receipt-store'),
+      null,
+    )
   } finally {
     await manager.close()
     await Promise.all([

@@ -200,6 +200,51 @@ test('crash recovery resolves the capability digest fixed in the durable summary
   }
 })
 
+test('crash recovery fails closed when the pinned capability receipt cannot be verified', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-run-receipt-recovery-')))
+  const runLogs = new RunLogStore(root)
+  const plans = new PendingRecoveryPlans()
+  const artifacts = new RunArtifactStore(root, 'main')
+  try {
+    await runLogs.start({
+      runId: 'run-receipt-recovery',
+      taskId: 'task-receipt-recovery',
+      nodeId: 'task-receipt-recovery',
+      agentId: 'codex',
+      canvasBranch: 'main',
+      capabilityReceiptDigest: 'a'.repeat(64),
+      reproducibilitySnapshot: {
+        generationService: 'Codex',
+        skillCount: 0,
+        attachmentCount: 0,
+        capabilityProfileLabel: '默认生成环境',
+      },
+      status: 'running',
+      startedAt: 100,
+      sessionId: null,
+    })
+    const report = await recoverInterruptedTaskRuns({
+      projectDir: root,
+      runLogs,
+      artifactStore: () => artifacts,
+      projectionPlanStore: () => plans,
+      capabilityReceipt: async (_runId, digest) => {
+        assert.equal(digest, 'a'.repeat(64))
+        throw new Error('receipt mismatch')
+      },
+    })
+    assert.deepEqual(report.failures, [{
+      runId: 'run-receipt-recovery',
+      stage: 'capability-receipt',
+      message: 'receipt mismatch',
+    }])
+    assert.equal(await runLogs.terminalClose('run-receipt-recovery'), null)
+    assert.deepEqual(plans.calls, [])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 function closePlanId(close: Awaited<ReturnType<RunLogStore['terminalClose']>>): string {
   assert.ok(close?.projectionPlan)
   return close.projectionPlan.planId
