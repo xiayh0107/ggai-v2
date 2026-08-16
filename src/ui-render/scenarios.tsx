@@ -5,6 +5,10 @@ import {
   type ReactElement,
 } from 'react'
 import type { CanvasTaskRunDaemonApi } from '@/agent/taskRunClient'
+import type {
+  TaskRunPreflightApi,
+  TaskRunPreflightResult,
+} from '@/agent/taskRunPreflightClient'
 import { emptyCanvasDocument, type CanvasDocument } from '@/canvas/model'
 import {
   CanvasPersistence,
@@ -38,11 +42,28 @@ const task = {
   origin: { kind: 'user' as const },
 }
 
-const scenarios: readonly UiRenderScenario[] = [{
-  id: 'task-run-draft',
-  title: '空输出节点 · 默认运行面板',
-  render: () => <TaskRunDraftScenario />,
-}]
+const READY: TaskRunPreflightResult = { status: 'ready', issues: [] }
+const BLOCKED: TaskRunPreflightResult = {
+  status: 'blocked',
+  issues: [{
+    code: 'generation_service_unauthenticated',
+    message: '生成服务尚未登录，请完成登录后重试。',
+    retryable: true,
+  }],
+}
+
+const scenarios: readonly UiRenderScenario[] = [
+  {
+    id: 'task-run-draft',
+    title: '空输出节点 · 默认运行面板',
+    render: () => <TaskRunScenario id="task-run-draft" preflight={READY} />,
+  },
+  {
+    id: 'task-run-preflight-blocked',
+    title: '空输出节点 · 生成服务需要处理',
+    render: () => <TaskRunScenario id="task-run-preflight-blocked" preflight={BLOCKED} />,
+  },
+]
 
 export function getUiRenderScenario(id: string): UiRenderScenario {
   const scenario = scenarios.find((candidate) => candidate.id === id)
@@ -50,15 +71,24 @@ export function getUiRenderScenario(id: string): UiRenderScenario {
   return scenario
 }
 
-function TaskRunDraftScenario() {
+function TaskRunScenario({
+  id,
+  preflight,
+}: {
+  id: string
+  preflight: TaskRunPreflightResult
+}) {
   const store = useMemo(() => createStore(), [])
   const controller = useMemo(() => new RenderController(), [])
   const daemonClient = useMemo(() => renderDaemonClient(), [])
+  const preflightApi = useMemo<TaskRunPreflightApi>(() => ({
+    check: async () => structuredClone(preflight),
+  }), [preflight])
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
 
   return (
     <div
-      data-ui-render-scenario="task-run-draft"
+      data-ui-render-scenario={id}
       data-ui-render-settled={state.hydration.status === 'ready' ? 'true' : 'false'}
       className="flex h-screen w-screen items-center justify-center overflow-hidden bg-gg-bg p-12 font-sans text-gg-ink"
     >
@@ -69,7 +99,7 @@ function TaskRunDraftScenario() {
           controllerFactory={controller.factory}
         >
           <div className="w-[460px]">
-            <CanvasTaskRunPanel task={task} width={460} />
+            <CanvasTaskRunPanel task={task} width={460} preflightApi={preflightApi} />
           </div>
         </CanvasTaskRunProvider>
       </CanvasProvider>

@@ -8,19 +8,27 @@ import {
   Maximize2,
   Mic,
   Paperclip,
+  RefreshCw,
   ShieldCheck,
   Square,
   X,
 } from 'lucide-react'
 import {
   useContext,
+  useEffect,
+  useMemo,
   useState,
   useSyncExternalStore,
   type FormEvent,
   type KeyboardEvent,
 } from 'react'
-import { DAEMON_AGENT_ID, runArtifactUrl } from '@/agent/config'
+import { DAEMON_AGENT_ID, DAEMON_URL, runArtifactUrl } from '@/agent/config'
 import type { DaemonProjectionOutput } from '@/agent/projectionPlan'
+import {
+  TaskRunPreflightClient,
+  type TaskRunPreflightApi,
+  type TaskRunPreflightIssue,
+} from '@/agent/taskRunPreflightClient'
 import { useCanvasState, useCanvasStore } from '@/canvas/hooks'
 import type { CanvasTask } from '@/canvas/model'
 import { CanvasTaskRunContext } from '@/canvas/runHooks'
@@ -39,9 +47,16 @@ import CanvasPromptControl from './CanvasPromptControl'
 
 const MAX_VISIBLE_LOG_ENTRIES = 200
 
+type PreflightState =
+  | { status: 'idle' | 'checking' | 'ready' }
+  | { status: 'blocked'; issues: TaskRunPreflightIssue[] }
+  | { status: 'error' }
+
 export interface CanvasTaskRunPanelProps {
   task: CanvasTask
   width?: number
+  /** Deterministic UI-render and component-test seam. */
+  preflightApi?: TaskRunPreflightApi
 }
 
 /**
@@ -58,11 +73,16 @@ function CanvasTaskRunPanelContent({
   task,
   width,
   lifecycle,
+  preflightApi: injectedPreflightApi,
 }: CanvasTaskRunPanelProps & { lifecycle: CanvasTaskRunLifecycle }) {
   const store = useCanvasStore()
   const openRunLogViewer = useOpenCanvasRunLogViewer()
   const canvasState = useCanvasState()
   const runState = useLifecycleSnapshot(lifecycle)
+  const preflightApi = useMemo(
+    () => injectedPreflightApi ?? new TaskRunPreflightClient({ baseUrl: DAEMON_URL }),
+    [injectedPreflightApi],
+  )
   const draftKey = taskComposerDraftKey(task.id)
   const draft = canvasState.view.composerDrafts[draftKey] ?? ''
   const runtime = canvasState.runtimeByTaskId[task.id]
@@ -84,17 +104,58 @@ function CanvasTaskRunPanelContent({
   const [submitting, setSubmitting] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [logsExpanded, setLogsExpanded] = useState(false)
+  const [preflightAttempt, setPreflightAttempt] = useState(0)
+  const [preflightState, setPreflightState] = useState<PreflightState>({ status: 'idle' })
   const [resolvingPermissionIds, setResolvingPermissionIds] = useState<Set<string>>(
     () => new Set(),
   )
   const [rememberByPermissionId, setRememberByPermissionId] = useState<Record<string, boolean>>({})
   const hasPrompt = Boolean(draft.trim() || task.goal.trim())
-  const submitDisabled = !hasPrompt || active || submitting || cancelling
+  const submitDisabled = !hasPrompt
+    || active
+    || submitting
+    || cancelling
+    || preflightState.status !== 'ready'
   const ownedNodes = canvasState.document.nodes.filter((node) => node.homeTaskId === task.id)
   const outputPlugin = ownedNodes.length === 1 ? getPlugin(ownedNodes[0].type) : null
   const panelTitle = ownedNodes.length === 1
     ? `使用“${ownedNodes[0].title}”作为输出槽`
     : '任务提示词'
+
+  useEffect(() => {
+    const revision = canvasState.envelope?.revision
+    if (active || canvasState.hydration.status !== 'ready' || revision === undefined) {
+      setPreflightState({ status: 'idle' })
+      return
+    }
+    const controller = new AbortController()
+    setPreflightState({ status: 'checking' })
+    void preflightApi.check({
+      projectDir: canvasState.scope.projectDir,
+      taskId: task.id,
+      agentId: DAEMON_AGENT_ID,
+      canvasBranch: canvasState.scope.branch,
+      baseRevision: revision,
+      signal: controller.signal,
+    }).then(
+      (result) => setPreflightState(result.status === 'ready'
+        ? { status: 'ready' }
+        : { status: 'blocked', issues: result.issues }),
+      (error: unknown) => {
+        if (!isAbortError(error)) setPreflightState({ status: 'error' })
+      },
+    )
+    return () => controller.abort()
+  }, [
+    active,
+    canvasState.envelope?.revision,
+    canvasState.hydration.status,
+    canvasState.scope.branch,
+    canvasState.scope.projectDir,
+    preflightApi,
+    preflightAttempt,
+    task.id,
+  ])
 
   const setDraft = (value: string) => store.setComposerDraft(draftKey, value)
 
@@ -156,9 +217,24 @@ function CanvasTaskRunPanelContent({
     }
   }
 
+  const preflightNotice = preflightState.status === 'blocked'
+    ? {
+        message: preflightState.issues[0]?.message ?? '当前暂时无法开始生成。',
+        additional: Math.max(0, preflightState.issues.length - 1),
+        retryable: preflightState.issues.some((issue) => issue.retryable),
+      }
+    : preflightState.status === 'error'
+      ? {
+          message: '暂时无法确认生成服务状态，请重新检测。',
+          additional: 0,
+          retryable: true,
+        }
+      : null
+
   return (
     <aside
       data-testid={`canvas-task-run-panel-${task.id}`}
+      data-preflight-status={preflightState.status}
       data-no-drag
       aria-label={`${task.title}的运行控制`}
       className="pointer-events-auto"
@@ -172,22 +248,35 @@ function CanvasTaskRunPanelContent({
         shortcut={active ? undefined : '⌘/Ctrl + Enter'}
         ariaLabel={`${task.title}的提示词与运行控制`}
         onSubmit={(event) => void submit(event)}
-        topContent={!active && suggestedActions.length > 0 ? (
-          <div className="mb-1.5 flex flex-wrap gap-1 px-1" aria-label="建议的后续操作">
-            {suggestedActions.map((action) => (
-              <button
-                key={action.id}
-                type="button"
-                title="仅填入草稿，不会自动运行"
-                aria-label={`把建议“${action.label}”填入任务草稿`}
-                onClick={() => setDraft(action.prompt)}
-                className="rounded-full px-2 py-[3px] text-[10.5px] text-gg-muted outline-none hover:bg-gg-subtle hover:text-gg-ink focus-visible:ring-2 focus-visible:ring-gg-primary/30"
-              >
-                {action.label}
-              </button>
-            ))}
-          </div>
-        ) : undefined}
+        topContent={(
+          <>
+            {!active && preflightNotice && (
+              <GenerationPreflightNotice
+                message={preflightNotice.message}
+                additional={preflightNotice.additional}
+                retryable={preflightNotice.retryable}
+                checking={preflightState.status === 'checking'}
+                onRetry={() => setPreflightAttempt((attempt) => attempt + 1)}
+              />
+            )}
+            {!active && suggestedActions.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap gap-1 px-1" aria-label="建议的后续操作">
+                {suggestedActions.map((action) => (
+                  <button
+                    key={action.id}
+                    type="button"
+                    title="仅填入草稿，不会自动运行"
+                    aria-label={`把建议“${action.label}”填入任务草稿`}
+                    onClick={() => setDraft(action.prompt)}
+                    className="rounded-full px-2 py-[3px] text-[10.5px] text-gg-muted outline-none hover:bg-gg-subtle hover:text-gg-ink focus-visible:ring-2 focus-visible:ring-gg-primary/30"
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
+        )}
         inputLeading={(
           <button
             type="button"
@@ -463,6 +552,51 @@ function CanvasTaskRunPanelContent({
   )
 }
 
+function GenerationPreflightNotice({
+  message,
+  additional,
+  retryable,
+  checking,
+  onRetry,
+}: {
+  message: string
+  additional: number
+  retryable: boolean
+  checking: boolean
+  onRetry(): void
+}) {
+  return (
+    <div
+      role="alert"
+      data-testid="canvas-generation-preflight-notice"
+      className="mb-1.5 flex items-start gap-2 rounded-[10px] border border-[#F4C7C3] bg-[#FFF8F7] px-2.5 py-2"
+    >
+      <CircleAlert size={13} className="mt-0.5 shrink-0 text-[#B42318]" aria-hidden="true" />
+      <div className="min-w-0 flex-1">
+        <p className="text-[10.5px] leading-4 text-[#912018]">{message}</p>
+        {additional > 0 && (
+          <p className="mt-0.5 text-[9.5px] text-[#B5473E]">另有 {additional} 项需要处理</p>
+        )}
+      </div>
+      {retryable && (
+        <button
+          type="button"
+          disabled={checking}
+          onClick={onRetry}
+          className="flex shrink-0 items-center gap-1 rounded-[7px] border border-[#F0B8B2] bg-white px-2 py-1 text-[9.5px] font-medium text-[#B42318] outline-none hover:bg-[#FFF0EE] focus-visible:ring-2 focus-visible:ring-[#D92D20]/25 disabled:cursor-wait disabled:opacity-60"
+        >
+          <RefreshCw
+            size={10}
+            className={checking ? 'animate-spin motion-reduce:animate-none' : undefined}
+            aria-hidden="true"
+          />
+          重新检测
+        </button>
+      )}
+    </div>
+  )
+}
+
 function ArtifactTrayOutput({
   output,
   projectDir,
@@ -535,6 +669,13 @@ function useLifecycleSnapshot(
 
 function isActiveRunPhase(phase: CanvasTaskRunPhase | undefined): boolean {
   return phase === 'queued' || phase === 'running' || phase === 'awaiting-permission'
+}
+
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'name' in error
+    && error.name === 'AbortError'
 }
 
 function runtimeStatusLabel(runtime: CanvasTaskRuntime | undefined): string {
