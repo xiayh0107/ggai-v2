@@ -55,6 +55,7 @@ export function getUiRenderScenario(id: string): UiRenderScenario {
 function TaskRunDraftScenario() {
   const store = useMemo(() => createStore(), [])
   const controller = useMemo(() => new RenderController(), [])
+  const daemonClient = useMemo(renderDaemonClient, [])
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
 
   useEffect(() => {
@@ -79,7 +80,7 @@ function TaskRunDraftScenario() {
       <CanvasProvider store={store}>
         <CanvasTaskRunProvider
           store={store}
-          daemonClient={renderDaemonClient()}
+          daemonClient={daemonClient}
           controllerFactory={controller.factory}
         >
           <div className="w-[460px]">
