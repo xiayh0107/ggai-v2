@@ -25,7 +25,10 @@ import {
   MAX_SUGGESTED_ACTION_PROMPT_LENGTH,
 } from '../src/agent/suggestedActions.js'
 import { isPathWithin } from './permissions.js'
-import type { ProjectionPluginCapabilitySnapshot } from './pluginCapabilities.js'
+import {
+  projectionPluginContracts,
+  type ProjectionPluginCapabilitySnapshot,
+} from './pluginCapabilities.js'
 import type { CreateRunRequest, PluginContract } from './protocol.js'
 import { RunArtifactStore } from './runArtifactStorage.js'
 import {
@@ -552,12 +555,13 @@ async function prepareTaskRunContext(
   if (!request.pluginCapabilities) {
     throw new TypeError('Task Run context is missing its fixed plugin capability snapshot')
   }
+  const projectionPlugins = projectionPluginContracts(request.pluginCapabilities)
   const pack = compileTaskContext({
     document: request.canvasDocument,
     taskId: request.taskId,
     runFilesDirectory: artifactTarget,
     runOutcomeSidecarPath: outcomeTarget,
-    nodeContextPolicies: request.pluginCapabilities.plugins.flatMap((plugin) =>
+    nodeContextPolicies: projectionPlugins.flatMap((plugin) =>
       plugin.nodeContext ? [{ id: plugin.id, nodeContext: plugin.nodeContext }] : []),
   })
   const daemonContract = renderDaemonContract(

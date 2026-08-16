@@ -20,6 +20,7 @@ import {
   BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
   ProjectionPluginCapabilityStore,
   inspectProjectionPluginCapabilitySnapshot,
+  projectionPluginContracts,
   type ProjectionPluginCapabilitySnapshot,
 } from './pluginCapabilities.js'
 import {
@@ -89,7 +90,7 @@ const FALLBACK_CAPABILITY_PROFILE: CapabilityProfileSnapshot = Object.freeze({
   bundles: Object.freeze([]),
 })
 
-const PROJECTION_CAPABILITY_RECEIPT_KEY = 'ggai.projection-capabilities.v2'
+const PROJECTION_CAPABILITY_RECEIPT_KEY = 'ggai.projection-capabilities.v3'
 const SKILL_CAPABILITY_RECEIPT_KEY = 'ggai.skill-capabilities.v1'
 const SKILL_RESOLVER_CAPABILITY_RECEIPT_KEY = 'ggai.skill-resolver.v1'
 const ATTACHMENT_CAPABILITY_RECEIPT_KEY = 'ggai.run-attachments.v1'
@@ -1321,7 +1322,7 @@ export class RunManager {
           runId: run.summary.runId,
           runStatus: status,
           manifest: artifactManifest,
-          plugins: requirePinnedPluginCapabilities(run.request).plugins,
+          plugins: projectionPluginContracts(requirePinnedPluginCapabilities(run.request)),
           ...(status === 'done' && outcome ? { outcome } : {}),
         })
         projectionPlan = created.plan

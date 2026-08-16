@@ -6,10 +6,12 @@ import { afterEach, test } from 'node:test'
 import {
   BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
   ProjectionPluginCapabilityStore,
+  inspectLegacyProjectionPluginCapabilitySnapshot,
   inspectProjectionPluginCapabilitySnapshot,
+  legacyProjectionPluginCapabilityDigest,
   resolveProjectionPluginCapabilitySnapshot,
-  projectionPluginCapabilityDigest,
 } from '../pluginCapabilities.js'
+import { createProjectionContributionSnapshot } from '../projectionContributions.js'
 import {
   BUILTIN_ARTIFACT_CLAIM_REGISTRY,
   canonicalArtifactClaimRegistrations,
@@ -23,7 +25,7 @@ afterEach(async () => {
 })
 
 async function temporaryProject(): Promise<string> {
-  const directory = await mkdtemp(path.join(tmpdir(), 'ggai-plugin-capabilities-v2-'))
+  const directory = await mkdtemp(path.join(tmpdir(), 'ggai-plugin-capabilities-v3-'))
   temporaryDirectories.push(directory)
   return directory
 }
@@ -40,11 +42,17 @@ test('resolves canonical browser claims while protecting built-ins and generic f
         full: { textMaxChars: 50_000, payloadFields: ['kernel'], artifactRefs: 'all' },
       },
     }],
-  })
+  }, createProjectionContributionSnapshot([{
+    providerId: '@runtime/report-provider',
+    providerVersion: '2.1.0',
+    id: '@runtime/report',
+    artifactClaims: [{ extensions: ['.report'] }],
+  }]))
   assert.match(snapshot.digest, /^[0-9a-f]{64}$/u)
-  assert.ok(snapshot.plugins.some((plugin) => plugin.id === '@community/notebook'))
+  assert.equal(snapshot.schemaVersion, 3)
+  assert.ok(snapshot.plugins.some((plugin) => plugin.pluginId === '@community/notebook'))
   assert.deepEqual(
-    snapshot.plugins.find((plugin) => plugin.id === '@community/notebook')?.nodeContext,
+    snapshot.plugins.find((plugin) => plugin.pluginId === '@community/notebook')?.nodeContext,
     {
       schemaVersion: 1,
       summary: { textMaxChars: 400, payloadFields: ['kernel'] },
@@ -52,8 +60,16 @@ test('resolves canonical browser claims while protecting built-ins and generic f
     },
   )
   assert.deepEqual(
-    snapshot.plugins.filter((plugin) => plugin.acceptsUnknown).map((plugin) => plugin.id),
+    snapshot.plugins.filter((plugin) => plugin.acceptsUnknown).map((plugin) => plugin.pluginId),
     ['file'],
+  )
+  assert.deepEqual(
+    snapshot.plugins.find((plugin) => plugin.pluginId === '@runtime/report')?.source,
+    {
+      kind: 'runtime-plugin',
+      providerId: '@runtime/report-provider',
+      providerVersion: '2.1.0',
+    },
   )
   assert.deepEqual(inspectProjectionPluginCapabilitySnapshot(snapshot), {
     status: 'valid',
@@ -100,6 +116,18 @@ test('digest is independent from browser registration and matcher order', () => 
   assert.deepEqual(right, left)
 })
 
+test('runtime and browser claims with the same plugin id fail closed', () => {
+  assert.throws(() => resolveProjectionPluginCapabilitySnapshot({
+    schemaVersion: 2,
+    plugins: [{ id: '@shared/report', artifactClaims: [{ extensions: ['.browser'] }] }],
+  }, createProjectionContributionSnapshot([{
+    providerId: '@runtime/provider',
+    providerVersion: '1.0.0',
+    id: '@shared/report',
+    artifactClaims: [{ extensions: ['.runtime'] }],
+  }])), /claim conflicts/u)
+})
+
 test('keeps immutable pre-context-policy snapshots readable with compatibility semantics', () => {
   const legacyPlugins = canonicalArtifactClaimRegistrations([
     ...BUILTIN_ARTIFACT_CLAIM_REGISTRY,
@@ -111,11 +139,11 @@ test('keeps immutable pre-context-policy snapshots readable with compatibility s
   }))
   const legacy = {
     schemaVersion: 2 as const,
-    digest: projectionPluginCapabilityDigest(legacyPlugins),
+    digest: legacyProjectionPluginCapabilityDigest(legacyPlugins),
     plugins: legacyPlugins,
   }
 
-  assert.deepEqual(inspectProjectionPluginCapabilitySnapshot(legacy), {
+  assert.deepEqual(inspectLegacyProjectionPluginCapabilitySnapshot(legacy), {
     status: 'valid',
     snapshot: legacy,
   })
@@ -148,11 +176,38 @@ test('persists immutable content-addressed snapshots and detects tampering', asy
   assert.deepEqual(await store.recover(snapshot.digest), BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT)
 })
 
+test('recovery reads immutable v2 snapshots without admitting them to new Runs', async () => {
+  const projectDir = await temporaryProject()
+  const store = new ProjectionPluginCapabilityStore(projectDir)
+  const legacyPlugins = canonicalArtifactClaimRegistrations([
+    ...BUILTIN_ARTIFACT_CLAIM_REGISTRY,
+    { id: '@community/legacy', artifactClaims: [{ extensions: ['.legacy'] }] },
+  ]).map((registration) => ({
+    id: registration.id,
+    artifactRules: registration.artifactClaims,
+    ...(registration.acceptsUnknown ? { acceptsUnknown: true } : {}),
+  }))
+  const legacy = {
+    schemaVersion: 2 as const,
+    digest: legacyProjectionPluginCapabilityDigest(legacyPlugins),
+    plugins: legacyPlugins,
+  }
+  await mkdir(store.legacyRootDir, { recursive: true })
+  await writeFile(
+    path.join(store.legacyRootDir, `${legacy.digest}.json`),
+    `${JSON.stringify(legacy)}\n`,
+    'utf8',
+  )
+
+  assert.equal(await store.get(legacy.digest), null)
+  assert.deepEqual(await store.recover(legacy.digest), legacy)
+})
+
 test('strict lookup rejects unsafe roots while recovery degrades to built-ins', async () => {
   const projectDir = await temporaryProject()
   const outside = await temporaryProject()
   await mkdir(path.join(projectDir, '.gg', 'runtime'), { recursive: true })
-  await symlink(outside, path.join(projectDir, '.gg', 'runtime', 'plugin-capabilities-v2'))
+  await symlink(outside, path.join(projectDir, '.gg', 'runtime', 'plugin-capabilities-v3'))
   const store = new ProjectionPluginCapabilityStore(projectDir)
 
   await assert.rejects(store.register({ schemaVersion: 2, plugins: [] }), /unsafe/u)

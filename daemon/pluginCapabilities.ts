@@ -6,8 +6,10 @@ import {
   ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION,
   BUILTIN_ARTIFACT_CLAIM_REGISTRY,
   BUILTIN_ARTIFACT_PLUGIN_IDS,
+  MAX_ARTIFACT_PLUGIN_REGISTRATIONS,
   canonicalArtifactClaimRegistrations,
   inspectArtifactCapabilitySnapshotRequest,
+  type ArtifactCapabilitySnapshotRequest,
   type ArtifactClaimRegistration,
 } from '../src/plugins/artifactContracts.js'
 import {
@@ -16,36 +18,79 @@ import {
 } from '../src/plugins/contextContracts.js'
 import { canonicalizePotentialPath, isPathWithin } from './permissions.js'
 import {
+  createProjectionContributionSnapshot,
+  inspectProjectionContributionSnapshot,
+  type ProjectionContributionRecord,
+} from './projectionContributions.js'
+import {
   inspectProjectionPluginContracts,
   type ProjectionPluginContract,
 } from './projectionPlan.js'
 
-const CAPABILITY_DIGEST_DOMAIN = 'ggai.projection-plugin-capabilities.v2'
+const LEGACY_CAPABILITY_DIGEST_DOMAIN = 'ggai.projection-plugin-capabilities.v2'
+const CAPABILITY_DIGEST_DOMAIN = 'ggai.projection-plugin-capabilities.v3'
+const BUILTIN_PROJECTION_VERSION = '1.0.0'
 const MAX_CAPABILITY_SNAPSHOT_BYTES = 4 * 1024 * 1024
 
+export type ProjectionCapabilitySource =
+  | { kind: 'builtin'; version: string }
+  | { kind: 'runtime-plugin'; providerId: string; providerVersion: string }
+  | { kind: 'browser-community' }
+
+export interface ProjectionPluginCapability {
+  pluginId: string
+  source: ProjectionCapabilitySource
+  artifactRules: ProjectionPluginContract['artifactRules']
+  nodeContext?: ProjectionPluginContract['nodeContext']
+  acceptsUnknown?: boolean
+}
+
+/** The only projection capability snapshot accepted by a new Run. */
 export interface ProjectionPluginCapabilitySnapshot {
+  schemaVersion: 3
+  digest: string
+  plugins: ProjectionPluginCapability[]
+}
+
+/** Immutable compatibility shape written before provenance became explicit. */
+export interface LegacyProjectionPluginCapabilitySnapshot {
   schemaVersion: 2
   digest: string
   plugins: ProjectionPluginContract[]
 }
 
+export type RecoverableProjectionPluginCapabilitySnapshot =
+  | ProjectionPluginCapabilitySnapshot
+  | LegacyProjectionPluginCapabilitySnapshot
+
 export type ProjectionPluginCapabilitySnapshotInspection =
   | { status: 'valid'; snapshot: ProjectionPluginCapabilitySnapshot }
   | { status: 'invalid'; reason: string }
 
+export type LegacyProjectionPluginCapabilitySnapshotInspection =
+  | { status: 'valid'; snapshot: LegacyProjectionPluginCapabilitySnapshot }
+  | { status: 'invalid'; reason: string }
+
+const EMPTY_RUNTIME_CONTRIBUTIONS = createProjectionContributionSnapshot([])
+
 /**
- * Resolves untrusted browser claims into the complete immutable run contract.
- * Built-ins are daemon-owned and the generic `file` capability is the only
- * registration allowed to claim otherwise-unknown artifacts.
+ * Merges daemon-protected builtins, trusted runtime contributions, and
+ * untrusted browser community claims into one canonical Run-fixed snapshot.
  */
 export function resolveProjectionPluginCapabilitySnapshot(
-  value: unknown,
+  browserClaims: unknown,
+  runtimeContributions: unknown = EMPTY_RUNTIME_CONTRIBUTIONS,
 ): ProjectionPluginCapabilitySnapshot {
-  const inspection = inspectArtifactCapabilitySnapshotRequest(value)
-  if (inspection.status !== 'valid') {
-    throw new TypeError(`plugin capability snapshot is invalid: ${inspection.reason}`)
+  const browserInspection = inspectArtifactCapabilitySnapshotRequest(browserClaims)
+  if (browserInspection.status !== 'valid') {
+    throw new TypeError(`plugin capability snapshot is invalid: ${browserInspection.reason}`)
   }
-  for (const plugin of inspection.snapshot.plugins) {
+  const runtimeInspection = inspectProjectionContributionSnapshot(runtimeContributions)
+  if (runtimeInspection.status !== 'valid') {
+    throw new TypeError(`runtime projection contributions are invalid: ${runtimeInspection.reason}`)
+  }
+
+  for (const plugin of browserInspection.snapshot.plugins) {
     if (BUILTIN_NODE_CONTEXT_PLUGIN_IDS.has(plugin.id)) {
       throw new TypeError(`built-in plugin capability cannot be replaced: ${plugin.id}`)
     }
@@ -53,15 +98,36 @@ export function resolveProjectionPluginCapabilitySnapshot(
       throw new TypeError(`community artifact capability cannot accept unknown files: ${plugin.id}`)
     }
   }
-  const registrations = canonicalArtifactClaimRegistrations([
-    ...builtinPluginCapabilityRegistrations(),
-    ...inspection.snapshot.plugins,
-  ])
-  const plugins = registrations.map(toProjectionPlugin)
-  const digest = projectionPluginCapabilityDigest(plugins)
+
+  const plugins = [
+    ...builtinPluginCapabilityRegistrations().map((registration) =>
+      toProjectionCapability(registration, {
+        kind: 'builtin',
+        version: BUILTIN_PROJECTION_VERSION,
+      })),
+    ...runtimeInspection.snapshot.contributions.map(runtimeContributionToCapability),
+    ...browserInspection.snapshot.plugins.map((registration) =>
+      toProjectionCapability(registration, { kind: 'browser-community' })),
+  ].sort((left, right) => left.pluginId.localeCompare(right.pluginId))
+
+  if (plugins.length > MAX_ARTIFACT_PLUGIN_REGISTRATIONS) {
+    throw new TypeError('projection capability snapshot exceeds the supported plugin bound')
+  }
+
+  const ids = new Set<string>()
+  for (const plugin of plugins) {
+    if (ids.has(plugin.pluginId)) {
+      throw new TypeError(`projection capability claim conflicts for plugin: ${plugin.pluginId}`)
+    }
+    ids.add(plugin.pluginId)
+    if (plugin.source.kind !== 'builtin' && plugin.acceptsUnknown) {
+      throw new TypeError(`only a built-in may accept unknown artifacts: ${plugin.pluginId}`)
+    }
+  }
+
   return {
-    schemaVersion: ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION,
-    digest,
+    schemaVersion: 3,
+    digest: projectionPluginCapabilityDigest(plugins),
     plugins,
   }
 }
@@ -72,70 +138,68 @@ export function inspectProjectionPluginCapabilitySnapshot(
   try {
     if (!isRecord(value)
       || !hasExactKeys(value, ['schemaVersion', 'digest', 'plugins'])
-      || value.schemaVersion !== ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION
-      || !isCapabilityDigest(value.digest)) {
-      throw new TypeError('capability snapshot envelope is invalid')
+      || value.schemaVersion !== 3
+      || !isCapabilityDigest(value.digest)
+      || !Array.isArray(value.plugins)) {
+      throw new TypeError('capability snapshot v3 envelope is invalid')
     }
-    const pluginInspection = inspectProjectionPluginContracts(value.plugins)
-    if (pluginInspection.status !== 'valid') throw new TypeError(pluginInspection.reason)
-    if (pluginInspection.plugins.every((plugin) => plugin.nodeContext === undefined)) {
-      return inspectLegacyProjectionPluginCapabilitySnapshot(value, pluginInspection.plugins)
+    const browserPlugins: ArtifactClaimRegistration[] = []
+    const runtimeRecords: ProjectionContributionRecord[] = []
+    for (const [index, candidate] of value.plugins.entries()) {
+      const plugin = parseProjectionCapability(candidate, index)
+      const registration = capabilityToRegistration(plugin)
+      if (plugin.source.kind === 'browser-community') browserPlugins.push(registration)
+      if (plugin.source.kind === 'runtime-plugin') {
+        runtimeRecords.push({
+          providerId: plugin.source.providerId,
+          providerVersion: plugin.source.providerVersion,
+          ...registration,
+        })
+      }
     }
-    const community = projectionPluginsToCommunityRegistrations(pluginInspection.plugins)
     const expected = resolveProjectionPluginCapabilitySnapshot({
       schemaVersion: ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION,
-      plugins: community,
-    })
+      plugins: browserPlugins,
+    }, createProjectionContributionSnapshot(runtimeRecords))
     if (value.digest !== expected.digest
-      || JSON.stringify(pluginInspection.plugins) !== JSON.stringify(expected.plugins)) {
-      throw new TypeError('capability snapshot is not canonical or its digest does not match')
+      || JSON.stringify(value) !== JSON.stringify(expected)) {
+      throw new TypeError('capability snapshot v3 is not canonical or its digest does not match')
     }
     return { status: 'valid', snapshot: expected }
   } catch (error) {
     return {
       status: 'invalid',
-      reason: error instanceof Error ? error.message : 'capability snapshot is invalid',
+      reason: error instanceof Error ? error.message : 'capability snapshot v3 is invalid',
     }
   }
 }
 
-/** Read-only compatibility for immutable snapshots written before Node context policies. */
-function inspectLegacyProjectionPluginCapabilitySnapshot(
-  value: Record<string, unknown>,
-  plugins: ProjectionPluginContract[],
-): ProjectionPluginCapabilitySnapshotInspection {
+/** Read-only validation for immutable v2 snapshots during interrupted recovery. */
+export function inspectLegacyProjectionPluginCapabilitySnapshot(
+  value: unknown,
+): LegacyProjectionPluginCapabilitySnapshotInspection {
   try {
-    const byId = new Map(plugins.map((plugin) => [plugin.id, plugin]))
-    for (const builtin of BUILTIN_ARTIFACT_CLAIM_REGISTRY) {
-      const actual = byId.get(builtin.id)
-      const expected = toProjectionPlugin(
-        canonicalArtifactClaimRegistrations([builtin])[0]!,
-      )
-      if (!actual || JSON.stringify(actual) !== JSON.stringify(expected)) {
-        throw new TypeError(`legacy built-in artifact capability changed or missing: ${builtin.id}`)
-      }
+    if (!isRecord(value)
+      || !hasExactKeys(value, ['schemaVersion', 'digest', 'plugins'])
+      || value.schemaVersion !== 2
+      || !isCapabilityDigest(value.digest)) {
+      throw new TypeError('legacy capability snapshot envelope is invalid')
     }
-    for (const plugin of plugins) {
-      if (BUILTIN_NODE_CONTEXT_PLUGIN_IDS.has(plugin.id)
-        && !BUILTIN_ARTIFACT_PLUGIN_IDS.has(plugin.id)) {
-        throw new TypeError(`legacy snapshot attempted to replace a built-in plugin: ${plugin.id}`)
-      }
-      if (!BUILTIN_ARTIFACT_PLUGIN_IDS.has(plugin.id) && plugin.acceptsUnknown) {
-        throw new TypeError(`community artifact capability cannot accept unknown files: ${plugin.id}`)
-      }
+    const pluginInspection = inspectProjectionPluginContracts(value.plugins)
+    if (pluginInspection.status !== 'valid') throw new TypeError(pluginInspection.reason)
+    if (pluginInspection.plugins.every((plugin) => plugin.nodeContext === undefined)) {
+      return inspectPreContextLegacySnapshot(value, pluginInspection.plugins)
     }
-    const expectedDigest = projectionPluginCapabilityDigest(plugins)
-    if (value.digest !== expectedDigest) {
-      throw new TypeError('legacy capability snapshot digest does not match')
+    const community = legacyProjectionPluginsToCommunityRegistrations(pluginInspection.plugins)
+    const expected = resolveLegacyProjectionPluginCapabilitySnapshot({
+      schemaVersion: ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION,
+      plugins: community,
+    })
+    if (value.digest !== expected.digest
+      || JSON.stringify(pluginInspection.plugins) !== JSON.stringify(expected.plugins)) {
+      throw new TypeError('legacy capability snapshot is not canonical or its digest does not match')
     }
-    return {
-      status: 'valid',
-      snapshot: {
-        schemaVersion: ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION,
-        digest: expectedDigest,
-        plugins,
-      },
-    }
+    return { status: 'valid', snapshot: expected }
   } catch (error) {
     return {
       status: 'invalid',
@@ -145,15 +209,45 @@ function inspectLegacyProjectionPluginCapabilitySnapshot(
 }
 
 export function projectionPluginCapabilityDigest(
-  plugins: readonly ProjectionPluginContract[],
+  plugins: readonly ProjectionPluginCapability[],
 ): string {
   return createHash('sha256')
     .update(`${CAPABILITY_DIGEST_DOMAIN}\0`, 'utf8')
-    .update(JSON.stringify({
-      schemaVersion: ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION,
-      plugins,
-    }), 'utf8')
+    .update(JSON.stringify({ schemaVersion: 3, plugins }), 'utf8')
     .digest('hex')
+}
+
+export function legacyProjectionPluginCapabilityDigest(
+  plugins: readonly ProjectionPluginContract[],
+): string {
+  return createHash('sha256')
+    .update(`${LEGACY_CAPABILITY_DIGEST_DOMAIN}\0`, 'utf8')
+    .update(JSON.stringify({ schemaVersion: 2, plugins }), 'utf8')
+    .digest('hex')
+}
+
+export function projectionPluginContracts(
+  snapshot: RecoverableProjectionPluginCapabilitySnapshot,
+): ProjectionPluginContract[] {
+  if (snapshot.schemaVersion === 2) return structuredClone(snapshot.plugins)
+  return snapshot.plugins.map((plugin) => ({
+    id: plugin.pluginId,
+    artifactRules: structuredClone(plugin.artifactRules),
+    ...(plugin.nodeContext ? { nodeContext: structuredClone(plugin.nodeContext) } : {}),
+    ...(plugin.acceptsUnknown ? { acceptsUnknown: true } : {}),
+  }))
+}
+
+/** Extracts only browser-owned declarations so live runtime providers can be refreshed. */
+export function browserCommunityProjectionClaims(
+  snapshot: ProjectionPluginCapabilitySnapshot,
+): ArtifactCapabilitySnapshotRequest {
+  return {
+    schemaVersion: ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION,
+    plugins: snapshot.plugins
+      .filter((plugin) => plugin.source.kind === 'browser-community')
+      .map(capabilityToRegistration),
+  }
 }
 
 export const BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT =
@@ -162,22 +256,29 @@ export const BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT =
     plugins: [],
   })
 
-/** Content-addressed, project-local capability snapshots used by accepted runs. */
+/** Content-addressed v3 snapshots plus read-only recovery access to historical v2. */
 export class ProjectionPluginCapabilityStore {
   readonly projectDir: string
   readonly rootDir: string
+  readonly legacyRootDir: string
 
   constructor(projectDir: string) {
     this.projectDir = path.resolve(projectDir)
-    this.rootDir = path.join(this.projectDir, '.gg', 'runtime', 'plugin-capabilities-v2')
+    this.rootDir = path.join(this.projectDir, '.gg', 'runtime', 'plugin-capabilities-v3')
+    this.legacyRootDir = path.join(this.projectDir, '.gg', 'runtime', 'plugin-capabilities-v2')
   }
 
-  async register(value: unknown): Promise<ProjectionPluginCapabilitySnapshot> {
-    const snapshot = resolveProjectionPluginCapabilitySnapshot(value)
-    return this.#persist(snapshot)
+  async register(
+    browserClaims: unknown,
+    runtimeContributions: unknown = EMPTY_RUNTIME_CONTRIBUTIONS,
+  ): Promise<ProjectionPluginCapabilitySnapshot> {
+    return this.#persist(resolveProjectionPluginCapabilitySnapshot(
+      browserClaims,
+      runtimeContributions,
+    ))
   }
 
-  /** Revalidates and durably pins a daemon-resolved snapshot before Run acceptance. */
+  /** Revalidates and durably pins a daemon-resolved v3 snapshot before acceptance. */
   async pin(value: unknown): Promise<ProjectionPluginCapabilitySnapshot> {
     const inspection = inspectProjectionPluginCapabilitySnapshot(value)
     if (inspection.status !== 'valid') {
@@ -189,8 +290,8 @@ export class ProjectionPluginCapabilityStore {
   async #persist(
     snapshot: ProjectionPluginCapabilitySnapshot,
   ): Promise<ProjectionPluginCapabilitySnapshot> {
-    await this.#assertSafeRoot(true)
-    const target = this.#snapshotPath(snapshot.digest)
+    await this.#assertSafeRoot(this.rootDir, 'plugin-capabilities-v3', true)
+    const target = this.#snapshotPath(this.rootDir, snapshot.digest)
     const existing = await this.get(snapshot.digest)
     if (existing) return existing
 
@@ -214,11 +315,50 @@ export class ProjectionPluginCapabilityStore {
     return stored
   }
 
-  /** Strict live lookup. Missing or damaged requested snapshots are not substituted. */
+  /** Strict live lookup. New Runs can load only v3 snapshots. */
   async get(digest: string): Promise<ProjectionPluginCapabilitySnapshot | null> {
+    return this.#readSnapshot(
+      this.rootDir,
+      'plugin-capabilities-v3',
+      digest,
+      inspectProjectionPluginCapabilitySnapshot,
+    )
+  }
+
+  /** Crash recovery may read v3 or historical v2, but never live registries. */
+  async recover(
+    digest: string | undefined,
+  ): Promise<RecoverableProjectionPluginCapabilitySnapshot> {
+    if (!digest) return structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT)
+    try {
+      const current = await this.get(digest)
+      if (current) return current
+    } catch {
+      // A damaged v3 file cannot grant authority; a distinct legacy digest may still be valid.
+    }
+    try {
+      return await this.#readSnapshot(
+        this.legacyRootDir,
+        'plugin-capabilities-v2',
+        digest,
+        inspectLegacyProjectionPluginCapabilitySnapshot,
+      ) ?? structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT)
+    } catch {
+      return structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT)
+    }
+  }
+
+  async #readSnapshot<T extends RecoverableProjectionPluginCapabilitySnapshot>(
+    rootDir: string,
+    leaf: string,
+    digest: string,
+    inspect: (value: unknown) =>
+      | { status: 'valid'; snapshot: T }
+      | { status: 'invalid'; reason: string },
+  ): Promise<T | null> {
     assertCapabilityDigest(digest)
-    if (!await this.#assertSafeRoot(false)) return null
-    const filePath = this.#snapshotPath(digest)
+    if (!await this.#assertSafeRoot(rootDir, leaf, false)) return null
+    const filePath = this.#snapshotPath(rootDir, digest)
     try {
       const info = await lstat(filePath)
       if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_CAPABILITY_SNAPSHOT_BYTES) {
@@ -228,7 +368,7 @@ export class ProjectionPluginCapabilityStore {
       if (Buffer.byteLength(source, 'utf8') > MAX_CAPABILITY_SNAPSHOT_BYTES) {
         throw new Error('capability snapshot exceeds the supported size')
       }
-      const inspection = inspectProjectionPluginCapabilitySnapshot(JSON.parse(source))
+      const inspection = inspect(JSON.parse(source))
       if (inspection.status !== 'valid') {
         throw new Error(`stored capability snapshot is invalid: ${inspection.reason}`)
       }
@@ -242,34 +382,25 @@ export class ProjectionPluginCapabilityStore {
     }
   }
 
-  /** Crash recovery only: missing/corrupt historical state safely loses community claims. */
-  async recover(
-    digest: string | undefined,
-  ): Promise<ProjectionPluginCapabilitySnapshot> {
-    if (!digest) return structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT)
-    try {
-      return await this.get(digest)
-        ?? structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT)
-    } catch {
-      return structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT)
-    }
-  }
-
-  #snapshotPath(digest: string): string {
+  #snapshotPath(rootDir: string, digest: string): string {
     assertCapabilityDigest(digest)
-    return path.join(this.rootDir, `${digest}.json`)
+    return path.join(rootDir, `${digest}.json`)
   }
 
-  async #assertSafeRoot(create: boolean): Promise<string | null> {
+  async #assertSafeRoot(
+    rootDir: string,
+    leaf: string,
+    create: boolean,
+  ): Promise<string | null> {
     const canonicalProject = await canonicalizePotentialPath(this.projectDir)
-    const expectedRoot = path.join(canonicalProject, '.gg', 'runtime', 'plugin-capabilities-v2')
-    const canonicalRoot = await canonicalizePotentialPath(this.rootDir)
+    const expectedRoot = path.join(canonicalProject, '.gg', 'runtime', leaf)
+    const canonicalRoot = await canonicalizePotentialPath(rootDir)
     if (canonicalRoot !== expectedRoot || !isPathWithin(canonicalProject, canonicalRoot)) {
       throw new Error('unsafe plugin capability root: path resolves through a symlink')
     }
-    if (create) await mkdir(this.rootDir, { recursive: true, mode: 0o700 })
+    if (create) await mkdir(rootDir, { recursive: true, mode: 0o700 })
     try {
-      const info = await lstat(this.rootDir)
+      const info = await lstat(rootDir)
       if (!info.isDirectory() || info.isSymbolicLink()) {
         throw new Error('unsafe plugin capability root: expected a real directory')
       }
@@ -281,33 +412,185 @@ export class ProjectionPluginCapabilityStore {
   }
 }
 
-function projectionPluginsToCommunityRegistrations(
+function parseProjectionCapability(
+  value: unknown,
+  index: number,
+): ProjectionPluginCapability {
+  if (!isRecord(value)
+    || !hasExactOptionalKeys(
+      value,
+      ['pluginId', 'source', 'artifactRules'],
+      ['nodeContext', 'acceptsUnknown'],
+    )
+    || typeof value.pluginId !== 'string'
+    || !isRecord(value.source)) {
+    throw new TypeError(`plugins[${index}] is invalid`)
+  }
+  const registrationInspection = inspectProjectionPluginContracts([{
+    id: value.pluginId,
+    artifactRules: value.artifactRules,
+    ...(value.nodeContext !== undefined ? { nodeContext: value.nodeContext } : {}),
+    ...(value.acceptsUnknown !== undefined ? { acceptsUnknown: value.acceptsUnknown } : {}),
+  }])
+  if (registrationInspection.status !== 'valid') {
+    throw new TypeError(`plugins[${index}] is invalid: ${registrationInspection.reason}`)
+  }
+  const contract = registrationInspection.plugins[0]!
+  let source: ProjectionCapabilitySource
+  if (hasExactKeys(value.source, ['kind', 'version'])
+    && value.source.kind === 'builtin'
+    && typeof value.source.version === 'string') {
+    source = { kind: 'builtin', version: value.source.version }
+  } else if (hasExactKeys(value.source, ['kind', 'providerId', 'providerVersion'])
+    && value.source.kind === 'runtime-plugin'
+    && typeof value.source.providerId === 'string'
+    && typeof value.source.providerVersion === 'string') {
+    source = {
+      kind: 'runtime-plugin',
+      providerId: value.source.providerId,
+      providerVersion: value.source.providerVersion,
+    }
+  } else if (hasExactKeys(value.source, ['kind'])
+    && value.source.kind === 'browser-community') {
+    source = { kind: 'browser-community' }
+  } else {
+    throw new TypeError(`plugins[${index}].source is invalid`)
+  }
+  return {
+    pluginId: contract.id,
+    source,
+    artifactRules: contract.artifactRules,
+    ...(contract.nodeContext ? { nodeContext: contract.nodeContext } : {}),
+    ...(contract.acceptsUnknown ? { acceptsUnknown: true } : {}),
+  }
+}
+
+function toProjectionCapability(
+  registration: ArtifactClaimRegistration,
+  source: ProjectionCapabilitySource,
+): ProjectionPluginCapability {
+  const canonical = canonicalArtifactClaimRegistrations([registration])[0]!
+  return {
+    pluginId: canonical.id,
+    source: structuredClone(source),
+    artifactRules: canonical.artifactClaims,
+    ...(canonical.nodeContext ? { nodeContext: canonical.nodeContext } : {}),
+    ...(canonical.acceptsUnknown ? { acceptsUnknown: true } : {}),
+  }
+}
+
+function runtimeContributionToCapability(
+  contribution: ProjectionContributionRecord,
+): ProjectionPluginCapability {
+  const { providerId, providerVersion, ...registration } = contribution
+  return toProjectionCapability(registration, {
+    kind: 'runtime-plugin',
+    providerId,
+    providerVersion,
+  })
+}
+
+function capabilityToRegistration(
+  plugin: ProjectionPluginCapability,
+): ArtifactClaimRegistration {
+  return {
+    id: plugin.pluginId,
+    artifactClaims: structuredClone(plugin.artifactRules),
+    ...(plugin.nodeContext ? { nodeContext: structuredClone(plugin.nodeContext) } : {}),
+    ...(plugin.acceptsUnknown ? { acceptsUnknown: true } : {}),
+  }
+}
+
+function resolveLegacyProjectionPluginCapabilitySnapshot(
+  value: unknown,
+): LegacyProjectionPluginCapabilitySnapshot {
+  const inspection = inspectArtifactCapabilitySnapshotRequest(value)
+  if (inspection.status !== 'valid') {
+    throw new TypeError(`legacy plugin capability snapshot is invalid: ${inspection.reason}`)
+  }
+  for (const plugin of inspection.snapshot.plugins) {
+    if (BUILTIN_NODE_CONTEXT_PLUGIN_IDS.has(plugin.id)) {
+      throw new TypeError(`built-in plugin capability cannot be replaced: ${plugin.id}`)
+    }
+    if (plugin.acceptsUnknown) {
+      throw new TypeError(`community artifact capability cannot accept unknown files: ${plugin.id}`)
+    }
+  }
+  const plugins = canonicalArtifactClaimRegistrations([
+    ...builtinPluginCapabilityRegistrations(),
+    ...inspection.snapshot.plugins,
+  ]).map(toLegacyProjectionPlugin)
+  return {
+    schemaVersion: 2,
+    digest: legacyProjectionPluginCapabilityDigest(plugins),
+    plugins,
+  }
+}
+
+function inspectPreContextLegacySnapshot(
+  value: Record<string, unknown>,
+  plugins: ProjectionPluginContract[],
+): LegacyProjectionPluginCapabilitySnapshotInspection {
+  try {
+    const byId = new Map(plugins.map((plugin) => [plugin.id, plugin]))
+    for (const builtin of BUILTIN_ARTIFACT_CLAIM_REGISTRY) {
+      const actual = byId.get(builtin.id)
+      const expected = toLegacyProjectionPlugin(
+        canonicalArtifactClaimRegistrations([builtin])[0]!,
+      )
+      if (!actual || JSON.stringify(actual) !== JSON.stringify(expected)) {
+        throw new TypeError(`legacy built-in artifact capability changed or missing: ${builtin.id}`)
+      }
+    }
+    for (const plugin of plugins) {
+      if (BUILTIN_NODE_CONTEXT_PLUGIN_IDS.has(plugin.id)
+        && !BUILTIN_ARTIFACT_PLUGIN_IDS.has(plugin.id)) {
+        throw new TypeError(`legacy snapshot attempted to replace a built-in plugin: ${plugin.id}`)
+      }
+      if (!BUILTIN_ARTIFACT_PLUGIN_IDS.has(plugin.id) && plugin.acceptsUnknown) {
+        throw new TypeError(`community artifact capability cannot accept unknown files: ${plugin.id}`)
+      }
+    }
+    const expectedDigest = legacyProjectionPluginCapabilityDigest(plugins)
+    if (value.digest !== expectedDigest) {
+      throw new TypeError('legacy capability snapshot digest does not match')
+    }
+    return {
+      status: 'valid',
+      snapshot: { schemaVersion: 2, digest: expectedDigest, plugins },
+    }
+  } catch (error) {
+    return {
+      status: 'invalid',
+      reason: error instanceof Error ? error.message : 'legacy capability snapshot is invalid',
+    }
+  }
+}
+
+function legacyProjectionPluginsToCommunityRegistrations(
   plugins: readonly ProjectionPluginContract[],
 ): ArtifactClaimRegistration[] {
   const byId = new Map(plugins.map((plugin) => [plugin.id, plugin]))
   for (const builtin of builtinPluginCapabilityRegistrations()) {
     const actual = byId.get(builtin.id)
-    const canonicalBuiltin = canonicalArtifactClaimRegistrations([builtin])[0]
-    const expected = canonicalBuiltin ? toProjectionPlugin(canonicalBuiltin) : undefined
+    const expected = toLegacyProjectionPlugin(
+      canonicalArtifactClaimRegistrations([builtin])[0]!,
+    )
     if (!actual || JSON.stringify(actual) !== JSON.stringify(expected)) {
       throw new TypeError(`built-in plugin capability was changed or removed: ${builtin.id}`)
     }
   }
   return plugins
     .filter((plugin) => !BUILTIN_NODE_CONTEXT_PLUGIN_IDS.has(plugin.id))
-    .map((plugin) => {
-      if (plugin.acceptsUnknown) {
-        throw new TypeError(`community artifact capability cannot accept unknown files: ${plugin.id}`)
-      }
-      return {
-        id: plugin.id,
-        artifactClaims: plugin.artifactRules,
-        ...(plugin.nodeContext ? { nodeContext: plugin.nodeContext } : {}),
-      }
-    })
+    .map((plugin) => ({
+      id: plugin.id,
+      artifactClaims: plugin.artifactRules,
+      ...(plugin.nodeContext ? { nodeContext: plugin.nodeContext } : {}),
+      ...(plugin.acceptsUnknown ? { acceptsUnknown: true } : {}),
+    }))
 }
 
-function toProjectionPlugin(
+function toLegacyProjectionPlugin(
   registration: ArtifactClaimRegistration,
 ): ProjectionPluginContract {
   return {
@@ -356,6 +639,15 @@ async function readFileNoFollow(filePath: string): Promise<string> {
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   return Object.keys(value).length === keys.length
     && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+}
+
+function hasExactOptionalKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+): boolean {
+  return required.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+    && Object.keys(value).every((key) => required.includes(key) || optional.includes(key))
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -148,7 +148,7 @@ export interface TaskRunSummaryPayload {
 }
 
 export interface TaskRunPluginCapabilityRegistration {
-  schemaVersion: 2
+  schemaVersion: 3
   digest: string
   pluginCount: number
 }
@@ -1071,7 +1071,7 @@ export class TaskRunHttpClient {
       const payload = await this.readJson(response, 'PUT /plugin-capabilities response')
       if (!isRecord(payload)
         || !hasExactKeys(payload, ['schemaVersion', 'digest', 'pluginCount'])
-        || payload.schemaVersion !== 2
+        || payload.schemaVersion !== 3
         || typeof payload.digest !== 'string'
         || !/^[0-9a-f]{64}$/u.test(payload.digest)
         || !Number.isSafeInteger(payload.pluginCount)
@@ -1080,7 +1080,7 @@ export class TaskRunHttpClient {
         throw new TaskRunProtocolError('PUT /plugin-capabilities response was malformed')
       }
       return {
-        schemaVersion: 2,
+        schemaVersion: 3,
         digest: payload.digest,
         pluginCount: payload.pluginCount as number,
       }

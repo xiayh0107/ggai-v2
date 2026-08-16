@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { CanvasDocument, CanvasNode } from '../../src/canvas/model.js'
 import type { AgentDescriptor } from '../protocol.js'
+import { createProjectionContributionSnapshot } from '../projectionContributions.js'
 import type { SkillResolver } from '../skills/contracts.js'
 import {
   parseTaskRunPreflightRequest,
@@ -167,6 +168,7 @@ function service(overrides: ServiceOverrides = {}): TaskRunPreflightService {
         provider: '@ggai/test-skill-resolver',
       }
     },
+    projectionContributions: () => createProjectionContributionSnapshot([]),
   } as unknown as TaskRunPreflightDependencies
   return new TaskRunPreflightService(dependencies)
 }

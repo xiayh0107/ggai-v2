@@ -223,7 +223,7 @@ daemon 将 raw outcome、ArtifactManifest 与序列化插件 artifact claim 求�
 - error/cancelled/interrupted plan 标记 `partial`，保留合法 artifact，但丢弃全部 task proposal；
 - plan 记录 Task/Run、manifest digest、output key、artifactRefs、derivedFrom 与 proposal DAG，不含 Canvas ID 或坐标。
 
-插件契约必须可序列化并声明 artifact claim；React 投影 hook 保持纯函数。浏览器启动 Run 前把启用的 community data-only claims 注册到 `PUT /plugin-capabilities`。daemon 固定内置声明、拒绝 community 覆盖内置或声明 unknown fallback，规范化完整 registry，按 digest 保存到 `.gg/runtime/plugin-capabilities-v2/<digest>.json`，并把这个 digest 与快照固定到 Run、上下文包和恢复摘要。live Run 请求指定的 digest 缺失或损坏时失败关闭；崩溃恢复最多安全降级为 daemon 内置 claims。Agent 的 output `pluginId` 只能引用该 Run 的固定 registry。核心不硬编码某个具体内容插件，但提供确定性的通用 file fallback。
+插件契约必须可序列化并声明 artifact claim；React 投影 hook 保持纯函数。浏览器启动 Run 前把启用的 community data-only claims 注册到 `PUT /plugin-capabilities`。daemon 将不可覆盖的 builtins、受信 runtime contributions 和 community claims 合并为带 provenance 的 v3，按 digest 保存到 `.gg/runtime/plugin-capabilities-v3/<digest>.json`，并把这个 digest 与快照固定到 Run、Capability Receipt、上下文包和恢复摘要。只有 built-in `file` 可以声明 unknown fallback；同一 plugin claim 冲突会拒绝，跨 plugin 的匹配继续按 priority、具体度、稳定 plugin ID 排序。Provider 热更新只影响尚未接受的新 Run；历史 v2 快照仅只读恢复。Agent 的 output `pluginId` 只能引用该 Run 的固定 registry。
 
 ## 7. 交互语义
 

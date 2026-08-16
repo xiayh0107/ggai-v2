@@ -1,7 +1,8 @@
 import type { AgentDescriptor } from './protocol.js'
 import {
-  BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
+  resolveProjectionPluginCapabilitySnapshot,
 } from './pluginCapabilities.js'
+import type { ProjectionContributionSnapshot } from './projectionContributions.js'
 import type { AgentRegistry } from './registry.js'
 import type {
   RunManager,
@@ -55,6 +56,7 @@ export interface TaskRunPreflightDependencies {
   versions: Pick<WorkspaceVersionManager, 'getCanvas'>
   skillAssets: Pick<SkillAssetCatalog, 'typeBindings'>
   skillResolver(): { resolver: SkillResolver; provider: string }
+  projectionContributions(): ProjectionContributionSnapshot
 }
 
 const ISSUE_COPY: Record<TaskRunPreflightIssueCode, {
@@ -122,6 +124,7 @@ export class TaskRunPreflightService {
   readonly #versions: TaskRunPreflightDependencies['versions']
   readonly #skillAssets: TaskRunPreflightDependencies['skillAssets']
   readonly #skillResolver: TaskRunPreflightDependencies['skillResolver']
+  readonly #projectionContributions: TaskRunPreflightDependencies['projectionContributions']
 
   constructor(dependencies: TaskRunPreflightDependencies) {
     this.#registry = dependencies.registry
@@ -129,6 +132,7 @@ export class TaskRunPreflightService {
     this.#versions = dependencies.versions
     this.#skillAssets = dependencies.skillAssets
     this.#skillResolver = dependencies.skillResolver
+    this.#projectionContributions = dependencies.projectionContributions
   }
 
   async inspect(
@@ -185,9 +189,16 @@ export class TaskRunPreflightService {
       addIssue('task_agent_mismatch')
     }
 
-    // The v2 built-in snapshot is already canonical and content-addressed.
-    // Browser/runtime provenance is deliberately deferred to snapshot v3.
-    const pluginCapabilities = BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT
+    let pluginCapabilities
+    try {
+      pluginCapabilities = resolveProjectionPluginCapabilitySnapshot(
+        { schemaVersion: 2, plugins: [] },
+        this.#projectionContributions(),
+      )
+    } catch {
+      addIssue('generation_service_unavailable')
+      return report(issues)
+    }
     try {
       await resolveRunIntentAttachments(
         intent,

@@ -6,7 +6,7 @@ import {
 } from '../src/plugins/artifactContracts.js'
 import { BUILTIN_NODE_CONTEXT_POLICY_REGISTRY } from '../src/plugins/contextContracts.js'
 import type { Disposer } from './runtime/effects.js'
-import { defineService } from './runtime/services.js'
+import { defineService, type ServiceReader } from './runtime/services.js'
 
 export const PROJECTION_CONTRIBUTION_SNAPSHOT_SCHEMA_VERSION = 1 as const
 const SNAPSHOT_DIGEST_DOMAIN = 'ggai.projection-contributions.v1'
@@ -22,6 +22,7 @@ export type ProjectionContribution = ArtifactClaimRegistration
 
 export interface ProjectionContributionRecord extends ProjectionContribution {
   readonly providerId: string
+  readonly providerVersion: string
 }
 
 export interface ProjectionContributionSnapshot {
@@ -36,11 +37,20 @@ export type ProjectionContributionSnapshotInspection =
 
 interface RegisteredProvider {
   readonly id: string
+  readonly version: string
   readonly contributions: readonly ProjectionContribution[]
 }
 
 export const PROJECTION_CONTRIBUTION_REGISTRY_SERVICE =
   defineService<ProjectionContributionRegistry>('ggai.projection-contributions.v1')
+
+/** Absence of optional runtime providers is the canonical empty contribution set. */
+export function workspaceProjectionContributionSnapshot(
+  services: ServiceReader,
+): ProjectionContributionSnapshot {
+  return services.get(PROJECTION_CONTRIBUTION_REGISTRY_SERVICE)?.snapshot()
+    ?? createProjectionContributionSnapshot([])
+}
 
 /**
  * Trusted runtime providers may contribute data-only projection declarations.
@@ -52,9 +62,11 @@ export class ProjectionContributionRegistry {
 
   register(
     providerId: string,
+    providerVersion: string,
     contributions: readonly ProjectionContribution[],
   ): Disposer {
     assertProviderId(providerId)
+    assertProviderVersion(providerVersion)
     if (this.#providers.has(providerId)) {
       throw new Error(`projection contribution provider already exists: ${providerId}`)
     }
@@ -80,6 +92,7 @@ export class ProjectionContributionRegistry {
 
     const provider: RegisteredProvider = {
       id: providerId,
+      version: providerVersion,
       contributions: Object.freeze(canonical),
     }
     this.#providers.set(providerId, provider)
@@ -100,6 +113,7 @@ export class ProjectionContributionRegistry {
     const records = [...this.#providers.values()].flatMap((provider) =>
       provider.contributions.map((contribution) => ({
         providerId: provider.id,
+        providerVersion: provider.version,
         ...structuredClone(contribution),
       })))
     return createProjectionContributionSnapshot(records)
@@ -156,15 +170,24 @@ function canonicalContributionRecords(
   records: readonly ProjectionContributionRecord[],
 ): ProjectionContributionRecord[] {
   const providers = new Set<string>()
+  const providerVersions = new Map<string, string>()
   const ids = new Set<string>()
   const grouped = new Map<string, ProjectionContribution[]>()
   for (const record of records) {
-    if (!isRecord(record) || typeof record.providerId !== 'string') {
+    if (!isRecord(record)
+      || typeof record.providerId !== 'string'
+      || typeof record.providerVersion !== 'string') {
       throw new TypeError('projection contribution record is invalid')
     }
     assertProviderId(record.providerId)
+    assertProviderVersion(record.providerVersion)
+    const priorVersion = providerVersions.get(record.providerId)
+    if (priorVersion !== undefined && priorVersion !== record.providerVersion) {
+      throw new TypeError(`projection provider has multiple versions: ${record.providerId}`)
+    }
+    providerVersions.set(record.providerId, record.providerVersion)
     providers.add(record.providerId)
-    const { providerId, ...registration } = record
+    const { providerId, providerVersion, ...registration } = record
     const canonical = canonicalContributions([
       registration as ProjectionContribution,
     ])[0]!
@@ -172,18 +195,28 @@ function canonicalContributionRecords(
       throw new TypeError(`duplicate projection contribution id: ${canonical.id}`)
     }
     ids.add(canonical.id)
-    const entries = grouped.get(providerId) ?? []
+    const groupKey = `${providerId}\0${providerVersion}`
+    const entries = grouped.get(groupKey) ?? []
     entries.push(canonical)
-    grouped.set(providerId, entries)
+    grouped.set(groupKey, entries)
   }
   if (providers.size > MAX_PROVIDERS || ids.size > MAX_CONTRIBUTIONS) {
     throw new TypeError('projection contribution snapshot exceeds supported limits')
   }
   return [...grouped.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
-    .flatMap(([providerId, contributions]) => contributions
+    .flatMap(([providerKey, contributions]) => {
+      const separator = providerKey.indexOf('\0')
+      const providerId = providerKey.slice(0, separator)
+      const providerVersion = providerKey.slice(separator + 1)
+      return contributions
       .sort((left, right) => left.id.localeCompare(right.id))
-      .map((contribution) => ({ providerId, ...structuredClone(contribution) })))
+      .map((contribution) => ({
+        providerId,
+        providerVersion,
+        ...structuredClone(contribution),
+      }))
+    })
 }
 
 function canonicalContributions(
@@ -219,6 +252,12 @@ function assertContributionAuthority(value: unknown): void {
 function assertProviderId(providerId: string): void {
   if (!PROVIDER_ID.test(providerId)) {
     throw new TypeError(`invalid projection contribution provider id: ${providerId}`)
+  }
+}
+
+function assertProviderVersion(providerVersion: string): void {
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/u.test(providerVersion)) {
+    throw new TypeError(`invalid projection contribution provider version: ${providerVersion}`)
   }
 }
 

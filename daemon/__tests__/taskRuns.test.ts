@@ -409,7 +409,7 @@ test('Task acceptance pins community artifact capabilities for packing and close
         root,
         '.gg',
         'runtime',
-        'plugin-capabilities-v2',
+        'plugin-capabilities-v3',
         `${pluginCapabilities.digest}.json`,
       ), 'utf8')),
       pluginCapabilities,
@@ -559,7 +559,7 @@ test('Task acceptance fails before durable summary when capability pinning is un
     },
   }
   await mkdir(path.join(root, '.gg', 'runtime'), { recursive: true })
-  await symlink(outside, path.join(root, '.gg', 'runtime', 'plugin-capabilities-v2'), 'dir')
+  await symlink(outside, path.join(root, '.gg', 'runtime', 'plugin-capabilities-v3'), 'dir')
   const manager = new RunManager({ projectRoot: root, registry: registry(transport) })
   const input = request('task-run-unsafe-capability-pin')
   input.pluginCapabilities = resolveProjectionPluginCapabilitySnapshot({
@@ -628,7 +628,9 @@ test('Task acceptance pins a receipt before transport and closes its Run scope a
     await waitFor(() => scopes.snapshot().workspaces[0]?.runs.length === 0)
     assert.equal(transportObservedPinnedState, true)
     assert.equal(scopes.snapshot().workspaces[0]?.runs.length, 0)
-    assert.equal((await receipts.get(accepted.runId))?.semanticCapabilities.length, 4)
+    const receipt = await receipts.get(accepted.runId)
+    assert.equal(receipt?.semanticCapabilities.length, 4)
+    assert.equal(receipt?.semanticCapabilities[0]?.key, 'ggai.projection-capabilities.v3')
     assert.deepEqual(await manager.getTaskRunReproducibility(accepted.runId), {
       runId: accepted.runId,
       reproducible: true,

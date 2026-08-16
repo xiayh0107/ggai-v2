@@ -1,12 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createHealthRoute } from './http/routes/health.js'
 import { createRuntimeRoute } from './http/routes/runtime.js'
-import {
-  createTaskRunPreflightRoute,
-} from './http/routes/taskRunPreflight.js'
-import {
-  createTaskRunReproducibilityRoute,
-} from './http/routes/taskRunReproducibility.js'
+import { createTaskRunPreflightRoute } from './http/routes/taskRunPreflight.js'
+import { createTaskRunReproducibilityRoute } from './http/routes/taskRunReproducibility.js'
 import {
   createHttpRouter,
   setHttpSecurityHeaders,
@@ -19,6 +15,7 @@ import {
   type DaemonServerOptions,
 } from './serverLegacy.js'
 import { TaskRunPreflightService } from './taskRunPreflight.js'
+import { workspaceProjectionContributionSnapshot } from './projectionContributions.js'
 import { SKILL_RESOLVER_SERVICE } from './skills/contracts.js'
 
 export type { DaemonServer, DaemonServerOptions } from './serverLegacy.js'
@@ -50,6 +47,9 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
       if (!resolver || !provider) throw new Error('Workspace Skill Resolver is unavailable')
       return { resolver, provider }
     },
+    projectionContributions: () => workspaceProjectionContributionSnapshot(
+      daemon.workspaceCapabilities,
+    ),
   })
   const context: HttpRouteContext = {
     projectRoot: options.projectRoot,
