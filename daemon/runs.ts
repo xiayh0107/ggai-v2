@@ -164,6 +164,8 @@ export interface RunCreationOptions {
   validateReserved?: () => Promise<void>
 }
 
+export type TaskRunPreflightAvailability = 'ready' | 'busy' | 'capacity'
+
 interface PendingRunCreation {
   projectDir: string
   canvasBranch: string
@@ -714,6 +716,31 @@ export class RunManager {
   ): Promise<TaskSessionRecord[]> {
     const projectDir = await this.#leaseProject(projectDirRequest)
     return this.#taskSessions(projectDir).list(filter)
+  }
+
+  /**
+   * Read-only availability hint for UI preflight. It never reserves a branch,
+   * Task, Run id, or capacity slot; create() repeats the checks atomically.
+   */
+  async inspectTaskRunAvailability(
+    projectDirRequest: string,
+    canvasBranchRequest: string,
+    taskIdRequest: string,
+  ): Promise<TaskRunPreflightAvailability> {
+    this.#assertOpen()
+    const projectDir = await this.#leaseProject(projectDirRequest)
+    const canvasBranch = parseCanvasBranch(canvasBranchRequest)
+    const taskId = parseTaskId(taskIdRequest)
+    const branchKey = branchLeaseKey(projectDir, canvasBranch)
+    const taskKey = taskLeaseKey(projectDir, canvasBranch, taskId)
+    if (this.#branchMutationLeases.has(branchKey)
+      || this.#taskMutationLeases.has(taskKey)
+      || (this.#taskRunLeases.get(taskKey)?.size ?? 0) > 0) {
+      return 'busy'
+    }
+    const activeRuns = [...this.#runs.values()].filter((run) => !run.closed).length
+      + this.#pendingCreates.size
+    return activeRuns >= MAX_ACTIVE_RUNS ? 'capacity' : 'ready'
   }
 
   /**

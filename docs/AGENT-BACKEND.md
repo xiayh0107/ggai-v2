@@ -72,6 +72,7 @@ daemon/
 | POST | `/canvas/checkpoints`、`/canvas/restores` | 手动 checkpoint、恢复到新分支 |
 | POST | `/canvas/merges/preview`、`/canvas/merges` | 语义 merge 预览与确认执行 |
 | PUT | `/plugin-capabilities?projectDir=` | 注册 community data-only claims，返回固定 digest |
+| POST | `/task-runs/preflight?projectDir=` | 只读检查 Agent、revision、附件与 Skills；结果不是启动票据 |
 | POST | `/runs?projectDir=&pluginCapabilityDigest=` | 启动严格 `RunIntent`；成功为 HTTP 202 |
 | GET | `/runs?projectDir=&taskId=&branch=` | 查询 Task Run 历史 |
 | GET | `/runs/:id`、`/runs/:id/log` | Run summary 与永久日志分页 |
@@ -82,6 +83,10 @@ daemon/
 | GET | `/runs/:runId/artifacts/:artifactId/metadata` | 读取 verified MIME/size/digest |
 
 `MaterializeProjectionPlan`、`AcceptTaskProposals` 和 `DismissPlan` 在浏览器 wire 上只携带 `planId` 与受限选择/编辑字段。server 从 plan store 取 daemon-owned 完整计划，再交给 reducer。`DELETE /runs/:id/log` 返回 405 `run_log_delete_unsupported`。
+
+`/task-runs/preflight` 的稳定 issue code、输入边界与 advisory 安全语义见
+[`RUN-PREFLIGHT.md`](./RUN-PREFLIGHT.md)。真实 Run 创建仍在 acceptance reservation 后重复所有
+revision、附件、Skill 与 capability 校验。
 
 已废弃的整文档 Canvas PUT、`/artifacts?path=`、Node session 和 `/canvas/source*` 不属于当前 API；客户端不能通过这些路径绕过 command、Task session 或 manifest-backed artifact 边界。
 

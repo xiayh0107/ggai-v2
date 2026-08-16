@@ -14,6 +14,7 @@ Registry、RunManager、Catalog 或 PluginHost。
 
 - `GET /health`
 - `GET /runtime`
+- `POST /task-runs/preflight`
 
 迁移规则：
 

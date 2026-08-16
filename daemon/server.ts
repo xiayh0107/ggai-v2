@@ -6,6 +6,9 @@ import {
   createRuntimeRoute,
 } from './http/routes/runtime.js'
 import {
+  createTaskRunPreflightRoute,
+} from './http/routes/taskRunPreflight.js'
+import {
   createHttpRouter,
   setHttpSecurityHeaders,
   writeHttpJson,
@@ -16,6 +19,7 @@ import {
   type DaemonServer,
   type DaemonServerOptions,
 } from './serverLegacy.js'
+import { TaskRunPreflightService } from './taskRunPreflight.js'
 
 export type { DaemonServer, DaemonServerOptions } from './serverLegacy.js'
 
@@ -35,15 +39,23 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   daemon.server.removeAllListeners('request')
 
   const lifecycle = { closing: false }
+  const taskRunPreflight = new TaskRunPreflightService({
+    registry: daemon.registry,
+    runs: daemon.runs,
+    versions: daemon.versions,
+    skillAssets: daemon.skillAssets,
+  })
   const context: HttpRouteContext = {
     projectRoot: options.projectRoot,
     registry: daemon.registry,
+    taskRunPreflight,
     allowedOrigins: new Set(options.allowedOrigins ?? []),
     lifecycle,
   }
   const router = createHttpRouter([
     createHealthRoute(),
     createRuntimeRoute(),
+    createTaskRunPreflightRoute(),
   ])
 
   daemon.server.on('request', (request, response) => {
