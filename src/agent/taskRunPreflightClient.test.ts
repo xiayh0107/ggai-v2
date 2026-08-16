@@ -3,17 +3,24 @@ import { TaskRunPreflightClient } from './taskRunPreflightClient'
 
 describe('TaskRunPreflightClient', () => {
   it('posts the exact advisory request and decodes a blocked result', async () => {
-    const fetch = vi.fn(async () => new Response(JSON.stringify({
-      status: 'blocked',
-      issues: [{
-        code: 'generation_service_unauthenticated',
-        message: '生成服务尚未登录，请完成登录后重试。',
-        retryable: true,
-      }],
-    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    let capturedRequest: {
+      input: RequestInfo | URL
+      init?: RequestInit
+    } | undefined
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      capturedRequest = { input, init }
+      return new Response(JSON.stringify({
+        status: 'blocked',
+        issues: [{
+          code: 'generation_service_unauthenticated',
+          message: '生成服务尚未登录，请完成登录后重试。',
+          retryable: true,
+        }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
     const client = new TaskRunPreflightClient({
       baseUrl: 'http://127.0.0.1:7380',
-      fetch: fetch as typeof globalThis.fetch,
+      fetch,
     })
 
     await expect(client.check({
@@ -31,12 +38,12 @@ describe('TaskRunPreflightClient', () => {
       }],
     })
 
-    const [url, init] = fetch.mock.calls[0]
-    expect(String(url)).toBe(
+    expect(capturedRequest).toBeDefined()
+    expect(String(capturedRequest?.input)).toBe(
       'http://127.0.0.1:7380/task-runs/preflight?projectDir=%2Fworkspace%2Fdemo',
     )
-    expect(init?.method).toBe('POST')
-    expect(JSON.parse(String(init?.body))).toEqual({
+    expect(capturedRequest?.init?.method).toBe('POST')
+    expect(JSON.parse(String(capturedRequest?.init?.body))).toEqual({
       taskId: 'task-1',
       agentId: 'codex',
       canvasBranch: 'main',
