@@ -17,6 +17,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
   type FormEvent,
@@ -29,6 +30,7 @@ import {
   type TaskRunPreflightApi,
   type TaskRunPreflightIssue,
 } from '@/agent/taskRunPreflightClient'
+import { artifactKey, artifactTitle } from '@/canvas/attachments'
 import { useCanvasState, useCanvasStore } from '@/canvas/hooks'
 import type { CanvasTask } from '@/canvas/model'
 import { CanvasTaskRunContext } from '@/canvas/runHooks'
@@ -43,6 +45,12 @@ import type {
   CanvasTaskRuntime,
 } from '@/canvas/selectors'
 import { getPlugin } from '@/plugins/types'
+import {
+  ProjectArtifactCatalogClient,
+  type ProjectArtifactCatalogApi,
+  type ProjectArtifactResource,
+} from '@/resources/artifactCatalogClient'
+import CanvasAttachmentPicker, { AttachmentTypeIcon } from './CanvasAttachmentPicker'
 import CanvasPromptControl from './CanvasPromptControl'
 
 const MAX_VISIBLE_LOG_ENTRIES = 200
@@ -57,6 +65,12 @@ export interface CanvasTaskRunPanelProps {
   width?: number
   /** Deterministic UI-render and component-test seam. */
   preflightApi?: TaskRunPreflightApi
+  /** Deterministic UI-render and component-test seam. */
+  artifactCatalogApi?: Pick<ProjectArtifactCatalogApi, 'list'>
+  /** Deterministic UI-render and component-test seam. */
+  initialAttachments?: readonly ProjectArtifactResource[]
+  /** Deterministic UI-render and component-test seam. */
+  initialAttachmentPickerOpen?: boolean
 }
 
 /**
@@ -74,6 +88,9 @@ function CanvasTaskRunPanelContent({
   width,
   lifecycle,
   preflightApi: injectedPreflightApi,
+  artifactCatalogApi: injectedArtifactCatalogApi,
+  initialAttachments = [],
+  initialAttachmentPickerOpen = false,
 }: CanvasTaskRunPanelProps & { lifecycle: CanvasTaskRunLifecycle }) {
   const store = useCanvasStore()
   const openRunLogViewer = useOpenCanvasRunLogViewer()
@@ -82,6 +99,10 @@ function CanvasTaskRunPanelContent({
   const preflightApi = useMemo(
     () => injectedPreflightApi ?? new TaskRunPreflightClient({ baseUrl: DAEMON_URL }),
     [injectedPreflightApi],
+  )
+  const artifactCatalogApi = useMemo(
+    () => injectedArtifactCatalogApi ?? new ProjectArtifactCatalogClient({ baseUrl: DAEMON_URL }),
+    [injectedArtifactCatalogApi],
   )
   const draftKey = taskComposerDraftKey(task.id)
   const draft = canvasState.view.composerDrafts[draftKey] ?? ''
@@ -106,6 +127,20 @@ function CanvasTaskRunPanelContent({
   const [logsExpanded, setLogsExpanded] = useState(false)
   const [preflightAttempt, setPreflightAttempt] = useState(0)
   const [preflightState, setPreflightState] = useState<PreflightState>({ status: 'idle' })
+  const [attachmentPickerOpen, setAttachmentPickerOpen] = useState(
+    initialAttachmentPickerOpen,
+  )
+  const [attachments, setAttachments] = useState<ProjectArtifactResource[]>(
+    () => [...initialAttachments],
+  )
+  const attachmentScopeKey = `${canvasState.scope.projectDir}\u0000${canvasState.scope.branch}\u0000${task.id}`
+  const attachmentScopeRef = useRef(attachmentScopeKey)
+  const wasActiveRef = useRef(false)
+  const attachmentRefs = useMemo(() => attachments.map((attachment) => ({
+    kind: 'artifact' as const,
+    runId: attachment.runId,
+    artifactId: attachment.artifactId,
+  })), [attachments])
   const [resolvingPermissionIds, setResolvingPermissionIds] = useState<Set<string>>(
     () => new Set(),
   )
@@ -115,12 +150,30 @@ function CanvasTaskRunPanelContent({
     || active
     || submitting
     || cancelling
-    || preflightState.status === 'blocked'
+    || preflightState.status !== 'ready'
   const ownedNodes = canvasState.document.nodes.filter((node) => node.homeTaskId === task.id)
   const outputPlugin = ownedNodes.length === 1 ? getPlugin(ownedNodes[0].type) : null
   const panelTitle = ownedNodes.length === 1
     ? `使用“${ownedNodes[0].title}”作为输出槽`
     : '任务提示词'
+
+  useEffect(() => {
+    if (attachmentScopeRef.current === attachmentScopeKey) return
+    attachmentScopeRef.current = attachmentScopeKey
+    setAttachments([])
+    setAttachmentPickerOpen(false)
+  }, [attachmentScopeKey])
+
+  useEffect(() => {
+    if (active) {
+      wasActiveRef.current = true
+      setAttachmentPickerOpen(false)
+      return
+    }
+    if (!wasActiveRef.current) return
+    wasActiveRef.current = false
+    setAttachments([])
+  }, [active])
 
   useEffect(() => {
     const revision = canvasState.envelope?.revision
@@ -136,6 +189,7 @@ function CanvasTaskRunPanelContent({
       agentId: DAEMON_AGENT_ID,
       canvasBranch: canvasState.scope.branch,
       baseRevision: revision,
+      attachments: attachmentRefs,
       signal: controller.signal,
     }).then(
       (result) => setPreflightState(result.status === 'ready'
@@ -148,6 +202,7 @@ function CanvasTaskRunPanelContent({
     return () => controller.abort()
   }, [
     active,
+    attachmentRefs,
     canvasState.envelope?.revision,
     canvasState.hydration.status,
     canvasState.scope.branch,
@@ -168,6 +223,7 @@ function CanvasTaskRunPanelContent({
         taskId: task.id,
         agentId: DAEMON_AGENT_ID,
         ...(draft.trim() ? { prompt: draft.trim() } : {}),
+        ...(attachmentRefs.length > 0 ? { attachments: attachmentRefs } : {}),
       }
       if (hasPreviousRun) await lifecycle.continueTask(input)
       else await lifecycle.startTask(input)
@@ -222,14 +278,12 @@ function CanvasTaskRunPanelContent({
         message: preflightState.issues[0]?.message ?? '当前暂时无法开始生成。',
         additional: Math.max(0, preflightState.issues.length - 1),
         retryable: preflightState.issues.some((issue) => issue.retryable),
-        urgent: true,
       }
     : preflightState.status === 'error'
       ? {
           message: '暂时无法确认生成服务状态，请重新检测。',
           additional: 0,
           retryable: true,
-          urgent: false,
         }
       : null
 
@@ -258,9 +312,35 @@ function CanvasTaskRunPanelContent({
                 additional={preflightNotice.additional}
                 retryable={preflightNotice.retryable}
                 checking={preflightState.status === 'checking'}
-                urgent={preflightNotice.urgent}
                 onRetry={() => setPreflightAttempt((attempt) => attempt + 1)}
               />
+            )}
+            {attachments.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap gap-1 px-1" aria-label="已添加附件">
+                {attachments.map((attachment) => (
+                  <span
+                    key={artifactKey(attachment)}
+                    className="flex max-w-52 items-center gap-1.5 rounded-[8px] border border-[#D6E2F5] bg-[#F5F8FD] py-1 pl-2 pr-1 text-[10px] text-gg-ink"
+                  >
+                    <AttachmentTypeIcon mediaType={attachment.mediaType} size={11} />
+                    <span className="truncate" title={attachment.relativePath}>
+                      {artifactTitle(attachment)}
+                    </span>
+                    {!active && (
+                      <button
+                        type="button"
+                        aria-label={`移除附件 ${artifactTitle(attachment)}`}
+                        onClick={() => setAttachments((current) => current.filter(
+                          (candidate) => artifactKey(candidate) !== artifactKey(attachment),
+                        ))}
+                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-[6px] text-gg-muted outline-none hover:bg-white hover:text-gg-ink focus-visible:ring-2 focus-visible:ring-gg-primary/30"
+                      >
+                        <X size={11} aria-hidden="true" />
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </div>
             )}
             {!active && suggestedActions.length > 0 && (
               <div className="mb-1.5 flex flex-wrap gap-1 px-1" aria-label="建议的后续操作">
@@ -281,15 +361,34 @@ function CanvasTaskRunPanelContent({
           </>
         )}
         inputLeading={(
-          <button
-            type="button"
-            disabled
-            aria-label={active ? '生成期间不可添加附件' : '添加附件暂不可用'}
-            title={active ? '生成期间不可添加附件' : '添加附件暂不可用'}
-            className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] bg-gg-subtle text-gg-muted opacity-55"
-          >
-            <Paperclip size={14} aria-hidden="true" />
-          </button>
+          <>
+            <button
+              type="button"
+              disabled={active}
+              aria-label={active ? '生成期间不可添加附件' : '添加附件'}
+              aria-haspopup={active ? undefined : 'dialog'}
+              aria-expanded={active ? undefined : attachmentPickerOpen}
+              title={active ? '生成期间不可添加附件' : '从资源库添加附件'}
+              onClick={() => setAttachmentPickerOpen((open) => !open)}
+              className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] outline-none focus-visible:ring-2 focus-visible:ring-gg-primary/30 disabled:cursor-not-allowed disabled:opacity-55 ${
+                attachmentPickerOpen || attachments.length > 0
+                  ? 'bg-[#EAF1FD] text-gg-primary'
+                  : 'bg-gg-subtle text-gg-muted hover:text-gg-ink'
+              }`}
+            >
+              <Paperclip size={14} aria-hidden="true" />
+            </button>
+            {!active && attachmentPickerOpen && (
+              <CanvasAttachmentPicker
+                api={artifactCatalogApi}
+                projectDir={canvasState.scope.projectDir}
+                branch={canvasState.scope.branch}
+                selected={attachments}
+                onChange={setAttachments}
+                onClose={() => setAttachmentPickerOpen(false)}
+              />
+            )}
+          </>
         )}
         inputContent={(
           <textarea
@@ -560,20 +659,17 @@ function GenerationPreflightNotice({
   additional,
   retryable,
   checking,
-  urgent,
   onRetry,
 }: {
   message: string
   additional: number
   retryable: boolean
   checking: boolean
-  urgent: boolean
   onRetry(): void
 }) {
   return (
     <div
-      role={urgent ? 'alert' : 'status'}
-      aria-live={urgent ? 'assertive' : 'polite'}
+      role="alert"
       data-testid="canvas-generation-preflight-notice"
       className="mb-1.5 flex items-start gap-2 rounded-[10px] border border-[#F4C7C3] bg-[#FFF8F7] px-2.5 py-2"
     >
