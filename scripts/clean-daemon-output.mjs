@@ -3,7 +3,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
-const ALLOWED_OUTPUTS = new Set(['dist-daemon', 'dist-daemon-test'])
+const ALLOWED_OUTPUTS = new Set(['dist-cli', 'dist-daemon', 'dist-daemon-test'])
 const outputName = process.argv[2]
 
 if (!outputName || !ALLOWED_OUTPUTS.has(outputName)) {

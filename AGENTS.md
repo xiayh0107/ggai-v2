@@ -39,6 +39,10 @@ src/
     client.ts              # Workspace skill 管理严格 HTTP 客户端
 ```
 
+```text
+cli/                 # `gg` headless shell; daemon HTTP only, no CanvasStore or direct .gg access
+```
+
 ```
 daemon/
   index.ts                 # 127.0.0.1 服务入口

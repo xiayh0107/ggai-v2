@@ -12,6 +12,7 @@ import {
 
 const ROOT = process.cwd()
 const CHECKED_ROOTS = [
+  'cli',
   'src/agent',
   'src/canvas',
   'src/components/canvas',
@@ -58,6 +59,13 @@ for (const root of CHECKED_ROOTS) {
     const imports = importedSpecifiers(source)
     violations.push(...capabilityBoundaryViolations(sourcePath, imports))
     for (const specifier of imports) {
+      if (sourcePath.startsWith('cli/') && (
+        specifier.startsWith('../daemon/')
+        || specifier.includes('/canvas/store')
+        || specifier.includes('/canvas/persistence')
+      )) {
+        violations.push(`${sourcePath} bypasses the daemon HTTP boundary via ${specifier}`)
+      }
       if (LEGACY_IMPORTS.some((legacy) => specifier.startsWith(legacy))) {
         violations.push(`${sourcePath} imports legacy module ${specifier}`)
       }
