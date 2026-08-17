@@ -1,7 +1,7 @@
 # GGAI 节点插件规范
 
-画布上的一切节点——包括所有内置类型——都以完全相同的插件形态存在。
-内置插件（`builtins/`）与社区 / 用户插件能力对等，没有任何特权。
+画布上的一切节点——包括所有内置类型——都由同一个 `NodeTypeDefinition` 纯数据契约描述。
+内置定义（`builtins/`）与社区 / 用户定义经过相同校验；只有 daemon provider 持有执行权限。
 
 插件如何参与 Task、typed Edge 与 Agent 上下文由核心统一定义，规范见
 [`../../docs/PLUGIN-CONTEXT-CONTRACT.md`](../../docs/PLUGIN-CONTEXT-CONTRACT.md)。社区插件不得
@@ -11,11 +11,13 @@
 
 | 要素 | 字段 | 说明 |
 | --- | --- | --- |
-| 身份 | `id` / `label` / `desc` / `icon` | 全局唯一 id；社区插件建议带命名空间 `@author/video` |
+| 身份 | `id` / `revision` / `label` / `description` / `icon` | immutable revision；社区类型建议带命名空间 `@author/video` |
 | 几何 | `defaultWidth` | 创建时的缺省宽度（高度由内容自适应，引擎实测回填） |
-| 内容契约 | `initialPayload()` + `isEmpty(node)` | 节点的本体数据结构与"空内容"判定；空 → 空白态，非空 → 内容态 |
+| 内容契约 | `initialPayloadSchema` + `initialPayload` | 节点的本体数据结构；内容可见性由平台统一判定 |
 | UI 契约 | `ui.schemaVersion` / `ui.template` | 必填、纯数据；只允许平台白名单内容模板，不允许 JSX / CSS / Node shell |
-| 指令配置 | `instr.placeholder` / `instr.actions` / `instr.actionsFor` | 输入占位、专属快捷指令，以及按节点内容与来源动态计算的快捷指令（可选） |
+| 指令配置 | `instruction.placeholder` / `instruction.actions` / `instruction.marks` | 输入占位、静态快捷指令和声明式 payload 标记 |
+| 组合与数据流 | `containment` / `ports` | 子节点策略以及 typed input/output ports |
+| 受限能力 | `execution` / `exporters` / `agent` | 只引用 daemon capability 与 schema，不包含命令、镜像、路径或代码 |
 | Artifact 声明 | `artifactClaims` | 必填、纯数据：声明插件接受的扩展名 / MIME 类型与优先级 |
 | Agent 上下文 | `nodeContext` | 必填、纯数据：分别约束 summary/full 的正文、payload 字段与 artifact identity |
 | 创建入口 | `creatable` | 缺省为 `true`；设为 `false` 时仅可承接产物投影，不进入创建菜单或首屏面板 |
@@ -31,24 +33,34 @@
 
 ## 扩展一个新类型
 
-```tsx
-import { FileVideo } from 'lucide-react'
+```ts
 import { registerPlugin } from '@/plugins/types'
 import { defineNodeUi } from '@/plugins/uiContracts'
 
 registerPlugin({
+  schemaVersion: 2,
   id: 'video',
+  revision: 1,
   label: '视频',
-  desc: '上传视频、提取关键帧与字幕',
-  icon: FileVideo,
+  description: '上传视频、提取关键帧与字幕',
+  creatable: true,
+  icon: 'file',
   defaultWidth: 320,
-  initialPayload: () => ({}),
-  isEmpty: (n) => !n.text?.trim() && Object.keys(n.payload).length === 0,
+  initialPayloadSchema: 'ggai://schema/payload/open',
+  initialPayload: {},
   ui: defineNodeUi('media'),
-  instr: {
+  instruction: {
     placeholder: '提取关键帧、转录字幕、总结内容…',
     actions: ['提取关键帧', '转录字幕', '总结内容'],
+    marks: [],
   },
+  containment: { canHaveChildren: false, allowedChildTypes: [], maxDepth: 0 },
+  ports: [
+    { key: 'source', direction: 'input', schema: 'ggai://value/video', cardinality: 'one' },
+    { key: 'frames', direction: 'output', schema: 'ggai://value/image', cardinality: 'many', materialization: 'tray' },
+  ],
+  exporters: [],
+  agent: { constructible: true, writableInitSchema: 'ggai://schema/payload/open' },
   artifactClaims: [{
     extensions: ['.mp4', '.mov'],
     mediaTypes: ['video/*'],
@@ -66,7 +78,7 @@ registerPlugin({
 community data-only claims 与 Node context policy 注册给 daemon；daemon 返回固定 registry
 digest，并把该快照绑定到整个 Run。后续插件热更新只影响新 Run，不会改变正在执行或恢复中的
 artifact 分类与上下文裁剪。所有插件
-仍可参与来源小窗、连线和指令面板。只用于展示未知产物的 fallback 插件应设置
+仍可参与来源小窗、连线和指令面板。只用于展示未知产物的 fallback 类型应设置
 `creatable: false`；community 插件不能声明 `acceptsUnknown`。
 
 ## Artifact contract 边界
@@ -111,7 +123,7 @@ runtime contributions；变化会要求调用方重试，接受后的 Run 只读
 - `payload` 结构由插件自定，持久化时随节点保存；避免引用引擎内部字段
 - `artifactClaims` 必须是 JSON 可序列化数据；不要放函数、renderer、正则表达式或运行时对象
 - `nodeContext` 必须通过共享严格校验器；不要用它传路径、提示词模板或可执行 projector
-- `instr.actions` / `actionsFor` 是无结构化 Agent 结果时的 UI 兜底；成功 run 返回的上下文建议会优先展示
+- `instruction.actions` 是无结构化 Agent 结果时的 UI 兜底；成功 run 返回的上下文建议会优先展示
 - 节点来源以 `Edge` 为唯一事实源；`instruction.sources` 仅保留为旧数据兼容镜像，插件不应读写它
 - 插件 ID 不参与连接或上下文分支；相同手势、Edge 与 contextRole 对所有内置和社区插件必须产生相同 Task inputs
-- 当前输出槽资格不能由浏览器函数 `isEmpty` 单独证明；需要支持空节点直接运行的插件应让 `initialPayload()` 返回 `{}`，参数默认值先保留在 UI，等待用户确认后再持久化
+- 输出槽资格不能由类型定义自行改变；需要支持空节点直接运行的类型应让 `initialPayload` 使用 `{}`，参数默认值先保留在 UI，等待用户确认后再持久化

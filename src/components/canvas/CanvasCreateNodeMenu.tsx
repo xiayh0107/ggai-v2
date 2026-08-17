@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react'
 import {
   getPluginRegistryVersion,
   listCreatablePlugins,
+  nodeTypeIcon,
   subscribePlugins,
 } from '@/plugins/types'
 
@@ -34,7 +35,7 @@ export default function CanvasCreateNodeMenu({
         {sourceTitle ? `从“${sourceTitle}”新建节点` : '创建节点'}
       </p>
       {listCreatablePlugins().map((plugin) => {
-        const Icon = plugin.icon
+        const Icon = nodeTypeIcon(plugin)
         return (
           <button
             key={plugin.id}

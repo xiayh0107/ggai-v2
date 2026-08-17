@@ -21,7 +21,7 @@ export interface AgentDescriptor {
   models: string[]
 }
 
-/** Serializable subset of NodePlugin. React components deliberately never cross the wire. */
+/** Retired standalone-run contract; current node types use NodeTypeDefinition snapshots. */
 export interface PluginContract {
   id: string
   label: string

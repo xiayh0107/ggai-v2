@@ -1,10 +1,9 @@
-import { Image, LayoutTemplate, Table2, Type } from 'lucide-react'
 import {
   getPlugin,
   listPlugins,
   registerPlugin,
   unregisterPlugin,
-  type NodePlugin,
+  type NodeTypeDefinition,
 } from '@/plugins/types'
 import {
   NODE_CONTEXT_POLICY_SCHEMA_VERSION,
@@ -13,6 +12,7 @@ import {
 } from '@/plugins/contextContracts'
 import { artifactClaimsForBuiltin } from '@/plugins/artifactContracts'
 import { defineNodeUi, type NodeContentTemplate } from '@/plugins/uiContracts'
+import { NODE_TYPE_DEFINITION_SCHEMA_VERSION, type NodeTypeIconId } from '@/plugins/nodeTypeContracts'
 import {
   customNodeRuntimeId,
   type CustomNodeContentKind,
@@ -21,14 +21,7 @@ import {
 
 const registeredCustomIds = new Set<string>()
 
-const ICONS = {
-  text: Type,
-  image: Image,
-  table: Table2,
-  card: LayoutTemplate,
-} as const
-
-export function registerCustomNodePlugins(manifests: CustomNodeManifest[]): void {
+export function registerCustomNodeTypes(manifests: CustomNodeManifest[]): void {
   const installed = manifests.filter((manifest) => manifest.installed && manifest.revision > 0)
   const latestById = new Map<string, number>()
   installed.forEach((manifest) => {
@@ -46,7 +39,7 @@ export function registerCustomNodePlugins(manifests: CustomNodeManifest[]): void
 export function installCustomNodeManifest(
   manifest: CustomNodeManifest,
   creatable = true,
-): NodePlugin {
+): NodeTypeDefinition {
   const runtimeId = customNodeRuntimeId(manifest)
   if (registeredCustomIds.has(runtimeId)) {
     unregisterPlugin(runtimeId)
@@ -54,27 +47,42 @@ export function installCustomNodeManifest(
   } else if (listPlugins().some((plugin) => plugin.id === runtimeId)) {
     throw new TypeError(`节点 ID ${runtimeId} 已被占用`)
   }
-  const plugin = createCustomNodePlugin(manifest, creatable)
+  const plugin = createCustomNodeType(manifest, creatable)
   registerPlugin(plugin)
   registeredCustomIds.add(runtimeId)
   return getPlugin(runtimeId)
 }
 
-export function createCustomNodePlugin(manifest: CustomNodeManifest, creatable = true): NodePlugin {
-  const Icon = ICONS[manifest.icon]
+export function createCustomNodeType(
+  manifest: CustomNodeManifest,
+  creatable = true,
+): NodeTypeDefinition {
   return {
+    schemaVersion: NODE_TYPE_DEFINITION_SCHEMA_VERSION,
     id: customNodeRuntimeId(manifest),
+    revision: manifest.revision,
     label: manifest.label,
-    desc: manifest.description,
+    description: manifest.description,
     creatable,
-    icon: Icon,
+    icon: iconForContentKind(manifest.icon),
     defaultWidth: manifest.defaultWidth,
-    initialPayload: () => ({}),
-    isEmpty: (node) => !node.text?.trim() && !node.payload?.content,
+    initialPayloadSchema: manifest.initialPayloadSchema,
+    initialPayload: structuredClone(manifest.initialPayload),
     ui: defineNodeUi(templateForContentKind(manifest.contentKind)),
-    instr: {
+    instruction: {
       placeholder: manifest.placeholder,
       actions: manifest.actions,
+      marks: [],
+    },
+    containment: structuredClone(manifest.containment),
+    ports: structuredClone(manifest.ports),
+    ...(manifest.execution ? { execution: structuredClone(manifest.execution) } : {}),
+    exporters: [...manifest.exporters],
+    agent: {
+      constructible: creatable && manifest.agent.constructible,
+      ...(creatable && manifest.agent.writableInitSchema
+        ? { writableInitSchema: manifest.agent.writableInitSchema }
+        : {}),
     },
     nodeContext: customNodeContextPolicy(manifest.contentKind),
     artifactClaims: artifactClaimsForContentKind(manifest.contentKind),
@@ -83,10 +91,17 @@ export function createCustomNodePlugin(manifest: CustomNodeManifest, creatable =
 
 function artifactClaimsForContentKind(
   kind: CustomNodeContentKind,
-): NodePlugin['artifactClaims'] {
+): NodeTypeDefinition['artifactClaims'] {
   if (kind === 'image') return artifactClaimsForBuiltin('image')
   if (kind === 'table') return artifactClaimsForBuiltin('table')
   return artifactClaimsForBuiltin('text')
+}
+
+function iconForContentKind(kind: CustomNodeContentKind): NodeTypeIconId {
+  if (kind === 'text') return 'text'
+  if (kind === 'image') return 'image'
+  if (kind === 'table') return 'table'
+  return 'card'
 }
 
 function templateForContentKind(kind: CustomNodeContentKind): NodeContentTemplate {

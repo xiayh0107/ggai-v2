@@ -1,4 +1,6 @@
-export const CUSTOM_NODE_MANIFEST_SCHEMA_VERSION = 1 as const
+import type { PortDefinition } from '../plugins/nodeTypeContracts.js'
+
+export const CUSTOM_NODE_MANIFEST_SCHEMA_VERSION = 2 as const
 
 export type CustomNodeContentKind = 'text' | 'image' | 'table' | 'card'
 export type CustomNodeIconId = 'text' | 'image' | 'table' | 'card'
@@ -13,8 +15,22 @@ export interface CustomNodeManifest {
   contentKind: CustomNodeContentKind
   icon: CustomNodeIconId
   defaultWidth: number
+  initialPayloadSchema: string
+  initialPayload: Record<string, unknown>
   placeholder: string
   actions: string[]
+  containment: {
+    canHaveChildren: boolean
+    allowedChildTypes: string[]
+    maxDepth: number
+  }
+  ports: PortDefinition[]
+  execution?: { capability: string; policy: string }
+  exporters: string[]
+  agent: {
+    constructible: boolean
+    writableInitSchema?: string
+  }
   emptyTitle: string
   emptyDescription: string
   sampleTitle: string
@@ -37,8 +53,21 @@ export function createBlankCustomNodeManifest(now = new Date()): CustomNodeManif
     contentKind: 'card',
     icon: 'card',
     defaultWidth: 340,
+    initialPayloadSchema: 'ggai://schema/payload/open',
+    initialPayload: {},
     placeholder: '描述希望这个节点完成的任务…',
     actions: [],
+    containment: {
+      canHaveChildren: false,
+      allowedChildTypes: [],
+      maxDepth: 0,
+    },
+    ports: [],
+    exporters: [],
+    agent: {
+      constructible: true,
+      writableInitSchema: 'ggai://schema/payload/open',
+    },
     emptyTitle: '等待内容',
     emptyDescription: '描述需求，由 Agent 生成',
     sampleTitle: '自定义节点示例',
@@ -101,6 +130,20 @@ export function validateCustomNodeManifest(manifest: CustomNodeManifest): string
   if (manifest.actions.some((action) => !action.trim())) errors.push('快捷指令不能为空')
   if (manifest.actions.some((action) => action.length > 80)) errors.push('快捷指令不能超过 80 个字符')
   if (new Set(manifest.actions).size !== manifest.actions.length) errors.push('快捷指令不能重复')
+  if (!/^ggai:\/\/[A-Za-z0-9][A-Za-z0-9._:/-]*$/u.test(manifest.initialPayloadSchema)) {
+    errors.push('初始 payload schema 必须使用 ggai:// 标识')
+  }
+  if (!isRecord(manifest.initialPayload)) errors.push('初始 payload 必须是对象')
+  if (!validContainment(manifest.containment)) errors.push('子节点策略无效')
+  if (!Array.isArray(manifest.ports) || manifest.ports.length > 128
+    || manifest.ports.some((port) => !validPort(port))) errors.push('端口定义无效')
+  if (new Set(manifest.ports.map((port) => `${port.direction}:${port.key}`)).size
+    !== manifest.ports.length) errors.push('端口定义不能重复')
+  if (!stringList(manifest.exporters, 64, 120)) errors.push('导出能力无效')
+  if (!validAgent(manifest.agent)) errors.push('Agent 构建策略无效')
+  if (manifest.execution !== undefined && !validExecution(manifest.execution)) {
+    errors.push('执行能力无效')
+  }
   if (manifest.emptyTitle.length > 120 || manifest.emptyDescription.length > 240) {
     errors.push('空态文案过长')
   }
@@ -119,8 +162,10 @@ export function isCustomNodeManifest(value: unknown): value is CustomNodeManifes
   const candidate = value as Partial<CustomNodeManifest>
   const exactKeys = [
     'schemaVersion', 'revision', 'installed', 'id', 'label', 'description', 'contentKind',
-    'icon', 'defaultWidth', 'placeholder', 'actions', 'emptyTitle', 'emptyDescription',
+    'icon', 'defaultWidth', 'initialPayloadSchema', 'initialPayload', 'placeholder', 'actions',
+    'containment', 'ports', 'exporters', 'agent', 'emptyTitle', 'emptyDescription',
     'sampleTitle', 'sampleContent', 'updatedAt',
+    ...(candidate.execution === undefined ? [] : ['execution']),
   ]
   return Object.keys(value).length === exactKeys.length
     && exactKeys.every((key) => Object.hasOwn(value, key))
@@ -133,14 +178,71 @@ export function isCustomNodeManifest(value: unknown): value is CustomNodeManifes
     && ['text', 'image', 'table', 'card'].includes(candidate.contentKind ?? '')
     && ['text', 'image', 'table', 'card'].includes(candidate.icon ?? '')
     && typeof candidate.defaultWidth === 'number'
+    && typeof candidate.initialPayloadSchema === 'string'
+    && isRecord(candidate.initialPayload)
     && typeof candidate.placeholder === 'string'
     && Array.isArray(candidate.actions)
     && candidate.actions.every((action) => typeof action === 'string')
+    && isRecord(candidate.containment)
+    && Array.isArray(candidate.ports)
+    && Array.isArray(candidate.exporters)
+    && isRecord(candidate.agent)
+    && (candidate.execution === undefined || isRecord(candidate.execution))
     && typeof candidate.emptyTitle === 'string'
     && typeof candidate.emptyDescription === 'string'
     && typeof candidate.sampleTitle === 'string'
     && typeof candidate.sampleContent === 'string'
     && typeof candidate.updatedAt === 'string'
+}
+
+function validContainment(value: CustomNodeManifest['containment']): boolean {
+  return isRecord(value)
+    && typeof value.canHaveChildren === 'boolean'
+    && Array.isArray(value.allowedChildTypes)
+    && value.allowedChildTypes.length <= 128
+    && value.allowedChildTypes.every((id) => typeof id === 'string' && id.length > 0)
+    && Number.isSafeInteger(value.maxDepth)
+    && value.maxDepth >= 0
+    && value.maxDepth <= 32
+    && (value.canHaveChildren || value.allowedChildTypes.length === 0)
+}
+
+function validPort(value: PortDefinition): boolean {
+  return isRecord(value)
+    && typeof value.key === 'string'
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value.key)
+    && (value.direction === 'input' || value.direction === 'output')
+    && typeof value.schema === 'string' && value.schema.startsWith('ggai://')
+    && (value.cardinality === 'one' || value.cardinality === 'many')
+    && (value.materialization === undefined
+      || ['inline', 'tray', 'child-node', 'canvas-node'].includes(value.materialization))
+}
+
+function validAgent(value: CustomNodeManifest['agent']): boolean {
+  return isRecord(value)
+    && typeof value.constructible === 'boolean'
+    && (value.writableInitSchema === undefined
+      || (typeof value.writableInitSchema === 'string'
+        && value.writableInitSchema.startsWith('ggai://')))
+}
+
+function validExecution(value: NonNullable<CustomNodeManifest['execution']>): boolean {
+  return isRecord(value)
+    && typeof value.capability === 'string'
+    && typeof value.policy === 'string'
+    && /^[a-z0-9][a-z0-9._-]*$/u.test(value.capability)
+    && /^[a-z0-9][a-z0-9._-]*$/u.test(value.policy)
+}
+
+function stringList(value: unknown, maxItems: number, maxLength: number): value is string[] {
+  return Array.isArray(value)
+    && value.length <= maxItems
+    && value.every((item) => typeof item === 'string' && item.length > 0 && item.length <= maxLength)
+    && new Set(value).size === value.length
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 export function customNodeRuntimeId(manifest: Pick<CustomNodeManifest, 'id' | 'revision'>): string {

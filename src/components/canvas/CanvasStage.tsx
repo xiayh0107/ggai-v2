@@ -57,13 +57,16 @@ import { useCanvasState, useCanvasStore } from '@/canvas/hooks'
 import { useThrottledAnnouncement } from '@/canvas/useThrottledAnnouncement'
 import {
   getPlugin,
+  nodeTypeActions,
+  nodeTypeInitialPayload,
+  nodeTypeMarks,
+  toggleNodeTypeMark,
 } from '@/plugins/types'
 import CanvasCollectionFrame from './CanvasCollectionFrame'
 import CanvasContextComposer from './CanvasContextComposer'
 import {
   canvasContextComposerKey,
   nodeHasVisibleContent,
-  selectSourceNodes,
 } from '@/canvas/contextComposer'
 import {
   CanvasArtifactViewerContext,
@@ -1310,10 +1313,10 @@ export default function CanvasStage() {
   const selectedNodeMarks = (() => {
     if (!selectedNodeForSurface || selectedNodeControlTask
       || !nodeHasVisibleContent(selectedNodeForSurface)) return []
-    return getPlugin(selectedNodeForSurface.type).instr.marksFor?.(selectedNodeForSurface) ?? []
+    return nodeTypeMarks(getPlugin(selectedNodeForSurface.type), selectedNodeForSurface)
   })()
   const applyNodeMarkToggle = (node: CanvasNode, markId: string) => {
-    const payload = getPlugin(node.type).instr.toggleMark?.(node, markId)
+    const payload = toggleNodeTypeMark(getPlugin(node.type), node, markId)
     if (!payload) return
     const previousPayload = node.payload ? structuredClone(node.payload) : null
     void store.dispatchCommand({
@@ -1341,15 +1344,7 @@ export default function CanvasStage() {
       || !nodeHasVisibleContent(selectedNodeForSurface)
       || selectedNodeMarks.length > 0) return []
     const plugin = getPlugin(selectedNodeForSurface.type)
-    const sources = selectSourceNodes(
-      stageDocument.nodes,
-      stageDocument.edges,
-      selectedNodeForSurface,
-    )
-    return [
-      ...plugin.instr.actions,
-      ...(plugin.instr.actionsFor?.(selectedNodeForSurface, sources) ?? []),
-    ].slice(0, 5)
+    return nodeTypeActions(plugin).slice(0, 5)
   })()
   // 产物查看面板（右侧抽屉）的来源节点：为它提供同样的类型专属工具条。
   const sidePanelNode = sidePanel?.kind === 'artifact'
@@ -1364,16 +1359,8 @@ export default function CanvasStage() {
   const sidePanelNodeActions = (() => {
     if (!sidePanelNode || sidePanelNodeControlTask) return []
     const plugin = getPlugin(sidePanelNode.type)
-    if ((plugin.instr.marksFor?.(sidePanelNode) ?? []).length > 0) return []
-    const sources = selectSourceNodes(
-      stageDocument.nodes,
-      stageDocument.edges,
-      sidePanelNode,
-    )
-    return [
-      ...plugin.instr.actions,
-      ...(plugin.instr.actionsFor?.(sidePanelNode, sources) ?? []),
-    ].slice(0, 5)
+    if (nodeTypeMarks(plugin, sidePanelNode).length > 0) return []
+    return nodeTypeActions(plugin).slice(0, 5)
   })()
   const fillComposerWithAction = (prompt: string) => {
     store.setComposerDraft(canvasContextComposerKey(effectiveSelection), prompt)
@@ -1615,7 +1602,7 @@ export default function CanvasStage() {
       type: plugin.id,
       frame,
       title: plugin.label,
-      payload: plugin.initialPayload(),
+      payload: nodeTypeInitialPayload(plugin),
       artifactRefs: [],
       origin: { kind: 'user' },
     }

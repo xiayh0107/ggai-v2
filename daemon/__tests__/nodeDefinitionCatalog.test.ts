@@ -22,6 +22,12 @@ test('node definition catalog appends immutable revisions and survives restart',
   })
   assert.equal(second.revision, 2)
   assert.deepEqual((await new NodeDefinitionCatalog(root).list()).map((item) => item.revision), [1, 2])
+  const snapshots = await catalog.listSnapshots()
+  assert.deepEqual(snapshots.map((item) => item.id), [
+    '@local/research-card@1',
+    '@local/research-card@2',
+  ])
+  assert.ok(snapshots.every((item) => /^[0-9a-f]{64}$/u.test(item.digest)))
   await assert.rejects(() => catalog.upsert(first), /revision conflict/u)
   await assert.rejects(() => catalog.delete(first.id), /cannot be deleted/u)
 })

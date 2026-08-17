@@ -63,7 +63,7 @@ PluginHost 与 ServiceScope 都有行数预算，在职责重新聚合成大对�
 
 ## 两套插件系统的关系
 
-- `src/plugins/NodePlugin`：浏览器侧、data-only UI/template、artifact claim 与 node context policy；
+- `src/plugins/NodeTypeDefinition`：浏览器侧、data-only UI/template、ports、child policy、artifact claim 与 node context policy；
 - `daemon/plugins/CapabilityPlugin`：可信后端 provider，具有显式生命周期但没有 Canvas authority。
 
 Node plugin 不会因为同名 runtime plugin 而获得额外文件或 command 权限；runtime plugin 也不能

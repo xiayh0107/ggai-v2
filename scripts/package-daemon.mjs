@@ -11,13 +11,15 @@ const [rootManifest, rootLockfile] = await Promise.all([
   readFile(path.join(appRoot, 'package-lock.json'), 'utf8').then(JSON.parse),
 ])
 
-const chokidarVersion = rootLockfile.packages?.['node_modules/chokidar']?.version
-if (typeof chokidarVersion !== 'string') {
-  throw new Error('The root lockfile does not contain chokidar')
-}
-if (rootManifest.dependencies?.chokidar !== chokidarVersion) {
-  throw new Error('The root manifest and lockfile disagree on the chokidar version')
-}
+const runtimeDependencyNames = ['ajv', 'chokidar']
+const runtimeDependencies = Object.fromEntries(runtimeDependencyNames.map((name) => {
+  const version = rootLockfile.packages?.[`node_modules/${name}`]?.version
+  if (typeof version !== 'string') throw new Error(`The root lockfile does not contain ${name}`)
+  if (rootManifest.dependencies?.[name] !== version) {
+    throw new Error(`The root manifest and lockfile disagree on the ${name} version`)
+  }
+  return [name, version]
+}))
 
 await rm(releaseRoot, { recursive: true, force: true })
 await mkdir(path.dirname(releaseRoot), { recursive: true })
@@ -38,7 +40,7 @@ const runtimeManifest = {
     start: 'node daemon/index.js',
   },
   dependencies: {
-    chokidar: chokidarVersion,
+    ...runtimeDependencies,
   },
 }
 
@@ -83,7 +85,8 @@ await Promise.all([
 ])
 
 console.log(`Daemon runtime prepared at ${releaseRoot}`)
-console.log(`Runtime npm dependency: chokidar@${chokidarVersion}`)
+console.log(`Runtime npm dependencies: ${Object.entries(runtimeDependencies)
+  .map(([name, version]) => `${name}@${version}`).join(', ')}`)
 console.log(`Runtime lock projection: ${Object.keys(runtimeLockfile.packages).length - 1} packages`)
 
 function projectRuntimeLockfile(root, manifest) {

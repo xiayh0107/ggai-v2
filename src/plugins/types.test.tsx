@@ -1,4 +1,3 @@
-import { FileQuestion } from 'lucide-react'
 import { describe, expect, it } from 'vitest'
 import { MAX_ARTIFACT_CLAIM_RULES_PER_PLUGIN } from './artifactContracts'
 import { LEGACY_NODE_CONTEXT_POLICY } from './contextContracts'
@@ -8,25 +7,32 @@ import {
   getPlugin,
   listCreatablePlugins,
   registerPlugin,
-  type NodePlugin,
+  type NodeTypeDefinition,
   unregisterPlugin,
   setPluginEnabled,
 } from './types'
 
 function plugin(
   id: string,
-  artifactClaims: NodePlugin['artifactClaims'] = [],
-): NodePlugin {
+  artifactClaims: NodeTypeDefinition['artifactClaims'] = [],
+): NodeTypeDefinition {
   return {
+    schemaVersion: 2,
     id,
+    revision: 1,
     label: id,
-    desc: 'Test plugin',
-    icon: FileQuestion,
+    description: 'Test node type',
+    creatable: true,
+    icon: 'card',
     defaultWidth: 300,
-    initialPayload: () => ({}),
-    isEmpty: () => true,
+    initialPayloadSchema: 'ggai://schema/payload/open',
+    initialPayload: {},
     ui: defineNodeUi('card'),
-    instr: { placeholder: 'Test', actions: [] },
+    instruction: { placeholder: 'Test', actions: [], marks: [] },
+    containment: { canHaveChildren: false, allowedChildTypes: [], maxDepth: 0 },
+    ports: [],
+    exporters: [],
+    agent: { constructible: true, writableInitSchema: 'ggai://schema/payload/open' },
     nodeContext: structuredClone(LEGACY_NODE_CONTEXT_POLICY),
     artifactClaims,
   }
@@ -64,7 +70,7 @@ describe('browser plugin registry artifact boundary', () => {
     expect(() => registerPlugin({
       ...plugin('@tests/arbitrary-ui'),
       ui: { schemaVersion: 1, template: 'card', className: 'bg-red-500' },
-    } as unknown as NodePlugin)).toThrow(/ui 无效/u)
+    } as unknown as NodeTypeDefinition)).toThrow(/无效|ui/u)
   })
 
   it('stores canonical claims and a strict platform UI template', () => {
@@ -80,7 +86,7 @@ describe('browser plugin registry artifact boundary', () => {
     const subject = {
       ...plugin('@tests/projection-only', [{ extensions: ['.safe'] }]),
       creatable: false,
-    } satisfies NodePlugin
+    } satisfies NodeTypeDefinition
     registerPlugin(subject)
     try {
       expect(listCreatablePlugins().map(({ id }) => id)).not.toContain(subject.id)

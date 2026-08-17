@@ -70,7 +70,7 @@ Source ──full──> Empty Node         Source ──full──> Task
 
 节点插件只负责：
 
-- `initialPayload()`、`isEmpty()` 与严格 data-only `ui` 模板；空画面、生成动画与内容渲染由 Canvas 统一提供；
+- `initialPayloadSchema`、data-only `initialPayload` 与严格 `ui` 模板；空内容判定、生成动画与内容渲染由 Canvas 统一提供；
 - 指令占位、快捷动作和纯 UI 标记；
 - data-only `artifactClaims`；
 - data-only `nodeContext`：分别声明 `summary/full` 可见的正文上限、payload 顶层字段白名单，
@@ -89,15 +89,15 @@ Source ──full──> Empty Node         Source ──full──> Task
 
 Canvas 持久模型还没有独立、可跨浏览器/daemon 验证的 `contentState`。当前输出槽资格由
 核心保守判定：user-origin、未归属 Task、没有 artifact、没有非空文本，且 payload 为空。
-插件的 `isEmpty(node)` 目前只属于视图契约，不能单独改变 daemon/reducer 的输出槽资格。
+节点内容可见性由平台统一依据 text、payload 与 artifactRefs 判定，类型定义不能注入函数改变输出槽资格。
 
 因此在引入版本化的 data-only content-state 契约之前：
 
-- 希望支持“创建空节点后直接运行”的社区插件，应让 `initialPayload()` 返回 `{}`；
+- 希望支持“创建空节点后直接运行”的社区节点类型，应让 `initialPayload` 使用 `{}`；
 - 参数默认值应放在 UI 默认值中，在用户确认后再写入 payload；
 - payload-only 内容不得被核心静默当作空白并覆盖；
 - 后续 content-state 协议必须同时被浏览器、共享 reducer 与 daemon 验证，不能只增加
-  `isEmpty()` 之类的浏览器函数。
+  任意浏览器回调函数。
 
 这项限制是显式兼容边界，不允许用具体 plugin ID 特判绕过。
 
@@ -136,7 +136,7 @@ gesture / selection
 
 ## 8. 节点上下文投影
 
-`NodePlugin.nodeContext` 是严格的纯数据契约，不是 renderer hook。当前结构为：
+`NodeTypeDefinition.nodeContext` 是严格的纯数据契约，不是 renderer hook。当前结构为：
 
 ```ts
 interface NodeContextPolicy {

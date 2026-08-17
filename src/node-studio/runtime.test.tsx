@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createBlankCustomNodeManifest } from './model'
 import { getPluginRegistryVersion, unregisterPlugin } from '@/plugins/types'
-import { createCustomNodePlugin, installCustomNodeManifest } from './runtime'
+import { createCustomNodeType, installCustomNodeManifest } from './runtime'
 
 describe('node studio runtime compiler', () => {
   it('compiles an immutable plugin without making a new node look populated', () => {
@@ -12,11 +12,11 @@ describe('node studio runtime compiler', () => {
       installed: true,
       actions: ['核对证据', '补充结论'],
     }
-    const plugin = createCustomNodePlugin(manifest)
+    const plugin = createCustomNodeType(manifest)
 
     expect(plugin.id).toBe('@local/research-card@4')
-    expect(plugin.initialPayload()).toEqual({})
-    expect(plugin.instr.actions).toEqual(['核对证据', '补充结论'])
+    expect(plugin.initialPayload).toEqual({})
+    expect(plugin.instruction.actions).toEqual(['核对证据', '补充结论'])
     expect(plugin.ui).toEqual({ schemaVersion: 1, template: 'card' })
     expect(plugin.artifactClaims).toEqual(expect.arrayContaining([
       expect.objectContaining({ mediaTypes: ['text/*'] }),
@@ -24,7 +24,7 @@ describe('node studio runtime compiler', () => {
   })
 
   it('keeps historical revisions renderable but out of creation menus', () => {
-    const plugin = createCustomNodePlugin({
+    const plugin = createCustomNodeType({
       ...createBlankCustomNodeManifest(),
       id: '@local/research-card',
       revision: 2,

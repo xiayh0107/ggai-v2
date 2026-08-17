@@ -9,6 +9,16 @@ import { AgentRegistry } from '../registry.js'
 import { createDaemonServer } from '../server.js'
 import type { AgentProcessTransport, TransportRunOptions } from '../transport/types.js'
 
+function studioCandidate() {
+  const candidate = structuredClone(
+    createBlankCustomNodeManifest(new Date('2026-01-01T00:00:00.000Z')),
+  ) as Partial<ReturnType<typeof createBlankCustomNodeManifest>>
+  delete candidate.revision
+  delete candidate.installed
+  delete candidate.updatedAt
+  return candidate
+}
+
 class StudioAgentRegistry extends AgentRegistry {
   readonly transport: AgentProcessTransport
 
@@ -43,7 +53,8 @@ test('node studio Agent returns a strictly validated candidate without installin
     async run(options: TransportRunOptions) {
       acceptedPrompt = await readFile(options.contextFile, 'utf8')
       const candidate = {
-        schemaVersion: 1,
+        ...studioCandidate(),
+        schemaVersion: 2,
         id: '@local/competitor-table',
         label: '竞品对比表',
         description: '整理竞品指标并生成对比结论',
@@ -120,7 +131,8 @@ test('node studio Agent rejects candidate fields outside the declarative contrac
     kind: 'codex',
     async run(options: TransportRunOptions) {
       const candidate = {
-        schemaVersion: 1,
+        ...studioCandidate(),
+        schemaVersion: 2,
         id: '@local/unsafe-card',
         label: '不安全卡片',
         description: '尝试携带声明式契约之外的可执行字段',
@@ -187,7 +199,8 @@ test('node studio rejects a candidate changed after its durable close', async (t
   t.after(() => rm(root, { recursive: true, force: true }))
   await mkdir(path.join(root, '.gg'), { recursive: true })
   const candidate = {
-    schemaVersion: 1,
+    ...studioCandidate(),
+    schemaVersion: 2,
     id: '@local/research-card',
     label: '研究卡片',
     description: '整理研究问题、证据和结论',
@@ -273,6 +286,7 @@ test('node studio rejects an unsupported candidate schema version', async (t) =>
     kind: 'codex',
     async run(options: TransportRunOptions) {
       const candidate = {
+        ...studioCandidate(),
         schemaVersion: 999,
         id: '@local/future-card',
         label: '未来卡片',
@@ -336,7 +350,8 @@ test('node studio preserves a saved package identity when Agent changes its id',
     kind: 'codex',
     async run(options: TransportRunOptions) {
       const candidate = {
-        schemaVersion: 1,
+        ...studioCandidate(),
+        schemaVersion: 2,
         id: '@local/renamed-research-card',
         label: '重命名研究卡片',
         description: '试图把已有节点修订写入另一个包身份',

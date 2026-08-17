@@ -1,23 +1,47 @@
-import { FileQuestion, type LucideIcon } from 'lucide-react'
+import {
+  Bold,
+  Code2,
+  File as FileIcon,
+  FileQuestion,
+  FileText,
+  Heading1,
+  Heading2,
+  Image as ImageIcon,
+  Italic,
+  LayoutTemplate,
+  Link2,
+  Shapes,
+  Sigma,
+  Sparkles,
+  Table2,
+  Type,
+  type LucideIcon,
+  type LucideProps,
+} from 'lucide-react'
+import { createElement } from 'react'
 import type { CanvasNode } from '@/canvas/model'
 import {
   ARTIFACT_CAPABILITY_SNAPSHOT_SCHEMA_VERSION,
   inspectArtifactCapabilitySnapshotRequest,
   inspectArtifactClaimRegistry,
   type ArtifactCapabilitySnapshotRequest,
-  type ArtifactClaimRule,
 } from './artifactContracts'
 import {
   BUILTIN_NODE_CONTEXT_PLUGIN_IDS,
   LEGACY_NODE_CONTEXT_POLICY,
   inspectNodeContextPolicy,
-  type NodeContextPolicy,
 } from './contextContracts'
 import {
   defineNodeUi,
   inspectNodeUiDefinition,
-  type NodeUiDefinition,
 } from './uiContracts'
+import {
+  NODE_TYPE_DEFINITION_SCHEMA_VERSION,
+  inspectNodeTypeDefinition,
+  type NodeMarkDefinition,
+  type NodeTypeDefinition,
+  type NodeTypeIconId,
+} from './nodeTypeContracts'
 
 /**
  * GGAI 节点插件规范（v0.1）
@@ -29,11 +53,7 @@ import {
  * 画布引擎（平移缩放、连线、选择、指令生命周期、持久化）对所有插件一视同仁。
  */
 
-/** 内容载荷：节点的本体数据。各插件声明结构，持久化时随节点保存。 */
 export type NodePayload = Record<string, unknown>
-
-/** 空内容判定：决定节点显示空白态还是内容态（状态递进的基础，规范 2.3） */
-export type IsEmpty = (node: CanvasNode) => boolean
 
 export type NodeContentPatch = Pick<Partial<CanvasNode>, 'title' | 'text' | 'payload'>
 
@@ -59,28 +79,6 @@ export interface NodeArtifactViewProps {
   node?: CanvasNode
 }
 
-/** 指令面板配置 */
-export interface InstrConfig {
-  /** 输入框占位提示 */
-  placeholder: string
-  /** 专属快捷指令（专精节点聚焦自身类型；通用型留空） */
-  actions: string[]
-  /**
-   * 上下文相关的快捷指令（可选）：按节点当前内容与来源节点动态计算，
-   * 结果追加在静态 actions 之后。用于"有产物才有意义"的指令（如改写 / 缩短），
-   * 避免空白节点上指令脱离上下文。
-   */
-  actionsFor?: (node: CanvasNode, sources: CanvasNode[]) => string[]
-  /**
-   * 选择工具条的标记类按钮（可选）：如文本节点的粗体 / 斜体 / 标题。
-   * 与快捷指令不同，标记直接改写节点自身（payload），不经过指令面板。
-   * 返回非空数组时，选择工具条显示标记按钮而非快捷指令。
-   */
-  marksFor?: (node: CanvasNode) => NodeMark[]
-  /** 应用标记：返回整体替换的新 payload；返回 null 表示该标记不适用。 */
-  toggleMark?: (node: CanvasNode, markId: string) => Record<string, unknown> | null
-}
-
 /** 选择工具条上的一个标记按钮（粗体 / 斜体 / 标题等）。 */
 export interface NodeMark {
   id: string
@@ -89,34 +87,8 @@ export interface NodeMark {
   active: boolean
 }
 
-export interface NodePlugin {
-  /** 全局唯一 id，如 'pdf' / 'table'；社区插件建议带命名空间 '@author/video' */
-  id: string
-  /** 显示名（创建菜单、节点头部缺省标题） */
-  label: string
-  /** 一句话描述（首屏平铺面板） */
-  desc: string
-  /** False for projection-only types such as the generic `file` fallback. */
-  creatable?: boolean
-  icon: LucideIcon
-  /** 缺省宽度（创建时） */
-  defaultWidth: number
-  /** 创建时的初始载荷 */
-  initialPayload: () => NodePayload
-  /** 空白判定 */
-  isEmpty: IsEmpty
-  /** 严格可序列化的内容模板；插件不能提供节点壳、CSS 或运行态。 */
-  ui: NodeUiDefinition
-  /** 指令区配置 */
-  instr: InstrConfig
-  /** 可序列化的产物声明；daemon 与浏览器使用同一份数据规则。 */
-  artifactClaims: readonly ArtifactClaimRule[]
-  /** 可序列化的 Node → Agent 上下文投影；不能扩大 Edge 或文件权限。 */
-  nodeContext: NodeContextPolicy
-}
-
 /** 注册表：Map 保序，注册顺序即创建菜单顺序 */
-const registry = new Map<string, NodePlugin>()
+const registry = new Map<string, NodeTypeDefinition>()
 const listeners = new Set<() => void>()
 let registryVersion = 0
 /** 未启用的插件不进创建菜单 / 首屏面板；已存在于画布的节点仍可正常渲染 */
@@ -136,9 +108,13 @@ export function subscribePlugins(l: () => void): () => void {
   return () => listeners.delete(l)
 }
 
-export function registerPlugin(p: NodePlugin) {
+export function registerPlugin(p: NodeTypeDefinition) {
   if (registry.has(p.id)) {
     throw new TypeError(`[ggai] 节点插件 "${p.id}" 重复注册`)
+  }
+  const definitionInspection = inspectNodeTypeDefinition(p)
+  if (definitionInspection.status !== 'valid') {
+    throw new TypeError(`[ggai] 节点类型 "${p.id}" 无效：${definitionInspection.reason}`)
   }
   const inspection = inspectArtifactClaimRegistry([{
     id: p.id,
@@ -156,7 +132,7 @@ export function registerPlugin(p: NodePlugin) {
     throw new TypeError(`[ggai] 节点插件 "${p.id}" 的 ui 无效：${uiInspection.reason}`)
   }
   registry.set(p.id, {
-    ...p,
+    ...definitionInspection.definition,
     ui: uiInspection.definition,
     artifactClaims: inspection.registrations[0]?.artifactClaims ?? [],
     nodeContext: contextInspection.policy,
@@ -184,34 +160,39 @@ export function isPluginEnabled(id: string): boolean {
 }
 
 /** 渲染兜底：禁用/未知的类型也能安全取到一个插件（未知类型退化为通用占位） */
-export function getPlugin(id: string): NodePlugin {
+export function getPlugin(id: string): NodeTypeDefinition {
   const p = registry.get(id)
   if (p) return p
   return {
-    id, label: id, desc: '未安装的节点类型',
-    icon: FileQuestion, defaultWidth: 300,
-    initialPayload: () => ({}),
-    isEmpty: (n) => !(n.text?.trim() || Object.keys(n.payload ?? {}).length),
+    schemaVersion: NODE_TYPE_DEFINITION_SCHEMA_VERSION,
+    id, revision: 1, label: id, description: '未安装的节点类型',
+    creatable: false, icon: 'file', defaultWidth: 300,
+    initialPayloadSchema: 'ggai://schema/payload/open',
+    initialPayload: {},
     ui: defineNodeUi('file'),
-    instr: { placeholder: '该节点类型未安装…', actions: [] },
+    instruction: { placeholder: '该节点类型未安装…', actions: [], marks: [] },
+    containment: { canHaveChildren: false, allowedChildTypes: [], maxDepth: 0 },
+    ports: [],
+    exporters: [],
+    agent: { constructible: false },
     artifactClaims: [],
     nodeContext: structuredClone(LEGACY_NODE_CONTEXT_POLICY),
   }
 }
 
 /** 全部已注册插件（管理界面用） */
-export function listPlugins(): NodePlugin[] {
+export function listPlugins(): NodeTypeDefinition[] {
   return [...registry.values()]
 }
 
 /** 启用中的插件（创建菜单 / 首屏面板用） */
-export function listEnabledPlugins(): NodePlugin[] {
+export function listEnabledPlugins(): NodeTypeDefinition[] {
   return listPlugins().filter((p) => !disabled.has(p.id))
 }
 
 /** Enabled plugins that users may explicitly create from menus. */
-export function listCreatablePlugins(): NodePlugin[] {
-  return listEnabledPlugins().filter((plugin) => plugin.creatable !== false)
+export function listCreatablePlugins(): NodeTypeDefinition[] {
+  return listEnabledPlugins().filter((plugin) => plugin.creatable)
 }
 
 /**
@@ -236,3 +217,83 @@ export function enabledArtifactCapabilitySnapshot(): ArtifactCapabilitySnapshotR
   }
   return inspection.snapshot
 }
+
+const NODE_TYPE_ICONS: Readonly<Record<NodeTypeIconId, LucideIcon>> = {
+  pdf: FileText,
+  web: Link2,
+  image: ImageIcon,
+  text: Type,
+  table: Table2,
+  formula: Sigma,
+  code: Code2,
+  graphic: Shapes,
+  smart: Sparkles,
+  file: FileIcon,
+  card: LayoutTemplate,
+}
+
+const MARK_ICONS: Readonly<Record<NodeMarkDefinition['icon'], LucideIcon>> = {
+  bold: Bold,
+  italic: Italic,
+  'heading-1': Heading1,
+  'heading-2': Heading2,
+}
+
+export function nodeTypeIcon(definition: NodeTypeDefinition): LucideIcon {
+  return NODE_TYPE_ICONS[definition.icon] ?? FileQuestion
+}
+
+export function NodeTypeIconView({
+  definition,
+  ...props
+}: { definition: NodeTypeDefinition } & LucideProps) {
+  return createElement(NODE_TYPE_ICONS[definition.icon] ?? FileQuestion, props)
+}
+
+export function nodeTypeInitialPayload(definition: NodeTypeDefinition): NodePayload {
+  return structuredClone(definition.initialPayload)
+}
+
+export function nodeTypeIsEmpty(_definition: NodeTypeDefinition, node: CanvasNode): boolean {
+  return !node.text?.trim()
+    && Object.keys(node.payload ?? {}).length === 0
+    && node.artifactRefs.length === 0
+}
+
+export function nodeTypeMarks(
+  definition: NodeTypeDefinition,
+  node: CanvasNode,
+): NodeMark[] {
+  const payload = node.payload ?? {}
+  return definition.instruction.marks.map((mark) => ({
+    id: mark.id,
+    title: mark.title,
+    icon: MARK_ICONS[mark.icon],
+    active: payload[mark.payloadKey] === mark.value,
+  }))
+}
+
+export function toggleNodeTypeMark(
+  definition: NodeTypeDefinition,
+  node: CanvasNode,
+  markId: string,
+): Record<string, unknown> | null {
+  const mark = definition.instruction.marks.find((candidate) => candidate.id === markId)
+  if (!mark) return null
+  const payload: Record<string, unknown> = { ...(node.payload ?? {}) }
+  const active = payload[mark.payloadKey] === mark.value
+  if (mark.exclusiveGroup) {
+    for (const peer of definition.instruction.marks) {
+      if (peer.exclusiveGroup === mark.exclusiveGroup) delete payload[peer.payloadKey]
+    }
+  }
+  if (!active) payload[mark.payloadKey] = mark.value
+  else delete payload[mark.payloadKey]
+  return payload
+}
+
+export function nodeTypeActions(definition: NodeTypeDefinition): string[] {
+  return [...definition.instruction.actions]
+}
+
+export type { NodeTypeDefinition } from './nodeTypeContracts'

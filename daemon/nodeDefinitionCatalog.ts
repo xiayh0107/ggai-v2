@@ -7,15 +7,21 @@ import {
   validateCustomNodeManifest,
   type CustomNodeManifest,
 } from '../src/node-studio/model.js'
+import { EMPTY_NODE_PAYLOAD_SCHEMA } from '../src/plugins/nodeTypeContracts.js'
 import { atomicWriteText, isNodeError, readExactFileBytes } from './atomic-file.js'
+import { NodePayloadSchemaRegistry } from './nodePayloadSchemas.js'
+import { snapshotCustomNodeType } from './nodeTypeSnapshots.js'
+import type { NodeTypeSnapshot } from '../src/plugins/nodeTypeContracts.js'
 import { canonicalizePotentialPath, isPathWithin } from './permissions.js'
 
-const CATALOG_SCHEMA_VERSION = 1
+const CATALOG_SCHEMA_VERSION = 2
 const MAX_DEFINITIONS = 500
 const MAX_CATALOG_BYTES = 2 * 1024 * 1024
+const PAYLOAD_SCHEMAS = new NodePayloadSchemaRegistry()
+PAYLOAD_SCHEMAS.add(EMPTY_NODE_PAYLOAD_SCHEMA)
 
 interface NodeDefinitionDocument {
-  schemaVersion: 1
+  schemaVersion: 2
   definitions: CustomNodeManifest[]
 }
 
@@ -33,6 +39,11 @@ export class NodeDefinitionCatalog {
 
   list(): Promise<CustomNodeManifest[]> {
     return this.#exclusive(async () => structuredClone((await this.#read()).definitions))
+  }
+
+  listSnapshots(): Promise<NodeTypeSnapshot[]> {
+    return this.#exclusive(async () => (await this.#read()).definitions
+      .map(snapshotCustomNodeType))
   }
 
   upsert(input: unknown): Promise<CustomNodeManifest> {
@@ -163,6 +174,10 @@ function parseManifest(input: unknown): CustomNodeManifest {
   }
   const errors = validateCustomNodeManifest(manifest)
   if (errors.length > 0) throw new TypeError(errors.join('; '))
+  const payload = PAYLOAD_SCHEMAS.validate(manifest.initialPayloadSchema, manifest.initialPayload)
+  if (!payload.valid) {
+    throw new TypeError(`initial payload failed schema validation: ${JSON.stringify(payload.errors)}`)
+  }
   return manifest
 }
 

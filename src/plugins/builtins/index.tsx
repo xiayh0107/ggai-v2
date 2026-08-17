@@ -1,149 +1,137 @@
 /** Built-ins use the same data-only UI contract as installed Node definitions. */
-import {
-  Bold,
-  Code2,
-  File as FileIcon,
-  FileText,
-  Heading1,
-  Heading2,
-  Image as ImageIcon,
-  Italic,
-  Link2,
-  Shapes,
-  Sigma,
-  Sparkles,
-  Table2,
-  Type,
-} from 'lucide-react'
 import { artifactClaimsForBuiltin } from '@/plugins/artifactContracts'
 import { nodeContextPolicyForBuiltin } from '@/plugins/contextContracts'
 import {
   registerPlugin,
   unregisterPlugin,
-  type NodePlugin,
+  type NodeTypeDefinition,
 } from '@/plugins/types'
 import { defineNodeUi } from '@/plugins/uiContracts'
+import { NODE_TYPE_DEFINITION_SCHEMA_VERSION } from '@/plugins/nodeTypeContracts'
 
-function nodeHasContent(node: Parameters<NodePlugin['isEmpty']>[0]): boolean {
-  return Boolean(
-    node.text?.trim()
-    || Object.keys(node.payload ?? {}).length > 0
-    || node.artifactRefs.length > 0,
-  )
-}
-
-const textMarks: NonNullable<NodePlugin['instr']['marksFor']> = (node) => {
-  const payload = node.payload ?? {}
-  return [
-    { id: 'bold', title: '粗体', icon: Bold, active: payload.bold === true },
-    { id: 'italic', title: '斜体', icon: Italic, active: payload.italic === true },
-    { id: 'h1', title: '标题 1', icon: Heading1, active: payload.heading === 1 },
-    { id: 'h2', title: '标题 2', icon: Heading2, active: payload.heading === 2 },
-  ]
-}
-
-const toggleTextMark: NonNullable<NodePlugin['instr']['toggleMark']> = (node, markId) => {
-  const payload: Record<string, unknown> = { ...(node.payload ?? {}) }
-  const set = (key: string, value: unknown) => {
-    if (value === undefined) delete payload[key]
-    else payload[key] = value
-  }
-  if (markId === 'bold') set('bold', payload.bold === true ? undefined : true)
-  else if (markId === 'italic') set('italic', payload.italic === true ? undefined : true)
-  else if (markId === 'h1') set('heading', payload.heading === 1 ? undefined : 1)
-  else if (markId === 'h2') set('heading', payload.heading === 2 ? undefined : 2)
-  else return null
-  return payload
-}
-
-const builtinPlugins: readonly NodePlugin[] = [
-  {
-    id: 'pdf', label: 'PDF / 文件', desc: '让 Agent 检索、解析文献与文件', icon: FileText,
-    defaultWidth: 300, initialPayload: () => ({}), isEmpty: (node) => !nodeHasContent(node),
+const builtinPlugins: readonly NodeTypeDefinition[] = [
+  builtin({
+    id: 'pdf', label: 'PDF / 文件', description: '让 Agent 检索、解析文献与文件', icon: 'pdf',
+    defaultWidth: 300,
     ui: defineNodeUi('file'),
-    instr: { placeholder: '对这个文件提问，或让它提取图表、总结章节…', actions: [] },
+    instruction: { placeholder: '对这个文件提问，或让它提取图表、总结章节…', actions: [], marks: [] },
     nodeContext: nodeContextPolicyForBuiltin('pdf'),
     artifactClaims: artifactClaimsForBuiltin('pdf'),
-  },
-  {
-    id: 'web', label: '网页链接', desc: '让 Agent 抓取、检索网页资料', icon: Link2,
-    defaultWidth: 300, initialPayload: () => ({}), isEmpty: (node) => !nodeHasContent(node),
+  }),
+  builtin({
+    id: 'web', label: '网页链接', description: '让 Agent 抓取、检索网页资料', icon: 'web',
+    defaultWidth: 300,
     ui: defineNodeUi('link'),
-    instr: { placeholder: '总结这个页面，或提取其中的关键信息…', actions: [] },
+    instruction: { placeholder: '总结这个页面，或提取其中的关键信息…', actions: [], marks: [] },
     nodeContext: nodeContextPolicyForBuiltin('web'),
     artifactClaims: [],
-  },
-  {
-    id: 'image', label: '图像', desc: '输入提示词，Agent 生成图像', icon: ImageIcon,
-    defaultWidth: 300, initialPayload: () => ({}), isEmpty: (node) => !nodeHasContent(node),
+  }),
+  builtin({
+    id: 'image', label: '图像', description: '输入提示词，Agent 生成图像', icon: 'image',
+    defaultWidth: 300,
     ui: defineNodeUi('media'),
-    instr: { placeholder: '描述想要的图像…', actions: [] },
+    instruction: { placeholder: '描述想要的图像…', actions: [], marks: [] },
     nodeContext: nodeContextPolicyForBuiltin('image'),
     artifactClaims: artifactClaimsForBuiltin('image'),
-  },
-  {
-    id: 'text', label: '文本', desc: '描述主题，Agent 撰写与改写', icon: Type,
-    defaultWidth: 320, initialPayload: () => ({}), isEmpty: (node) => !nodeHasContent(node),
+  }),
+  builtin({
+    id: 'text', label: '文本', description: '描述主题，Agent 撰写与改写', icon: 'text',
+    defaultWidth: 320,
     ui: defineNodeUi('document'),
-    instr: {
+    instruction: {
       placeholder: '一句话，振奋人心，但是简短有力。',
       actions: [],
-      marksFor: textMarks,
-      toggleMark: toggleTextMark,
+      marks: [
+        { id: 'bold', title: '粗体', icon: 'bold', payloadKey: 'bold', value: true },
+        { id: 'italic', title: '斜体', icon: 'italic', payloadKey: 'italic', value: true },
+        { id: 'h1', title: '标题 1', icon: 'heading-1', payloadKey: 'heading', value: 1, exclusiveGroup: 'heading' },
+        { id: 'h2', title: '标题 2', icon: 'heading-2', payloadKey: 'heading', value: 2, exclusiveGroup: 'heading' },
+      ],
     },
     nodeContext: nodeContextPolicyForBuiltin('text'),
     artifactClaims: artifactClaimsForBuiltin('text'),
-  },
-  {
-    id: 'table', label: '表格 / 数据', desc: '描述数据结构，Agent 生成表格', icon: Table2,
-    defaultWidth: 340, initialPayload: () => ({}), isEmpty: (node) => !nodeHasContent(node),
+  }),
+  builtin({
+    id: 'table', label: '表格 / 数据', description: '描述数据结构，Agent 生成表格', icon: 'table',
+    defaultWidth: 340,
     ui: defineNodeUi('table'),
-    instr: { placeholder: '清洗数据、做可视化、分析趋势…', actions: [] },
+    instruction: { placeholder: '清洗数据、做可视化、分析趋势…', actions: [], marks: [] },
     nodeContext: nodeContextPolicyForBuiltin('table'),
     artifactClaims: artifactClaimsForBuiltin('table'),
-  },
-  {
-    id: 'formula', label: '公式', desc: '描述问题，Agent 推导公式', icon: Sigma,
-    defaultWidth: 300, initialPayload: () => ({}), isEmpty: (node) => !nodeHasContent(node),
+  }),
+  builtin({
+    id: 'formula', label: '公式', description: '描述问题，Agent 推导公式', icon: 'formula',
+    defaultWidth: 300,
     ui: defineNodeUi('formula'),
-    instr: { placeholder: '解释这个公式，或转为可运行的代码…', actions: [] },
+    instruction: { placeholder: '解释这个公式，或转为可运行的代码…', actions: [], marks: [] },
     nodeContext: nodeContextPolicyForBuiltin('formula'),
     artifactClaims: [],
-  },
-  {
-    id: 'code', label: '代码', desc: '描述需求，Agent 编写代码', icon: Code2,
-    defaultWidth: 340, initialPayload: () => ({}), isEmpty: (node) => !nodeHasContent(node),
+  }),
+  builtin({
+    id: 'code', label: '代码', description: '描述需求，Agent 编写代码', icon: 'code',
+    defaultWidth: 340,
     ui: defineNodeUi('code'),
-    instr: { placeholder: '解释、重构这段代码，或补充注释…', actions: [] },
+    instruction: { placeholder: '解释、重构这段代码，或补充注释…', actions: [], marks: [] },
     nodeContext: nodeContextPolicyForBuiltin('code'),
     artifactClaims: artifactClaimsForBuiltin('code'),
-  },
-  {
-    id: 'graphic', label: '图形 / 画布', desc: '描述图形，Agent 绘制可编辑图形', icon: Shapes,
-    defaultWidth: 300, initialPayload: () => ({}), isEmpty: (node) => !nodeHasContent(node),
+  }),
+  builtin({
+    id: 'graphic', label: '图形 / 画布', description: '描述图形，Agent 绘制可编辑图形', icon: 'graphic',
+    defaultWidth: 300,
     ui: defineNodeUi('card'),
-    instr: { placeholder: '描述要生成的图形…', actions: [] },
+    instruction: { placeholder: '描述要生成的图形…', actions: [], marks: [] },
     nodeContext: nodeContextPolicyForBuiltin('graphic'),
     artifactClaims: [],
-  },
-  {
-    id: 'smart', label: '智能节点', desc: '接受指令并生成产物', icon: Sparkles,
-    defaultWidth: 360, initialPayload: () => ({}), isEmpty: (node) => !nodeHasContent(node),
+  }),
+  builtin({
+    id: 'smart', label: '智能节点', description: '接受指令并生成产物', icon: 'smart',
+    defaultWidth: 360,
     ui: defineNodeUi('card'),
-    instr: { placeholder: '描述要生成的产物…', actions: [] },
+    instruction: { placeholder: '描述要生成的产物…', actions: [], marks: [] },
     nodeContext: nodeContextPolicyForBuiltin('smart'),
     artifactClaims: [],
-  },
-  {
-    id: 'file', label: '文件', desc: '未识别产物的安全通用视图', icon: FileIcon,
-    creatable: false, defaultWidth: 320, initialPayload: () => ({}),
-    isEmpty: (node) => !nodeHasContent(node),
+  }),
+  builtin({
+    id: 'file', label: '文件', description: '未识别产物的安全通用视图', icon: 'file',
+    creatable: false, defaultWidth: 320,
     ui: defineNodeUi('file'),
-    instr: { placeholder: '基于这个文件创建派生任务…', actions: [] },
+    instruction: { placeholder: '基于这个文件创建派生任务…', actions: [], marks: [] },
     nodeContext: nodeContextPolicyForBuiltin('file'),
     artifactClaims: artifactClaimsForBuiltin('file'),
-  },
+  }),
 ]
+
+function builtin(
+  input: Pick<
+    NodeTypeDefinition,
+    | 'id'
+    | 'label'
+    | 'description'
+    | 'icon'
+    | 'defaultWidth'
+    | 'ui'
+    | 'instruction'
+    | 'nodeContext'
+    | 'artifactClaims'
+  > & { creatable?: boolean },
+): NodeTypeDefinition {
+  const creatable = input.creatable ?? true
+  return {
+    schemaVersion: NODE_TYPE_DEFINITION_SCHEMA_VERSION,
+    revision: 1,
+    creatable,
+    initialPayloadSchema: 'ggai://schema/payload/open',
+    initialPayload: {},
+    containment: { canHaveChildren: false, allowedChildTypes: [], maxDepth: 0 },
+    ports: [],
+    exporters: [],
+    agent: {
+      constructible: creatable,
+      ...(creatable ? { writableInitSchema: 'ggai://schema/payload/open' } : {}),
+    },
+    ...input,
+  }
+}
 
 let registered = false
 
