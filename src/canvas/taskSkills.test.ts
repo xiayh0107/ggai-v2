@@ -29,8 +29,11 @@ describe('effectiveTaskSkillRefs', () => {
     const document = emptyCanvasDocument()
     document.nodes.push({
       id: 'node-1',
-      type: 'image',
-      frame: { x: 0, y: 0, w: 320, h: 240, z: 1 },
+      typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (1).toString(36).padStart(12, '0'),
+      bounds: { w: 320, h: 240 },
+      transform: { matrix: [1, 0, 0, 1, 0, 0] },
       title: '图像',
       artifactRefs: [],
       homeTaskId: 'task-1',
@@ -47,8 +50,11 @@ describe('effectiveTaskSkillRefs', () => {
     document.nodes.push(
       {
         id: 'node-1',
-        type: 'image',
-        frame: { x: 0, y: 0, w: 320, h: 240, z: 1 },
+        typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+        parentId: null,
+        orderKey: (1).toString(36).padStart(12, '0'),
+        bounds: { w: 320, h: 240 },
+        transform: { matrix: [1, 0, 0, 1, 0, 0] },
         title: '图像一',
         artifactRefs: [],
         homeTaskId: 'task-1',
@@ -57,8 +63,11 @@ describe('effectiveTaskSkillRefs', () => {
       },
       {
         id: 'node-2',
-        type: 'image',
-        frame: { x: 360, y: 0, w: 320, h: 240, z: 2 },
+        typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+        parentId: null,
+        orderKey: (2).toString(36).padStart(12, '0'),
+        bounds: { w: 320, h: 240 },
+        transform: { matrix: [1, 0, 0, 1, 360, 0] },
         title: '图像二',
         artifactRefs: [],
         homeTaskId: 'task-1',

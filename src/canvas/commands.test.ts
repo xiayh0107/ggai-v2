@@ -7,6 +7,9 @@ import {
   type TrustedProjectionPlanInput,
 } from './commands'
 import {
+  canvasNodeFrame,
+  canvasNodeGeometry,
+  canvasNodeTypeRef,
   emptyCanvasDocument,
   type CanvasDocument,
   type CanvasNode,
@@ -33,8 +36,8 @@ function node(
 ): CanvasNode {
   return {
     id,
-    type: 'text',
-    frame: { x, y, w: 300, h: 180, z: 1 },
+    typeRef: canvasNodeTypeRef('text'),
+    ...canvasNodeGeometry({ x, y, w: 300, h: 180, z: 1 }),
     title: id,
     artifactRefs: [],
     ...(homeTaskId ? { homeTaskId } : {}),
@@ -116,6 +119,61 @@ function plan(planId = PLAN_ID): TrustedProjectionPlanInput {
 }
 
 describe('Canvas commands', () => {
+  it('reparents atomically, preserves world position, and rejects containment cycles', () => {
+    const initial = emptyCanvasDocument()
+    initial.nodes.push(node('parent', 100, 120), node('child', 460, 300))
+    const nested = applyCanvasCommand(initial, {
+      type: 'ReparentNodes',
+      nodeIds: ['child'],
+      parentId: 'parent',
+    })
+    const child = nested.nodes.find((entry) => entry.id === 'child')!
+    expect(child.parentId).toBe('parent')
+    expect(child.transform.matrix[4]).toBe(360)
+    expect(child.transform.matrix[5]).toBe(180)
+    expect(() => applyCanvasCommand(nested, {
+      type: 'ReparentNodes',
+      nodeIds: ['parent'],
+      parentId: 'child',
+    })).toThrowError(CanvasCommandError)
+  })
+
+  it('creates typed port edges and persists operational selections by opaque identity', () => {
+    const initial = emptyCanvasDocument()
+    initial.nodes.push(node('source', 20, 40), node('target', 420, 40))
+    let current = applyCanvasCommand(initial, {
+      type: 'CreatePortEdge',
+      edge: {
+        id: 'edge-data',
+        from: { kind: 'node', id: 'source', port: 'output' },
+        to: { kind: 'node', id: 'target', port: 'input' },
+        relation: 'data',
+        contextRole: 'none',
+        orderKey: '000000000001',
+        origin: { kind: 'user' },
+      },
+    })
+    current = applyCanvasCommand(current, {
+      type: 'SelectNodeExecution',
+      nodeId: 'target',
+      executionId: 'execution-1',
+    })
+    current = applyCanvasCommand(current, {
+      type: 'BindNodeToFilesystem',
+      nodeId: 'target',
+      bindingId: 'binding-1',
+    })
+    expect(current.edges[0]).toMatchObject({
+      relation: 'data',
+      from: { port: 'output' },
+      to: { port: 'input' },
+    })
+    expect(current.nodes.find((entry) => entry.id === 'target')).toMatchObject({
+      selectedExecutionId: 'execution-1',
+      bindingId: 'binding-1',
+    })
+  })
+
   it('manages task goals and moves a collection as one spatial unit', () => {
     let current = applyCanvasCommand(emptyCanvasDocument(), {
       type: 'CreateTask',
@@ -156,11 +214,11 @@ describe('Canvas commands', () => {
       collectionId: 'collection-1',
     })
     expect(moved.collections[0].anchor).toEqual({ x: 85, y: 70 })
-    expect(moved.nodes.find((entry) => entry.id === 'task-node')?.frame).toMatchObject({
+    expect(canvasNodeFrame(moved.nodes.find((entry) => entry.id === 'task-node')!)).toMatchObject({
       x: 165,
       y: 230,
     })
-    expect(moved.nodes.find((entry) => entry.id === 'top-node')?.frame).toMatchObject({
+    expect(canvasNodeFrame(moved.nodes.find((entry) => entry.id === 'top-node')!)).toMatchObject({
       x: 525,
       y: 190,
     })
@@ -514,7 +572,7 @@ describe('Canvas commands', () => {
 
     expect(accepted.nodes).toHaveLength(3)
     expect(accepted.nodes.find((entry) => entry.id === notesNodeId)).toMatchObject({
-      type: 'file',
+      typeRef: { id: 'file' },
       title: 'Notes',
       homeTaskId: 'task-1',
       origin: {
@@ -969,7 +1027,7 @@ describe('Canvas commands', () => {
       title: 'Edited node',
       text: 'User-authored content',
       payload: { style: 'concise', count: 2 },
-      frame: { w: 420, h: 260 },
+      bounds: { w: 420, h: 260 },
       skillBindings: {
         inheritType: true,
         skills: [{ skillId: '@workspace/concise-writing', revision: 1 }],
@@ -980,12 +1038,12 @@ describe('Canvas commands', () => {
       id: 'node-copy',
       artifactRefs: [],
       origin: { kind: 'copied', sourceNodeId: 'node-1' },
-      frame: { x: 68, y: 104, w: 420, h: 260 },
       skillBindings: {
         inheritType: true,
         skills: [{ skillId: '@workspace/concise-writing', revision: 1 }],
       },
     })
+    expect(canvasNodeFrame(current.nodes[1]!)).toMatchObject({ x: 68, y: 104, w: 420, h: 260 })
 
     const forged = {
       type: 'CreateNode',
@@ -1125,7 +1183,7 @@ describe('Canvas commands', () => {
   })
 
   it('adopts one empty output slot, supports detach/assign, and never resurrects a deleted view', () => {
-    const emptyImage = { ...node('image-slot', 40, 60), type: 'image' }
+    const emptyImage = { ...node('image-slot', 40, 60), typeRef: canvasNodeTypeRef('image') }
     let current = applyCanvasCommand(emptyCanvasDocument(), {
       type: 'CreateNode',
       node: emptyImage,
@@ -1215,15 +1273,15 @@ describe('Canvas commands', () => {
     initial.nodes.push(
       {
         ...node('community-image', 20, 40),
-        type: '@community/image',
+        typeRef: canvasNodeTypeRef('@community/image'),
         artifactRefs: [{
           runId: 'run-source',
           artifactId: `artifact_${'e'.repeat(64)}`,
         }],
       },
-      { ...node('summary-source', 20, 260), type: '@community/data' },
-      { ...node('visual-only', 20, 480), type: '@community/note' },
-      { ...node('community-text-slot', 420, 40), type: '@community/review' },
+      { ...node('summary-source', 20, 260), typeRef: canvasNodeTypeRef('@community/data') },
+      { ...node('visual-only', 20, 480), typeRef: canvasNodeTypeRef('@community/note') },
+      { ...node('community-text-slot', 420, 40), typeRef: canvasNodeTypeRef('@community/review') },
     )
     initial.edges.push(
       {
@@ -1319,7 +1377,7 @@ describe('Canvas commands', () => {
     initial.tasks.push(task('upstream-task'))
     initial.nodes.push({
       ...node('content-source', 20, 40),
-      type: 'image',
+      typeRef: canvasNodeTypeRef('image'),
       text: 'Keep this original content',
     })
     const derived = applyCanvasCommand(initial, {

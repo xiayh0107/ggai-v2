@@ -25,7 +25,7 @@ afterEach(async () => {
 })
 
 async function temporaryProject(): Promise<string> {
-  const directory = await mkdtemp(path.join(tmpdir(), 'ggai-plugin-capabilities-v3-'))
+  const directory = await mkdtemp(path.join(tmpdir(), 'ggai-plugin-capabilities-'))
   temporaryDirectories.push(directory)
   return directory
 }
@@ -176,38 +176,29 @@ test('persists immutable content-addressed snapshots and detects tampering', asy
   assert.deepEqual(await store.recover(snapshot.digest), BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT)
 })
 
-test('recovery reads immutable v2 snapshots without admitting them to new Runs', async () => {
+test('recovery ignores retired versioned capability directories', async () => {
   const projectDir = await temporaryProject()
   const store = new ProjectionPluginCapabilityStore(projectDir)
-  const legacyPlugins = canonicalArtifactClaimRegistrations([
-    ...BUILTIN_ARTIFACT_CLAIM_REGISTRY,
-    { id: '@community/legacy', artifactClaims: [{ extensions: ['.legacy'] }] },
-  ]).map((registration) => ({
-    id: registration.id,
-    artifactRules: registration.artifactClaims,
-    ...(registration.acceptsUnknown ? { acceptsUnknown: true } : {}),
-  }))
-  const legacy = {
-    schemaVersion: 2 as const,
-    digest: legacyProjectionPluginCapabilityDigest(legacyPlugins),
-    plugins: legacyPlugins,
-  }
-  await mkdir(store.legacyRootDir, { recursive: true })
+  const retiredRoot = path.join(projectDir, '.gg', 'runtime', 'plugin-capabilities-v2')
+  await mkdir(retiredRoot, { recursive: true })
   await writeFile(
-    path.join(store.legacyRootDir, `${legacy.digest}.json`),
-    `${JSON.stringify(legacy)}\n`,
+    path.join(retiredRoot, `${'a'.repeat(64)}.json`),
+    '{}\n',
     'utf8',
   )
 
-  assert.equal(await store.get(legacy.digest), null)
-  assert.deepEqual(await store.recover(legacy.digest), legacy)
+  assert.equal(await store.get('a'.repeat(64)), null)
+  assert.deepEqual(
+    await store.recover('a'.repeat(64)),
+    BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
+  )
 })
 
 test('strict lookup rejects unsafe roots while recovery degrades to built-ins', async () => {
   const projectDir = await temporaryProject()
   const outside = await temporaryProject()
   await mkdir(path.join(projectDir, '.gg', 'runtime'), { recursive: true })
-  await symlink(outside, path.join(projectDir, '.gg', 'runtime', 'plugin-capabilities-v3'))
+  await symlink(outside, path.join(projectDir, '.gg', 'runtime', 'plugin-capabilities'))
   const store = new ProjectionPluginCapabilityStore(projectDir)
 
   await assert.rejects(store.register({ schemaVersion: 2, plugins: [] }), /unsafe/u)

@@ -12,6 +12,7 @@ import type {
   TaskRunPreflightResult,
 } from '@/agent/taskRunPreflightClient'
 import {
+  canvasNodeFrame,
   emptyCanvasDocument,
   type CanvasDocument,
   type CanvasTask,
@@ -324,7 +325,7 @@ function NodeLifecycleScenario({
                   {node && (
                     <CanvasNodeCard
                       node={node}
-                      frame={{ ...node.frame, x: 0, y: 0 }}
+                      frame={{ ...canvasNodeFrame(node), x: 0, y: 0 }}
                       projectDir="/ui-render/project"
                       selected
                       compact={false}
@@ -485,8 +486,11 @@ function createLifecycleDocument(phase: NodeLifecyclePhase): CanvasDocument {
   document.tasks.push(lifecycleTask)
   document.nodes.push({
     id: LIFECYCLE_NODE_ID,
-    type: 'text',
-    frame: { x: 180, y: 180, w: 460, h: 300, z: 1 },
+    typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+    parentId: null,
+    orderKey: (1).toString(36).padStart(12, '0'),
+    bounds: { w: 460, h: 300 },
+    transform: { matrix: [1, 0, 0, 1, 180, 180] },
     title: '研究结论',
     ...(phase === 'complete'
       ? {
@@ -558,8 +562,11 @@ function createDocument(): CanvasDocument {
   document.tasks.push(task)
   document.nodes.push({
     id: 'node-ui-render',
-    type: 'image',
-    frame: { x: 180, y: 180, w: 420, h: 280, z: 1 },
+    typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+    parentId: null,
+    orderKey: (1).toString(36).padStart(12, '0'),
+    bounds: { w: 420, h: 280 },
+    transform: { matrix: [1, 0, 0, 1, 180, 180] },
     title: '研究结果图',
     artifactRefs: [],
     homeTaskId: task.id,

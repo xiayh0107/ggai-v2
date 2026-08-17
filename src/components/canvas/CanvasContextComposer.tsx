@@ -172,7 +172,7 @@ export default function CanvasContextComposer({
   if (!lifecycle || selectionIsSingleTask(selection) || controlOwnerTaskId) return null
 
   const context = describeContext()
-  const plugin = selectedNode ? getPlugin(selectedNode.type) : null
+  const plugin = selectedNode ? getPlugin(selectedNode.typeRef.id) : null
   const sourceNodes = selectedNode
     ? selectSourceNodes(state.document.nodes, state.document.edges, selectedNode)
     : []
@@ -341,7 +341,7 @@ export default function CanvasContextComposer({
             {sourceNodes.length > 0 && (
               <div className="mb-1.5 flex flex-wrap gap-1 px-1" aria-label="任务来源节点">
                 {sourceNodes.slice(0, 6).map((node) => {
-                  const sourcePlugin = getPlugin(node.type)
+                  const sourcePlugin = getPlugin(node.typeRef.id)
                   const SourceIcon = nodeTypeIcon(sourcePlugin)
                   return (
                     <span

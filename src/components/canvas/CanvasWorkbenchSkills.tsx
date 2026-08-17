@@ -60,7 +60,7 @@ export default function CanvasWorkbenchSkills({
     [catalog?.assets, selectedSkills],
   )
   const typeBinding = catalog?.typeBindings.find((binding) =>
-    binding.nodeType === selectedNode?.type)
+    binding.nodeType === selectedNode?.typeRef.id)
   const originalBindings: NodeSkillBindings = selectedNode?.skillBindings ?? {
     inheritType: true,
     skills: [],
@@ -143,7 +143,7 @@ export default function CanvasWorkbenchSkills({
             <p className="text-[9.5px] text-gg-muted">当前节点</p>
             <p className="mt-0.5 truncate text-[11.5px] font-medium text-gg-ink">{selectedNode.title}</p>
             <p className="mt-0.5 text-[9.5px] text-gg-muted">
-              {getPlugin(selectedNode.type).label} · 类型默认 {typeBinding?.skills.length ?? 0} 个
+              {getPlugin(selectedNode.typeRef.id).label} · 类型默认 {typeBinding?.skills.length ?? 0} 个
             </p>
             {typeBinding && typeBinding.skills.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1">

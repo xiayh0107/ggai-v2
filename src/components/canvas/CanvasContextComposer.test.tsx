@@ -123,8 +123,11 @@ describe('Canvas context composer', () => {
     fakeStore.state.document.nodes.push(
       {
         id: 'node-a',
-        type: 'text',
-        frame: { x: 100, y: 120, w: 300, h: 220, z: 1 },
+        typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+        parentId: null,
+        orderKey: (1).toString(36).padStart(12, '0'),
+        bounds: { w: 300, h: 220 },
+        transform: { matrix: [1, 0, 0, 1, 100, 120] },
         title: '节点 A',
         text: 'A',
         artifactRefs: [],
@@ -132,8 +135,11 @@ describe('Canvas context composer', () => {
       },
       {
         id: 'node-b',
-        type: 'text',
-        frame: { x: 460, y: 120, w: 300, h: 220, z: 2 },
+        typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+        parentId: null,
+        orderKey: (2).toString(36).padStart(12, '0'),
+        bounds: { w: 300, h: 220 },
+        transform: { matrix: [1, 0, 0, 1, 460, 120] },
         title: '节点 B',
         text: 'B',
         artifactRefs: [],
@@ -331,8 +337,11 @@ describe('Canvas context composer', () => {
     })
     fakeStore.state.document.nodes.push({
       id: 'node-image',
-      type: 'image',
-      frame: { x: 160, y: 180, w: 300, h: 240, z: 1 },
+      typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (1).toString(36).padStart(12, '0'),
+      bounds: { w: 300, h: 240 },
+      transform: { matrix: [1, 0, 0, 1, 160, 180] },
       title: '散点图预览',
       artifactRefs: [],
       homeTaskId: 'task-origin',

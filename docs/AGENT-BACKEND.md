@@ -140,7 +140,7 @@ artifacts/.branches/<branch-hash>/<runId>/
 
 manifest entry 保存 `artifactId`、normalized relative path、MIME、size 和 content digest。`.ggai`、临时文件、symlink、hardlink/foreign file、socket/device 与 traversal 永不进入 manifest。读取 API 从 manifest 反查，并再次执行 no-follow、realpath、inode/size/digest 检查。
 
-浏览器只注册 community data-only claims；daemon 将它们与受信 Workspace runtime contributions、不可覆盖的 builtins 合并为 Projection Capability Snapshot v3。每项保存 builtin/runtime-plugin/browser-community provenance，只有内置 `file` fallback 可以接收 unknown artifact。新 Run 的规范化快照按 digest 保存到 `.gg/runtime/plugin-capabilities-v3/`；live Run 指定的 digest 缺失或损坏时拒绝启动，历史 v2 仅供 crash recovery 读取。
+浏览器只注册 community data-only claims；daemon 将它们与受信 Workspace runtime contributions、不可覆盖的 builtins 合并为当前 Projection Capability Snapshot。每项保存 builtin/runtime-plugin/browser-community provenance，只有内置 `file` fallback 可以接收 unknown artifact。快照按 digest 保存到 `.gg/runtime/plugin-capabilities/`；缺失或损坏时 live Run 拒绝启动，recovery 降级到内置能力。
 
 ## 六、持久化布局
 
@@ -156,13 +156,12 @@ project/
 │   │   ├── canvas/<branch-hash>/revisions/<revision>.json
 │   │   ├── runs/<runId>/{events.jsonl,events.idx,summary.json} # 固化 prompt/baseRevision
 │   │   ├── projection-plans/<branch-hash>.json
-│   │   ├── plugin-capabilities-v3/<digest>.json # 新 Run 的 provenance snapshot
-│   │   ├── plugin-capabilities-v2/<digest>.json # 历史 Run 只读恢复
+│   │   ├── plugin-capabilities/<digest>.json # 新 Run 的 provenance snapshot
 │   │   ├── capability-receipts-v1/<runId>.json
-│   │   ├── task-sessions-v2.json
+│   │   ├── task-sessions.json
 │   │   └── canvas-daemon.lock
-│   ├── canvas-state-v2/                  # 独立 Canvas Git
-│   ├── canvas-worktrees-v2/              # daemon 锁定 worktree
+│   ├── canvas/                  # 独立 Canvas Git
+│   ├── canvas-worktrees/              # daemon 锁定 worktree
 │   ├── context/runs/<runId>/              # 不可变 Run 上下文
 │   ├── context/{pack.md,pack.json,AGENTS.md} # 最近一次调试视图
 │   └── runs/<runId>/                      # Codex 最小隔离 cwd

@@ -413,8 +413,11 @@ describe('CanvasTaskRunController', () => {
     const document = taskDocument('task-a')
     document.nodes.push({
       id: 'node-slot',
-      type: 'text',
-      frame: { x: 40, y: 80, w: 320, h: 256, z: 1 },
+      typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (1).toString(36).padStart(12, '0'),
+      bounds: { w: 320, h: 256 },
+      transform: { matrix: [1, 0, 0, 1, 40, 80] },
       title: 'Empty slot',
       artifactRefs: [],
       homeTaskId: 'task-a',
@@ -610,8 +613,11 @@ describe('CanvasTaskRunController', () => {
     const document = taskDocument('task-a')
     document.nodes.push({
       id: 'node-recovered',
-      type: 'image',
-      frame: { x: 40, y: 80, w: 320, h: 256, z: 1 },
+      typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (1).toString(36).padStart(12, '0'),
+      bounds: { w: 320, h: 256 },
+      transform: { matrix: [1, 0, 0, 1, 40, 80] },
       title: 'Recovered image',
       artifactRefs: [{ runId: 'recovered-run', artifactId: 'artifact-recovered' }],
       homeTaskId: 'task-a',

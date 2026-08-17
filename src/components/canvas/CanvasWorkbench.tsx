@@ -10,7 +10,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useCanvasState, useCanvasStore } from '@/canvas/hooks'
-import type { CanvasNode } from '@/canvas/model'
+import { canvasNodeFrame, type CanvasNode } from '@/canvas/model'
 import {
   useOptionalCanvasWorkbenchController,
   type CanvasWorkbenchSection,
@@ -97,8 +97,8 @@ export default function CanvasWorkbench({
     store.setSelection([{ kind: 'node', id: node.id }])
     store.setCamera({
       zoom,
-      x: Math.round(centerX - (node.frame.x + node.frame.w / 2) * zoom),
-      y: Math.round(viewportHeight / 2 - (node.frame.y + node.frame.h / 2) * zoom),
+      x: Math.round(centerX - (canvasNodeFrame(node).x + canvasNodeFrame(node).w / 2) * zoom),
+      y: Math.round(viewportHeight / 2 - (canvasNodeFrame(node).y + canvasNodeFrame(node).h / 2) * zoom),
     })
   }
 

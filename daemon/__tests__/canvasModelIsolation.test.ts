@@ -39,14 +39,14 @@ test('daemon health and version routes have one fixed Canvas contract', async ()
       nodeSkills: true,
     })
     assert.deepEqual(health.canvas, {
-      schemaVersion: 2,
+      schemaVersion: 3,
       initializationRequired: false,
     })
 
     const canvas = await fetch(`${baseUrl}/canvas?branch=main`)
     assert.equal(canvas.status, 200)
     assert.equal((await canvas.json() as { document: { schemaVersion: number } })
-      .document.schemaVersion, 2)
+      .document.schemaVersion, 3)
 
     const history = await fetch(`${baseUrl}/canvas/history?branch=main`)
     assert.equal(history.status, 200)

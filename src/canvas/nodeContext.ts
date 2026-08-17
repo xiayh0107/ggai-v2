@@ -1,5 +1,6 @@
 import {
   assertCanvasDocument,
+  canvasNodeFrame,
   entityKey,
   type CanvasArtifactRef,
   type CanvasDocument,
@@ -116,7 +117,7 @@ export function selectCanvasNodeContext(
   const hasArtifacts = node.artifactRefs.length > 0
 
   return {
-    identity: { id: node.id, type: node.type, title: node.title },
+    identity: { id: node.id, type: node.typeRef.id, title: node.title },
     content: {
       state: hasInline && hasArtifacts
         ? 'mixed'
@@ -130,7 +131,7 @@ export function selectCanvasNodeContext(
       artifactRefs: structuredClone(node.artifactRefs),
     },
     placement: {
-      frame: structuredClone(node.frame),
+      frame: structuredClone(canvasNodeFrame(node)),
       task: task ? { id: task.id, title: task.title, goal: task.goal } : null,
       collection: collection ? { id: collection.id, title: collection.title } : null,
     },

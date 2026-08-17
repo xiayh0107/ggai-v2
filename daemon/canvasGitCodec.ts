@@ -179,7 +179,7 @@ export function decodeCanvasGitTree(
 
   const meta = parseJson(requirePath(byPath, 'meta.json'), 'meta.json')
   if (!isExactRecord(meta, ['schemaVersion', 'everCreated'])
-    || meta.schemaVersion !== 2
+    || meta.schemaVersion !== 3
     || typeof meta.everCreated !== 'boolean') {
     throw new CanvasGitCodecError(
       'INVALID_TREE',
@@ -245,7 +245,7 @@ export function decodeCanvasGitTree(
   }
 
   const candidate = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     tasks: tasks.sort(compareById),
     nodes: nodes.sort(compareById),
     collections: collections.sort(compareById),

@@ -18,6 +18,8 @@ import {
   type CanvasTaskRuntime,
 } from './selectors'
 import {
+  canvasNodeGeometry,
+  canvasNodeTypeRef,
   emptyCanvasDocument,
   type CanvasDocument,
   type CanvasEdge,
@@ -45,8 +47,8 @@ function node(
 ): CanvasNode {
   return {
     id,
-    type: 'text',
-    frame: { x, y, w: 400, h: 256, z: 1 },
+    typeRef: canvasNodeTypeRef('text'),
+    ...canvasNodeGeometry({ x, y, w: 400, h: 256, z: 1 }),
     title: id,
     artifactRefs: Array.from({ length: options.artifacts ?? 0 }, (_, index) => ({
       runId: 'run-1',

@@ -1,5 +1,10 @@
 import {
   assertCanvasDocument,
+  canvasNodeFrame,
+  canvasNodeGeometry,
+  canvasNodeTypeRef,
+  canvasOrderKey,
+  canvasOrderNumber,
   canvasEdgeTopologyIssue,
   cloneCanvasDocument,
   entityKey,
@@ -104,6 +109,26 @@ export type CanvasCommand =
   | { type: 'UpdateNodeContent'; nodeId: string; patch: UpdateNodeContentPatch }
   | { type: 'UpdateNodeSkillBindings'; nodeId: string; bindings: NodeSkillBindings }
   | { type: 'ResizeNode'; nodeId: string; w: number; h: number }
+  | { type: 'SetNodeBounds'; nodeId: string; w: number; h: number }
+  | {
+      type: 'SetNodeTransform'
+      nodeId: string
+      matrix: [number, number, number, number, number, number]
+    }
+  | {
+      type: 'ReparentNodes'
+      nodeIds: string[]
+      parentId: string | null
+      beforeOrderKey?: string
+    }
+  | {
+      type: 'ReorderChildren'
+      parentId: string | null
+      moves: Array<{ nodeId: string; orderKey: string }>
+    }
+  | { type: 'CreatePortEdge'; edge: CanvasEdge }
+  | { type: 'SelectNodeExecution'; nodeId: string; executionId: string | null }
+  | { type: 'BindNodeToFilesystem'; nodeId: string; bindingId: string }
   | { type: 'DeleteNode'; nodeId: string }
   | {
       type: 'DuplicateNode'
@@ -212,6 +237,18 @@ export function applyCanvasCommand(
     case 'ResizeNode':
       resizeNode(next, command.nodeId, command.w, command.h)
       break
+    case 'SetNodeBounds':
+      resizeNode(next, command.nodeId, command.w, command.h)
+      break
+    case 'SetNodeTransform':
+      setNodeTransform(next, command.nodeId, command.matrix)
+      break
+    case 'ReparentNodes':
+      reparentNodes(next, command)
+      break
+    case 'ReorderChildren':
+      reorderChildren(next, command)
+      break
     case 'DeleteNode':
       deleteNode(next, command.nodeId)
       break
@@ -220,6 +257,9 @@ export function applyCanvasCommand(
       break
     case 'CreateEdge':
       createUserEdge(next, command.edge)
+      break
+    case 'CreatePortEdge':
+      createPortEdge(next, command.edge)
       break
     case 'CreateEdges':
       createUserEdges(next, command.edges)
@@ -232,6 +272,12 @@ export function applyCanvasCommand(
       break
     case 'DeleteEdges':
       deleteEdges(next, command.edgeIds)
+      break
+    case 'SelectNodeExecution':
+      selectNodeExecution(next, command.nodeId, command.executionId)
+      break
+    case 'BindNodeToFilesystem':
+      bindNodeToFilesystem(next, command.nodeId, command.bindingId)
       break
     case 'DetachNodeFromTask':
       detachNodeFromTask(next, command.nodeId)
@@ -399,8 +445,130 @@ function resizeNode(
     throw new CanvasCommandError('invalid-node-size', 'Node dimensions must be positive and finite')
   }
   const node = requireNode(document, nodeId)
-  node.frame.w = w
-  node.frame.h = h
+  node.bounds.w = w
+  node.bounds.h = h
+}
+
+function setNodeTransform(
+  document: CanvasDocument,
+  nodeId: string,
+  matrix: [number, number, number, number, number, number],
+): void {
+  if (!Array.isArray(matrix)
+    || matrix.length !== 6
+    || matrix.some((value) => !Number.isFinite(value))
+    || Math.abs(matrix[0] * matrix[3] - matrix[1] * matrix[2]) < 1e-12) {
+    throw new CanvasCommandError('invalid-node-transform', 'Node transform must be invertible and finite')
+  }
+  requireNode(document, nodeId).transform = { matrix: [...matrix] }
+}
+
+function reparentNodes(
+  document: CanvasDocument,
+  command: Extract<CanvasCommand, { type: 'ReparentNodes' }>,
+): void {
+  const nodeIds = uniqueIds(command.nodeIds, 'reparent')
+  if (nodeIds.length === 0) throw new CanvasCommandError('empty-reparent', 'Reparent requires nodes')
+  const moving = new Set(nodeIds)
+  const nodesById = new Map(document.nodes.map((node) => [node.id, node]))
+  const parent = command.parentId === null ? null : requireNode(document, command.parentId)
+  if (parent && moving.has(parent.id)) {
+    throw new CanvasCommandError('containment-cycle', 'A node cannot become its own parent')
+  }
+  for (const nodeId of nodeIds) {
+    const node = requireNode(document, nodeId)
+    let ancestor = node.parentId
+    while (ancestor) {
+      if (moving.has(ancestor)) {
+        throw new CanvasCommandError(
+          'nested-reparent-selection',
+          'Reparent selection must not contain both an ancestor and descendant',
+        )
+      }
+      ancestor = nodesById.get(ancestor)?.parentId ?? null
+    }
+    let targetAncestor = parent?.id ?? null
+    while (targetAncestor) {
+      if (targetAncestor === node.id) {
+        throw new CanvasCommandError('containment-cycle', 'Reparent would create a cycle')
+      }
+      targetAncestor = nodesById.get(targetAncestor)?.parentId ?? null
+    }
+  }
+
+  const worldById = new Map(nodeIds.map((nodeId) => [
+    nodeId,
+    worldTransform(requireNode(document, nodeId), nodesById),
+  ]))
+  const parentWorld = parent ? worldTransform(parent, nodesById) : identityMatrix()
+  const inverseParent = invertMatrix(parentWorld)
+  const siblings = document.nodes.filter((node) => node.parentId === command.parentId && !moving.has(node.id))
+  const insertAt = command.beforeOrderKey === undefined
+    ? siblings.reduce((max, node) => Math.max(max, canvasOrderNumber(node.orderKey)), -1) + 1
+    : canvasOrderNumber(command.beforeOrderKey)
+  for (const sibling of siblings) {
+    const order = canvasOrderNumber(sibling.orderKey)
+    if (order >= insertAt) sibling.orderKey = canvasOrderKey(order + nodeIds.length)
+  }
+  const ordered = nodeIds.map((id) => requireNode(document, id))
+    .sort((left, right) => left.orderKey.localeCompare(right.orderKey))
+  for (const [index, node] of ordered.entries()) {
+    node.parentId = command.parentId
+    node.orderKey = canvasOrderKey(insertAt + index)
+    node.transform = {
+      matrix: multiplyMatrices(inverseParent, worldById.get(node.id)!),
+    }
+    if (command.parentId !== null) {
+      delete node.homeTaskId
+      delete node.collectionId
+    }
+  }
+}
+
+function reorderChildren(
+  document: CanvasDocument,
+  command: Extract<CanvasCommand, { type: 'ReorderChildren' }>,
+): void {
+  if (!Array.isArray(command.moves) || command.moves.length === 0) {
+    throw new CanvasCommandError('empty-reorder', 'Reorder requires at least one move')
+  }
+  const ids = uniqueIds(command.moves.map((move) => move.nodeId), 'reorder')
+  if (ids.length !== command.moves.length) {
+    throw new CanvasCommandError('duplicate-reorder-node', 'Reorder contains duplicate nodes')
+  }
+  for (const move of command.moves) {
+    const node = requireNode(document, move.nodeId)
+    if (node.parentId !== command.parentId) {
+      throw new CanvasCommandError('reorder-parent-mismatch', 'Reorder nodes must share the parent')
+    }
+    if (!/^[0-9A-Za-z._~-]{1,128}$/u.test(move.orderKey)) {
+      throw new CanvasCommandError('invalid-order-key', 'Reorder contains an invalid orderKey')
+    }
+    node.orderKey = move.orderKey
+  }
+}
+
+function selectNodeExecution(
+  document: CanvasDocument,
+  nodeId: string,
+  executionId: string | null,
+): void {
+  const node = requireNode(document, nodeId)
+  if (executionId === null) {
+    delete node.selectedExecutionId
+    return
+  }
+  requireOrdinaryId(executionId, 'executionId')
+  node.selectedExecutionId = executionId
+}
+
+function bindNodeToFilesystem(
+  document: CanvasDocument,
+  nodeId: string,
+  bindingId: string,
+): void {
+  requireOrdinaryId(bindingId, 'bindingId')
+  requireNode(document, nodeId).bindingId = bindingId
 }
 
 function deleteNode(document: CanvasDocument, nodeId: string): void {
@@ -434,13 +602,13 @@ function duplicateNode(
 
   const duplicate: CanvasNode = {
     id: command.newNodeId,
-    type: source.type,
-    frame: {
-      ...source.frame,
-      x: source.frame.x + command.offset.x,
-      y: source.frame.y + command.offset.y,
+    typeRef: structuredClone(source.typeRef),
+    ...canvasNodeGeometry({
+      ...canvasNodeFrame(source),
+      x: canvasNodeFrame(source).x + command.offset.x,
+      y: canvasNodeFrame(source).y + command.offset.y,
       z: maxNodeZ(document) + 1,
-    },
+    }),
     title: command.title ?? `${source.title} copy`,
     ...(source.text === undefined ? {} : { text: source.text }),
     ...(source.payload === undefined ? {} : { payload: structuredClone(source.payload) }),
@@ -457,7 +625,11 @@ function duplicateNode(
 }
 
 function createUserEdge(document: CanvasDocument, edge: CanvasEdge): void {
-  if (!hasExactKeys(edge, ['id', 'from', 'to', 'relation', 'contextRole', 'origin'])) {
+  if (!isPlainRecord(edge)
+    || !['id', 'from', 'to', 'relation', 'contextRole', 'origin']
+      .every((key) => hasOwn(edge, key))
+    || Object.keys(edge).some((key) =>
+      !['id', 'from', 'to', 'relation', 'contextRole', 'orderKey', 'origin'].includes(key))) {
     throw new CanvasCommandError('invalid-edge', 'CreateEdge has an invalid shape')
   }
   requireClientOwnedId(edge.id, 'edge')
@@ -472,6 +644,13 @@ function createUserEdge(document: CanvasDocument, edge: CanvasEdge): void {
   requireEntity(document, edge.to)
   requireValidEdgeSemantics(edge)
   document.edges.push(structuredClone(edge))
+}
+
+function createPortEdge(document: CanvasDocument, edge: CanvasEdge): void {
+  if (edge.relation !== 'data') {
+    throw new CanvasCommandError('invalid-port-edge', 'CreatePortEdge requires a data relation')
+  }
+  createUserEdge(document, edge)
 }
 
 function createUserEdges(document: CanvasDocument, edges: CanvasEdge[]): void {
@@ -737,8 +916,8 @@ function moveEntities(
   }
   for (const node of document.nodes) {
     if (!nodeIds.has(node.id)) continue
-    node.frame.x += dx
-    node.frame.y += dy
+    node.transform.matrix[4] += dx
+    node.transform.matrix[5] += dy
   }
 }
 
@@ -922,13 +1101,13 @@ function duplicateCollection(
     const homeTaskId = node.homeTaskId ? taskIdMap.get(node.homeTaskId) : undefined
     nextNodes.push({
       id,
-      type: node.type,
-      frame: {
-        ...node.frame,
-        x: node.frame.x + command.offset.x,
-        y: node.frame.y + command.offset.y,
+      typeRef: structuredClone(node.typeRef),
+      ...canvasNodeGeometry({
+        ...canvasNodeFrame(node),
+        x: canvasNodeFrame(node).x + command.offset.x,
+        y: canvasNodeFrame(node).y + command.offset.y,
         z: maxZ + index + 1,
-      },
+      }),
       title: node.title,
       ...(node.text === undefined ? {} : { text: node.text }),
       ...(node.payload === undefined ? {} : { payload: structuredClone(node.payload) }),
@@ -1038,7 +1217,7 @@ function materializeProjectionPlan(
     const candidates = document.nodes.filter((node) =>
       !adoptedNodeIds.has(node.id)
       && node.homeTaskId === task.id
-      && node.type === output.pluginId
+      && node.typeRef.id === output.pluginId
       && isEmptyUserOutputSlot(node))
     if (candidates.length === 1) {
       const candidate = candidates[0]!
@@ -1073,8 +1252,8 @@ function materializeProjectionPlan(
     }
     newNodes.push({
       id: requireMappedId(nodeIdByOutput, output.key),
-      type: output.pluginId,
-      frame: projectionFrame(task.anchor, index, maxZ),
+      typeRef: canvasNodeTypeRef(output.pluginId),
+      ...projectionGeometry(task.anchor, index, maxZ),
       title: output.title,
       artifactRefs: structuredClone(output.artifactRefs),
       homeTaskId: task.id,
@@ -1341,8 +1520,8 @@ function materializeProposalInputOutputs(
   const firstLayoutIndex = materialization.outcomes.length
   const newNodes = missingOutputs.map((output, index): CanvasNode => ({
     id: requireMappedId(newNodeIdByKey, output.key),
-    type: output.pluginId,
-    frame: projectionFrame(parent.anchor, firstLayoutIndex + index, maxZ),
+    typeRef: canvasNodeTypeRef(output.pluginId),
+    ...projectionGeometry(parent.anchor, firstLayoutIndex + index, maxZ),
     title: output.title,
     artifactRefs: structuredClone(output.artifactRefs),
     homeTaskId: parent.id,
@@ -1435,7 +1614,7 @@ function requireExistingProposalInputNode(
       `Materialized proposal input ${output.key} is no longer on the canvas`,
     )
   }
-  if (node.type !== output.pluginId
+  if (node.typeRef.id !== output.pluginId
     || node.origin.kind !== 'agent-output'
     || node.origin.taskId !== plan.taskId
     || node.origin.runId !== plan.runId
@@ -1798,6 +1977,13 @@ function requireValidEdgeSemantics(edge: CanvasEdge): void {
   }
   requireEdgeRelation(edge.relation)
   requireContextRole(edge.contextRole)
+  if (edge.relation === 'data'
+    && (edge.contextRole !== 'none' || !edge.orderKey)) {
+    throw new CanvasCommandError(
+      'invalid-data-edge',
+      'Data edges require contextRole none and an orderKey',
+    )
+  }
   const issue = canvasEdgeTopologyIssue(edge)
   if (issue) throw new CanvasCommandError('invalid-edge-topology', issue)
 }
@@ -1810,7 +1996,8 @@ function requireEdgeRelation(value: unknown): asserts value is CanvasEdgeRelatio
     && value !== 'references'
     && value !== 'compares'
     && value !== 'replaces'
-    && value !== 'depends-on') {
+    && value !== 'depends-on'
+    && value !== 'data') {
     throw new CanvasCommandError('invalid-edge-relation', 'Edge relation is invalid')
   }
 }
@@ -1822,10 +2009,13 @@ function requireContextRole(value: unknown): asserts value is CanvasEdgeContextR
 }
 
 function isEntityRef(value: unknown): value is CanvasEntityRef {
-  return isPlainRecord(value)
-    && hasExactKeys(value, ['kind', 'id'])
-    && (value.kind === 'node' || value.kind === 'task')
-    && typeof value.id === 'string'
+  if (!isPlainRecord(value)
+    || (value.kind !== 'node' && value.kind !== 'task')
+    || typeof value.id !== 'string') return false
+  if (value.kind === 'task') return hasExactKeys(value, ['kind', 'id'])
+  return hasExactKeys(value, value.port === undefined ? ['kind', 'id'] : ['kind', 'id', 'port'])
+    && (value.port === undefined
+      || (typeof value.port === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value.port)))
 }
 
 function isExactUserOrigin(value: unknown): boolean {
@@ -1863,16 +2053,89 @@ function requireMappedId(map: Map<string, string>, key: string): string {
   return value
 }
 
-function maxNodeZ(document: CanvasDocument): number {
-  return document.nodes.reduce((maximum, node) => Math.max(maximum, node.frame.z), 0)
+function uniqueIds(values: string[], label: string): string[] {
+  if (!Array.isArray(values) || values.some((value) => typeof value !== 'string')) {
+    throw new CanvasCommandError(`invalid-${label}-ids`, `${label} node ids are invalid`)
+  }
+  const unique = [...new Set(values)]
+  if (unique.length !== values.length) {
+    throw new CanvasCommandError(`duplicate-${label}-ids`, `${label} contains duplicate node ids`)
+  }
+  return unique
 }
 
-function projectionFrame(anchor: CanvasPoint, index: number, maxZ: number) {
+function requireOrdinaryId(value: string, label: string): void {
+  if (typeof value !== 'string'
+    || value.length === 0
+    || value.length > 160
+    || !/^[A-Za-z0-9][A-Za-z0-9._:@-]*$/u.test(value)
+    || value.includes('..')) {
+    throw new CanvasCommandError(`invalid-${label}`, `${label} is invalid`)
+  }
+}
+
+type Matrix = [number, number, number, number, number, number]
+
+function identityMatrix(): Matrix {
+  return [1, 0, 0, 1, 0, 0]
+}
+
+function multiplyMatrices(left: Matrix, right: Matrix): Matrix {
+  const [a1, b1, c1, d1, e1, f1] = left
+  const [a2, b2, c2, d2, e2, f2] = right
+  return [
+    a1 * a2 + c1 * b2,
+    b1 * a2 + d1 * b2,
+    a1 * c2 + c1 * d2,
+    b1 * c2 + d1 * d2,
+    a1 * e2 + c1 * f2 + e1,
+    b1 * e2 + d1 * f2 + f1,
+  ]
+}
+
+function invertMatrix(matrix: Matrix): Matrix {
+  const [a, b, c, d, e, f] = matrix
+  const determinant = a * d - b * c
+  if (Math.abs(determinant) < 1e-12) {
+    throw new CanvasCommandError('invalid-node-transform', 'Node transform is not invertible')
+  }
+  return [
+    d / determinant,
+    -b / determinant,
+    -c / determinant,
+    a / determinant,
+    (c * f - d * e) / determinant,
+    (b * e - a * f) / determinant,
+  ]
+}
+
+function worldTransform(node: CanvasNode, nodesById: Map<string, CanvasNode>): Matrix {
+  const chain: CanvasNode[] = []
+  const seen = new Set<string>()
+  let current: CanvasNode | undefined = node
+  while (current) {
+    if (seen.has(current.id)) throw new CanvasCommandError('containment-cycle', 'Containment cycle detected')
+    seen.add(current.id)
+    chain.push(current)
+    current = current.parentId ? nodesById.get(current.parentId) : undefined
+    if (chain.length > 32) throw new CanvasCommandError('containment-depth', 'Containment depth exceeds 32')
+  }
+  return chain.reverse().reduce(
+    (matrix, entry) => multiplyMatrices(matrix, entry.transform.matrix),
+    identityMatrix(),
+  )
+}
+
+function maxNodeZ(document: CanvasDocument): number {
+  return document.nodes.reduce((maximum, node) => Math.max(maximum, canvasNodeFrame(node).z), 0)
+}
+
+function projectionGeometry(anchor: CanvasPoint, index: number, maxZ: number) {
   const frame = taskOutputFrame(anchor, index)
-  return {
+  return canvasNodeGeometry({
     ...frame,
     z: maxZ + index + 1,
-  }
+  })
 }
 
 function agentEdge(

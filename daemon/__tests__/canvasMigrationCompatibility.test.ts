@@ -25,7 +25,7 @@ test('a catalog-created project opens as an empty Canvas without a root migratio
     assert.equal(envelope.revision, 0)
     assert.equal(envelope.lastCheckpoint, null)
     assert.deepEqual(envelope.document, {
-      schemaVersion: 2,
+      schemaVersion: 3,
       nodes: [],
       tasks: [],
       collections: [],

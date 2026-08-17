@@ -79,11 +79,65 @@ test('strictly parses ordinary CanvasCommand commands', () => {
   })
 })
 
+test('strictly parses hierarchy, transform, port, execution, and binding commands', () => {
+  assert.deepEqual(parseCanvasCommandWire({
+    type: 'SetNodeTransform',
+    nodeId: 'node-a',
+    matrix: [1, 0, 0, 1, 40, 60],
+  }), {
+    type: 'SetNodeTransform',
+    nodeId: 'node-a',
+    matrix: [1, 0, 0, 1, 40, 60],
+  })
+  assert.deepEqual(parseCanvasCommandWire({
+    type: 'ReparentNodes',
+    nodeIds: ['node-a', 'node-b'],
+    parentId: 'node-parent',
+    beforeOrderKey: '000000000010',
+  }), {
+    type: 'ReparentNodes',
+    nodeIds: ['node-a', 'node-b'],
+    parentId: 'node-parent',
+    beforeOrderKey: '000000000010',
+  })
+  assert.deepEqual(parseCanvasCommandWire({
+    type: 'CreatePortEdge',
+    edge: {
+      id: 'edge-data',
+      from: { kind: 'node', id: 'node-a', port: 'out' },
+      to: { kind: 'node', id: 'node-b', port: 'in' },
+      relation: 'data',
+      contextRole: 'none',
+      orderKey: '000000000001',
+      origin: { kind: 'user' },
+    },
+  }).type, 'CreatePortEdge')
+  assert.deepEqual(parseCanvasCommandWire({
+    type: 'SelectNodeExecution',
+    nodeId: 'node-b',
+    executionId: null,
+  }), { type: 'SelectNodeExecution', nodeId: 'node-b', executionId: null })
+  assert.throws(() => parseCanvasCommandWire({
+    type: 'CreatePortEdge',
+    edge: {
+      id: 'edge-unsafe',
+      from: { kind: 'node', id: 'node-a', port: 'out' },
+      to: { kind: 'node', id: 'node-b', port: 'in' },
+      relation: 'source',
+      contextRole: 'none',
+      origin: { kind: 'user' },
+    },
+  }), /data relation|entity-level/u)
+})
+
 test('parses bounded user node, edge, membership, and derived-task commands', () => {
   const node = {
     id: 'node-1',
-    type: 'image',
-    frame: { x: 20, y: 40, w: 320, h: 180, z: 1 },
+    typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+    parentId: null,
+    orderKey: (1).toString(36).padStart(12, '0'),
+    bounds: { w: 320, h: 180 },
+    transform: { matrix: [1, 0, 0, 1, 20, 40] },
     title: 'Empty image',
     artifactRefs: [],
     origin: { kind: 'user' },
@@ -514,8 +568,11 @@ test('rejects malformed request identity, duplicate entities, and non-finite mov
 test('rejects forged artifacts/origins, free patches, invalid topology, and reserved ids', () => {
   const baseNode = {
     id: 'node-1',
-    type: 'image',
-    frame: { x: 0, y: 0, w: 320, h: 180, z: 1 },
+    typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+    parentId: null,
+    orderKey: (1).toString(36).padStart(12, '0'),
+    bounds: { w: 320, h: 180 },
+    transform: { matrix: [1, 0, 0, 1, 0, 0] },
     title: 'Image',
     artifactRefs: [],
     origin: { kind: 'user' },

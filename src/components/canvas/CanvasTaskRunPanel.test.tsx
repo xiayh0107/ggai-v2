@@ -86,8 +86,11 @@ function canvasDocument(withOutput = false): CanvasDocument {
   if (withOutput) {
     document.nodes.push({
       id: 'node-1',
-      type: 'image',
-      frame: { x: 60, y: 120, w: 400, h: 256, z: 1 },
+      typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (1).toString(36).padStart(12, '0'),
+      bounds: { w: 400, h: 256 },
+      transform: { matrix: [1, 0, 0, 1, 60, 120] },
       title: '已有散点图',
       artifactRefs: [{ runId: 'run-old', artifactId }],
       homeTaskId: task.id,

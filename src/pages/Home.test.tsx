@@ -79,7 +79,7 @@ describe('Canvas Home entry', () => {
   it('asks for an app restart when an obsolete daemon reports root initialization', async () => {
     const { host } = await renderHome({
       capabilities: { canvas: true },
-      canvas: { schemaVersion: 2, initializationRequired: true },
+      canvas: { schemaVersion: 3, initializationRequired: true },
     })
 
     expect(host.querySelector('[role="alert"]')?.textContent).toContain('重启应用')

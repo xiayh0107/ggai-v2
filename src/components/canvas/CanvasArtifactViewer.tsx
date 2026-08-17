@@ -43,7 +43,7 @@ export default function CanvasArtifactViewer({
 }) {
   const closeRef = useRef<HTMLButtonElement>(null)
   const { artifact, title } = request
-  const marks = node ? nodeTypeMarks(getPlugin(node.type), node) : []
+  const marks = node ? nodeTypeMarks(getPlugin(node.typeRef.id), node) : []
   // 与选择工具条同一规则：有标记按钮的类型（文本）不再重复显示指令 chips。
   const showActions = marks.length === 0 && nodeActions.length > 0 && Boolean(onNodeAction)
 

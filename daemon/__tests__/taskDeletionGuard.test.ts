@@ -298,8 +298,11 @@ test('daemon lets an active Task lose one of many outputs but protects its final
       type: 'CreateNode',
       node: {
         id: 'node-source',
-        type: 'text',
-        frame: { x: 20, y: 100, w: 240, h: 160, z: 1 },
+        typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+        parentId: null,
+        orderKey: (1).toString(36).padStart(12, '0'),
+        bounds: { w: 240, h: 160 },
+        transform: { matrix: [1, 0, 0, 1, 20, 100] },
         title: 'Source',
         text: 'Input',
         artifactRefs: [],
@@ -316,8 +319,11 @@ test('daemon lets an active Task lose one of many outputs but protects its final
           type: 'CreateNode',
           node: {
             id: nodeId,
-            type: 'image',
-            frame: { x: 620, y: 100 + index * 220, w: 320, h: 200, z: index + 2 },
+            typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+            parentId: null,
+            orderKey: (index + 2).toString(36).padStart(12, '0'),
+            bounds: { w: 320, h: 200 },
+            transform: { matrix: [1, 0, 0, 1, 620, 100 + index * 220] },
             title: `Output ${index + 1}`,
             artifactRefs: [],
             homeTaskId: 'task-active-output',
@@ -597,7 +603,7 @@ test('pending Run creation and Task mutation reservations are mutually exclusive
     watchArtifacts: async () => ({ close: async () => undefined }),
   })
   const document: CanvasDocument = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     nodes: [],
     tasks: [
       {
@@ -717,7 +723,7 @@ test('failed mutation and failed reserved validation always release the Task lea
     watchArtifacts: async () => ({ close: async () => undefined }),
   })
   const document: CanvasDocument = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     nodes: [],
     tasks: [{
       id: 'task-a',

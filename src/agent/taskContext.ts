@@ -218,7 +218,7 @@ export function compileTaskContext(input: CompileTaskContextInput): TaskContextP
         edge.relation,
         edge.contextRole,
         artifactBudget,
-        policiesByType.get(node.type),
+        policiesByType.get(node.typeRef.id),
       )
     } else {
       built = buildTaskInput(
@@ -251,7 +251,7 @@ export function compileTaskContext(input: CompileTaskContextInput): TaskContextP
       outputSlots: selectedTargetOutputs.map((node) => ({
         ref: { kind: 'node', id: node.id },
         title: node.title,
-        type: node.type,
+        type: node.typeRef.id,
         contentState: nodeHasPersistedContent(node) ? 'present' : 'empty',
       })),
       outputSlotsTruncated: targetOutputCandidates.length > selectedTargetOutputs.length,
@@ -385,7 +385,7 @@ function buildNodeInput(
     ref: { kind: 'node' as const, id: node.id },
     relation,
     title: node.title,
-    type: node.type,
+    type: node.typeRef.id,
   }
   const projected = projectNodeContext({ node, contextRole, policy })
   if (contextRole === 'summary') {
@@ -448,7 +448,7 @@ function buildTaskInput(
     const projected = projectNodeContext({
       node,
       contextRole: 'full',
-      policy: policiesByType.get(node.type),
+      policy: policiesByType.get(node.typeRef.id),
     })
     const selected = selectArtifactRefs(projected.artifactRefs, artifactBudget)
     const bounded = applyArtifactBudgetToNodeContext(projected, selected.refs)
@@ -456,7 +456,7 @@ function buildTaskInput(
     return {
       ref: { kind: 'node', id: node.id },
       title: node.title,
-      type: node.type,
+      type: node.typeRef.id,
       artifactRefs: bounded.artifactRefs,
       artifactRefsTruncated: selected.truncated,
       artifactProjection: bounded.receipt.artifactRefs,
@@ -600,7 +600,7 @@ function graphEntity(
       kind: 'node',
       ref: structuredClone(ref),
       title: node.title,
-      type: node.type,
+      type: node.typeRef.id,
     }
   }
   const task = requireTask(tasksById, ref.id)

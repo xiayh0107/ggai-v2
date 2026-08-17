@@ -34,11 +34,14 @@ import type {
 
 function document(): CanvasDocument {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     nodes: [{
       id: 'node-source',
-      type: 'text',
-      frame: { x: 0, y: 0, w: 320, h: 180, z: 1 },
+      typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (1).toString(36).padStart(12, '0'),
+      bounds: { w: 320, h: 180 },
+      transform: { matrix: [1, 0, 0, 1, 0, 0] },
       title: 'Pinned source',
       text: 'revision-one-source',
       artifactRefs: [],
@@ -409,7 +412,7 @@ test('Task acceptance pins community artifact capabilities for packing and close
         root,
         '.gg',
         'runtime',
-        'plugin-capabilities-v3',
+        'plugin-capabilities',
         `${pluginCapabilities.digest}.json`,
       ), 'utf8')),
       pluginCapabilities,
@@ -559,7 +562,7 @@ test('Task acceptance fails before durable summary when capability pinning is un
     },
   }
   await mkdir(path.join(root, '.gg', 'runtime'), { recursive: true })
-  await symlink(outside, path.join(root, '.gg', 'runtime', 'plugin-capabilities-v3'), 'dir')
+  await symlink(outside, path.join(root, '.gg', 'runtime', 'plugin-capabilities'), 'dir')
   const manager = new RunManager({ projectRoot: root, registry: registry(transport) })
   const input = request('task-run-unsafe-capability-pin')
   input.pluginCapabilities = resolveProjectionPluginCapabilitySnapshot({

@@ -4,7 +4,14 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { applyCanvasCommand } from '@/canvas/commands'
 import { TASK_OUTPUT_LAYOUT, taskOutputFrame } from '@/canvas/layout'
-import { emptyCanvasDocument, type CanvasDocument } from '@/canvas/model'
+import {
+  canvasNodeFrame,
+  canvasNodeGeometry,
+  canvasNodeTypeRef,
+  emptyCanvasDocument,
+  type CanvasDocument,
+  type CanvasFrame,
+} from '@/canvas/model'
 import {
   CanvasPersistence,
   MemoryCanvasPersistenceAdapter,
@@ -24,6 +31,10 @@ const daemonBaseUrl = 'http://127.0.0.1:7380'
 const scope = { projectDir: '/workspace/project', branch: 'main' }
 const planId = `plan_${'a'.repeat(64)}`
 const artifactId = `artifact_${'b'.repeat(64)}`
+
+function nodeShape(type: string, frame: CanvasFrame) {
+  return { typeRef: canvasNodeTypeRef(type), ...canvasNodeGeometry(frame) }
+}
 
 let root: Root | null = null
 let container: HTMLDivElement | null = null
@@ -81,8 +92,7 @@ function fixtureDocument(): CanvasDocument {
   document.nodes.push(
     {
       id: 'node-single',
-      type: 'text',
-      frame: { ...singleFrame, z: 1 },
+      ...nodeShape('text', { ...singleFrame, z: 1 }),
       title: '说明文字',
       text: '这是单产物任务的内容。',
       artifactRefs: [],
@@ -91,8 +101,7 @@ function fixtureDocument(): CanvasDocument {
     },
     {
       id: 'node-image',
-      type: 'image',
-      frame: { ...firstMultiFrame, z: 2 },
+      ...nodeShape('image', { ...firstMultiFrame, z: 2 }),
       title: '结果预览',
       artifactRefs: [{ runId: 'run-multi', artifactId }],
       homeTaskId: 'task-multi',
@@ -106,8 +115,7 @@ function fixtureDocument(): CanvasDocument {
     },
     {
       id: 'node-code',
-      type: 'code',
-      frame: { ...secondMultiFrame, z: 3 },
+      ...nodeShape('code', { ...secondMultiFrame, z: 3 }),
       title: '分析代码',
       text: 'plot(x, y)',
       artifactRefs: [],
@@ -122,8 +130,11 @@ function fixtureDocument(): CanvasDocument {
     },
     {
       id: 'node-top',
-      type: 'pdf',
-      frame: { x: 1040, y: 80, w: 300, h: 180, z: 4 },
+      typeRef: { id: 'pdf', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (4).toString(36).padStart(12, '0'),
+      bounds: { w: 300, h: 180 },
+      transform: { matrix: [1, 0, 0, 1, 1040, 80] },
       title: '独立资料',
       artifactRefs: [],
       origin: { kind: 'user' },
@@ -171,8 +182,11 @@ function collectionFixture(): CanvasDocument {
   document.nodes.push(
     {
       id: 'node-a',
-      type: 'text',
-      frame: { x: 500, y: 120, w: 300, h: 180, z: 1 },
+      typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (1).toString(36).padStart(12, '0'),
+      bounds: { w: 300, h: 180 },
+      transform: { matrix: [1, 0, 0, 1, 500, 120] },
       title: '集合节点',
       text: '顶层集合成员',
       artifactRefs: [],
@@ -181,8 +195,11 @@ function collectionFixture(): CanvasDocument {
     },
     {
       id: 'node-child',
-      type: 'code',
-      frame: { x: 120, y: 300, w: 300, h: 180, z: 2 },
+      typeRef: { id: 'code', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (2).toString(36).padStart(12, '0'),
+      bounds: { w: 300, h: 180 },
+      transform: { matrix: [1, 0, 0, 1, 120, 300] },
       title: '任务内部节点',
       text: 'summary(data)',
       artifactRefs: [],
@@ -229,8 +246,11 @@ function oversizedCollectionMacroFixture(): CanvasDocument {
   for (let index = 0; index < 23; index += 1) {
     document.nodes.push({
       id: `left-${index}`,
-      type: 'text',
-      frame: { x: 60 + index * 8, y: 100 + index * 8, w: 160, h: 90, z: index },
+      typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (index).toString(36).padStart(12, '0'),
+      bounds: { w: 160, h: 90 },
+      transform: { matrix: [1, 0, 0, 1, 60 + index * 8, 100 + index * 8] },
       title: `左 ${index}`,
       artifactRefs: [],
       collectionId: 'collection-left',
@@ -240,8 +260,11 @@ function oversizedCollectionMacroFixture(): CanvasDocument {
   for (let index = 0; index < 22; index += 1) {
     document.nodes.push({
       id: `right-${index}`,
-      type: 'text',
-      frame: { x: 1_140 + index * 8, y: 100 + index * 8, w: 160, h: 90, z: 30 + index },
+      typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (30 + index).toString(36).padStart(12, '0'),
+      bounds: { w: 160, h: 90 },
+      transform: { matrix: [1, 0, 0, 1, 1_140 + index * 8, 100 + index * 8] },
       title: `右 ${index}`,
       artifactRefs: [],
       collectionId: 'collection-right',
@@ -595,7 +618,7 @@ describe('Canvas interactive stage', () => {
     const bottom = top + Number.parseFloat(hull.style.height)
     const right = Number.parseFloat(hull.style.left) + Number.parseFloat(hull.style.width)
     for (const id of ['node-image', 'node-code']) {
-      const frame = canvasDocument.nodes.find((node) => node.id === id)!.frame
+      const frame = canvasNodeFrame(canvasDocument.nodes.find((node) => node.id === id)!)
       expect(bottom).toBeGreaterThanOrEqual(frame.y + frame.h + 14)
       expect(right).toBeGreaterThanOrEqual(frame.x + frame.w + 14)
     }
@@ -603,8 +626,8 @@ describe('Canvas interactive stage', () => {
 
   it('keeps Task output Node z-order in the global canvas stacking context', async () => {
     const canvasDocument = fixtureDocument()
-    canvasDocument.nodes.find((node) => node.id === 'node-image')!.frame.z = 100
-    canvasDocument.nodes.find((node) => node.id === 'node-top')!.frame.z = 1
+    canvasDocument.nodes.find((node) => node.id === 'node-image')!.orderKey = (100).toString(36).padStart(12, '0')
+    canvasDocument.nodes.find((node) => node.id === 'node-top')!.orderKey = (1).toString(36).padStart(12, '0')
     const { host } = await createSubject(undefined, canvasDocument)
     const task = required<HTMLElement>(host, '[data-task-id="task-multi"]')
     const taskOutput = required<HTMLElement>(host, '[data-node-id="node-image"]')
@@ -916,8 +939,7 @@ describe('Canvas interactive stage', () => {
     const task = materializedDocument.tasks.find((entry) => entry.id === 'task-empty')!
     materializedDocument.nodes.push({
       id: 'node-materialized',
-      type: 'text',
-      frame: { ...taskOutputFrame(task.anchor, 0), z: 5 },
+      ...nodeShape('text', { ...taskOutputFrame(task.anchor, 0), z: 5 }),
       title: '新生成的产物',
       text: 'Run settle 后生成',
       artifactRefs: [],
@@ -1124,8 +1146,7 @@ describe('Canvas interactive stage', () => {
     })
     canvasDocument.nodes.push({
       id: 'node-slot',
-      type: 'text',
-      frame: { ...taskOutputFrame({ x: 1040, y: 480 }, 0), z: 5 },
+      ...nodeShape('text', { ...taskOutputFrame({ x: 1040, y: 480 }, 0), z: 5 }),
       title: '等待内容',
       artifactRefs: [],
       homeTaskId: 'task-slot',
@@ -1159,8 +1180,8 @@ describe('Canvas interactive stage', () => {
     expect(group.querySelector('[data-focus-key="task:task-slot"]')).toBeNull()
     const slotDocNode = canvasDocument.nodes.find((node) => node.id === 'node-slot')!
     const slotNode = required<HTMLElement>(group, '[data-node-id="node-slot"]')
-    expect(slotNode.style.left).toBe(`${slotDocNode.frame.x}px`)
-    expect(slotNode.style.top).toBe(`${slotDocNode.frame.y}px`)
+    expect(slotNode.style.left).toBe(`${canvasNodeFrame(slotDocNode).x}px`)
+    expect(slotNode.style.top).toBe(`${canvasNodeFrame(slotDocNode).y}px`)
     const fullBadge = [...group.querySelectorAll('[data-task-status]')]
       .find((element) => element.className.includes('rounded-full'))
     expect(fullBadge).toBeUndefined()
@@ -1269,8 +1290,7 @@ describe('Canvas interactive stage', () => {
       })
       canvasDocument.nodes.push({
         id: 'node-owned-empty',
-        type: 'text',
-        frame: { ...taskOutputFrame({ x: 1040, y: 480 }, 0), z: 5 },
+        ...nodeShape('text', { ...taskOutputFrame({ x: 1040, y: 480 }, 0), z: 5 }),
         title: '等待内容',
         artifactRefs: [],
         homeTaskId: 'task-owned-empty',
@@ -2003,10 +2023,10 @@ describe('Canvas interactive stage', () => {
       expect(store.getSnapshot().document.edges.length).toBe(edgeCountBefore + 1)
     })
     const created = store.getSnapshot().document.nodes.at(-1)!
-    expect(created.type).toBe('text')
+    expect(created.typeRef.id).toBe('text')
     const source = store.getSnapshot().document.nodes
       .find((node) => node.id === 'node-single')!
-    expect(created.frame.x).toBe(source.frame.x + source.frame.w + 56)
+    expect(canvasNodeFrame(created).x).toBe(canvasNodeFrame(source).x + canvasNodeFrame(source).w + 56)
     expect(store.getSnapshot().document.edges.at(-1)).toMatchObject({
       from: { kind: 'node', id: 'node-single' },
       to: { kind: 'node', id: created.id },
@@ -2075,8 +2095,8 @@ describe('Canvas interactive stage', () => {
     })
     const { store, host } = await createSubject(undefined, canvasDocument)
     const target = canvasDocument.nodes.find((node) => node.id === 'node-single')!
-    const expectedX = target.frame.x + target.frame.w
-    const expectedY = target.frame.y + target.frame.h / 2
+    const expectedX = canvasNodeFrame(target).x + canvasNodeFrame(target).w
+    const expectedY = canvasNodeFrame(target).y + canvasNodeFrame(target).h / 2
     const bundle = [...host.querySelectorAll<SVGGElement>('[data-edge-bundle-count]')]
       .find((entry) => entry.getAttribute('aria-label')?.startsWith('引用连接'))
     expect(bundle).not.toBeNull()
@@ -2119,7 +2139,7 @@ describe('Canvas interactive stage', () => {
     })
     const created = store.getSnapshot().document.nodes.at(-1)!
     // 落点（世界坐标 650,380）：新节点居中落在落点，而不是固定挂在某一侧
-    expect(created.frame).toMatchObject({ x: 490, y: 340, w: 320, h: 256 })
+    expect(canvasNodeFrame(created)).toMatchObject({ x: 490, y: 340, w: 320, h: 256 })
     await vi.waitFor(() => {
       expect(store.getSnapshot().document.edges.some((edge) =>
         edge.from.kind === 'node' && edge.from.id === 'node-single'
@@ -2252,16 +2272,22 @@ describe('Canvas interactive stage', () => {
     canvasDocument.nodes.push(
       {
         id: 'node-empty-slot',
-        type: 'text',
-        frame: { x: 1040, y: 320, w: 320, h: 200, z: 5 },
+        typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+        parentId: null,
+        orderKey: (5).toString(36).padStart(12, '0'),
+        bounds: { w: 320, h: 200 },
+        transform: { matrix: [1, 0, 0, 1, 1040, 320] },
         title: '等待内容',
         artifactRefs: [],
         origin: { kind: 'user' },
       },
       {
         id: 'node-empty-image',
-        type: 'image',
-        frame: { x: 1400, y: 320, w: 320, h: 240, z: 6 },
+        typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+        parentId: null,
+        orderKey: (6).toString(36).padStart(12, '0'),
+        bounds: { w: 320, h: 240 },
+        transform: { matrix: [1, 0, 0, 1, 1400, 320] },
         title: '等待图像',
         artifactRefs: [],
         origin: { kind: 'user' },

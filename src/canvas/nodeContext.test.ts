@@ -20,16 +20,22 @@ describe('Canvas Node context read model', () => {
     })
     document.nodes.push({
       id: 'node-source',
-      type: 'text',
-      frame: { x: 0, y: 0, w: 320, h: 180, z: 1 },
+      typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (1).toString(36).padStart(12, '0'),
+      bounds: { w: 320, h: 180 },
+      transform: { matrix: [1, 0, 0, 1, 0, 0] },
       title: 'Source',
       text: 'Input',
       artifactRefs: [],
       origin: { kind: 'user' },
     }, {
       id: 'node-result',
-      type: 'image',
-      frame: { x: 400, y: 0, w: 320, h: 240, z: 2 },
+      typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (2).toString(36).padStart(12, '0'),
+      bounds: { w: 320, h: 240 },
+      transform: { matrix: [1, 0, 0, 1, 400, 0] },
       title: 'Result',
       payload: { caption: 'Visible' },
       artifactRefs: [{

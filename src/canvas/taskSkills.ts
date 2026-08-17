@@ -22,7 +22,7 @@ export function effectiveTaskSkillRefs(
 
   for (const node of document.nodes.filter((candidate) => candidate.homeTaskId === taskId)) {
     const refs = effectiveNodeSkillRefs(
-      defaultsByType.get(node.type) ?? [],
+      defaultsByType.get(node.typeRef.id) ?? [],
       node.skillBindings,
     )
     for (const ref of refs) {

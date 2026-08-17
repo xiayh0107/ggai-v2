@@ -74,7 +74,7 @@ function canvas(branch = 'main') {
     lastMutationId: null,
     lastCheckpoint: commitA,
     document: {
-      schemaVersion: 2 as const,
+      schemaVersion: 3 as const,
       nodes: [],
       tasks: [],
       collections: [],

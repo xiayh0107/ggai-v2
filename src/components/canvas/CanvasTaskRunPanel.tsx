@@ -158,7 +158,7 @@ function CanvasTaskRunPanelContent({
     || preflightState.status === 'blocked'
   const ownedNodes = canvasState.document.nodes.filter((node) => node.homeTaskId === task.id)
   const skillTargetNode = ownedNodes.length === 1 ? ownedNodes[0] : null
-  const outputPlugin = skillTargetNode ? getPlugin(skillTargetNode.type) : null
+  const outputPlugin = skillTargetNode ? getPlugin(skillTargetNode.typeRef.id) : null
   const panelTitle = skillTargetNode
     ? `使用“${skillTargetNode.title}”作为输出槽`
     : '任务提示词'

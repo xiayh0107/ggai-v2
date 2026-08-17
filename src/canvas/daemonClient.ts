@@ -101,7 +101,7 @@ export interface CanvasDaemonClientOptions {
 
 export interface CanvasDaemonCapabilities {
   canvas: true
-  schemaVersion: 2
+  schemaVersion: 3
   initializationRequired: boolean
 }
 
@@ -180,7 +180,7 @@ export class CanvasDaemonClient {
     const initializationRequired = value.canvas.initializationRequired
     if (
       canvas !== true
-      || schemaVersion !== 2
+      || schemaVersion !== 3
       || typeof initializationRequired !== 'boolean'
     ) {
       throw new CanvasProtocolError('Daemon Canvas capabilities are inconsistent')
@@ -392,13 +392,20 @@ export function serializeCanvasCommand(command: CanvasCommand): CanvasCommandWir
     case 'UpdateNodeContent':
     case 'UpdateNodeSkillBindings':
     case 'ResizeNode':
+    case 'SetNodeBounds':
+    case 'SetNodeTransform':
+    case 'ReparentNodes':
+    case 'ReorderChildren':
     case 'DeleteNode':
     case 'DuplicateNode':
     case 'CreateEdge':
+    case 'CreatePortEdge':
     case 'CreateEdges':
     case 'UpdateEdge':
     case 'DeleteEdge':
     case 'DeleteEdges':
+    case 'SelectNodeExecution':
+    case 'BindNodeToFilesystem':
     case 'DetachNodeFromTask':
     case 'AssignNodeToTask':
     case 'CreateTaskForOutputSlot':

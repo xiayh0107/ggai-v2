@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { emptyCanvasDocument } from '../src/canvas/model'
+import { canvasNodeGeometry, canvasNodeTypeRef, emptyCanvasDocument } from '../src/canvas/model'
 import {
   canvasGraph,
   canvasTreeText,
@@ -28,7 +28,7 @@ describe('CLI Canvas inspection', () => {
       nodeId: 'node-1',
       debugLayout: false,
     }, dependencies(document))
-    expect(normal.node).not.toHaveProperty('frame')
+    expect(normal.node).not.toHaveProperty('layout')
     expect(nodeText(normal)).toContain('image/png · 2.0 KiB')
 
     const debug = await inspectNode({
@@ -37,7 +37,7 @@ describe('CLI Canvas inspection', () => {
       nodeId: 'node-1',
       debugLayout: true,
     }, dependencies(document))
-    expect(nodeText(debug)).toContain('frame:   x=160 y=220')
+    expect(nodeText(debug)).toContain('matrix:  [1, 0, 0, 1, 160, 220]')
   })
 })
 
@@ -52,8 +52,8 @@ function fixtureDocument() {
   })
   document.nodes.push({
     id: 'node-1',
-    type: 'text',
-    frame: { x: 160, y: 220, w: 400, h: 256, z: 1 },
+    typeRef: canvasNodeTypeRef('text'),
+    ...canvasNodeGeometry({ x: 160, y: 220, w: 400, h: 256, z: 1 }),
     title: 'Result Node',
     text: 'Hello',
     artifactRefs: [{ runId: 'run-1', artifactId: `artifact_${'a'.repeat(64)}` }],

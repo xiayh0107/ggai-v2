@@ -256,16 +256,14 @@ export const BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT =
     plugins: [],
   })
 
-/** Content-addressed v3 snapshots plus read-only recovery access to historical v2. */
+/** Content-addressed current snapshots. */
 export class ProjectionPluginCapabilityStore {
   readonly projectDir: string
   readonly rootDir: string
-  readonly legacyRootDir: string
 
   constructor(projectDir: string) {
     this.projectDir = path.resolve(projectDir)
-    this.rootDir = path.join(this.projectDir, '.gg', 'runtime', 'plugin-capabilities-v3')
-    this.legacyRootDir = path.join(this.projectDir, '.gg', 'runtime', 'plugin-capabilities-v2')
+    this.rootDir = path.join(this.projectDir, '.gg', 'runtime', 'plugin-capabilities')
   }
 
   async register(
@@ -290,7 +288,7 @@ export class ProjectionPluginCapabilityStore {
   async #persist(
     snapshot: ProjectionPluginCapabilitySnapshot,
   ): Promise<ProjectionPluginCapabilitySnapshot> {
-    await this.#assertSafeRoot(this.rootDir, 'plugin-capabilities-v3', true)
+    await this.#assertSafeRoot(this.rootDir, 'plugin-capabilities', true)
     const target = this.#snapshotPath(this.rootDir, snapshot.digest)
     const existing = await this.get(snapshot.digest)
     if (existing) return existing
@@ -319,30 +317,20 @@ export class ProjectionPluginCapabilityStore {
   async get(digest: string): Promise<ProjectionPluginCapabilitySnapshot | null> {
     return this.#readSnapshot(
       this.rootDir,
-      'plugin-capabilities-v3',
+      'plugin-capabilities',
       digest,
       inspectProjectionPluginCapabilitySnapshot,
     )
   }
 
-  /** Crash recovery may read v3 or historical v2, but never live registries. */
+  /** Crash recovery revalidates the same current snapshot format. */
   async recover(
     digest: string | undefined,
   ): Promise<RecoverableProjectionPluginCapabilitySnapshot> {
     if (!digest) return structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT)
     try {
-      const current = await this.get(digest)
-      if (current) return current
-    } catch {
-      // A damaged v3 file cannot grant authority; a distinct legacy digest may still be valid.
-    }
-    try {
-      return await this.#readSnapshot(
-        this.legacyRootDir,
-        'plugin-capabilities-v2',
-        digest,
-        inspectLegacyProjectionPluginCapabilitySnapshot,
-      ) ?? structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT)
+      return await this.get(digest)
+        ?? structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT)
     } catch {
       return structuredClone(BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT)
     }

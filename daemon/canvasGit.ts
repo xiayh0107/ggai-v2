@@ -187,7 +187,7 @@ interface MergeMetadata {
 
 /**
  * Canvas history owns a repository and linked worktrees that are
- * physically disjoint from the legacy Canvas Git store.
+ * physically isolated from user source Git.
  */
 export class CanvasGitStore {
   readonly projectDir: string
@@ -205,8 +205,8 @@ export class CanvasGitStore {
       throw new TypeError('projectDir must be a non-empty string')
     }
     this.projectDir = resolve(projectDir)
-    this.repoDir = resolve(this.projectDir, '.gg', 'canvas-state-v2')
-    this.worktreesDir = resolve(this.projectDir, '.gg', 'canvas-worktrees-v2')
+    this.repoDir = resolve(this.projectDir, '.gg', 'canvas')
+    this.worktreesDir = resolve(this.projectDir, '.gg', 'canvas-worktrees')
     this.#gitBinary = options.gitBinary ?? 'git'
     this.#uuid = options.uuid ?? randomUUID
     this.#gitTimeoutMs = options.gitTimeoutMs ?? DEFAULT_GIT_TIMEOUT_MS

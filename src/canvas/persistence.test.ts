@@ -34,7 +34,7 @@ function persistence(adapter = new MemoryCanvasPersistenceAdapter()) {
 }
 
 describe('Canvas browser persistence', () => {
-  it('opens a newer compatible IndexedDB without requesting a downgrade', async () => {
+  it('opens the single v3 IndexedDB contract explicitly', async () => {
     const request = new EventTarget() as IDBOpenDBRequest
     const database = new EventTarget() as IDBDatabase
     Object.defineProperties(request, {
@@ -42,16 +42,14 @@ describe('Canvas browser persistence', () => {
       error: { value: null },
     })
     const open = vi.fn(function (_name: string, version?: number) {
-      if (version !== undefined) {
-        throw new Error(`requested version ${version} is older than the existing version 2`)
-      }
+      expect(version).toBe(3)
       queueMicrotask(() => request.dispatchEvent(new Event('success')))
       return request
     })
 
     await expect(openCanvasPersistenceDatabase({ open } as unknown as IDBFactory))
       .resolves.toBe(database)
-    expect(open).toHaveBeenCalledWith('ggai-canvas-v2')
+    expect(open).toHaveBeenCalledWith('ggai-canvas', 3)
   })
 
   it('creates the current stores when IndexedDB is first initialized', async () => {
@@ -231,7 +229,7 @@ describe('Canvas browser persistence', () => {
     expect(entries.map((entry) => entry.baseRevision)).toEqual([1, 1])
   })
 
-  it('decodes legacy outbox records with their base as the immutable initial base', async () => {
+  it('rejects pre-v3 outbox records without an immutable initial base', async () => {
     const adapter = new MemoryCanvasPersistenceAdapter()
     const subject = persistence(adapter)
     const scopeKey = JSON.stringify([main.daemonBaseUrl, main.projectDir, main.branch])
@@ -247,13 +245,6 @@ describe('Canvas browser persistence', () => {
       },
     })
 
-    await expect(subject.list(main)).resolves.toEqual([{
-      branch: 'main',
-      baseRevision: 6,
-      initialBaseRevision: 6,
-      mutationId: 'legacy-mutation',
-      command: { type: 'move-task', taskId: 'task-1', dx: 4 },
-      createdAt: 99,
-    }])
+    await expect(subject.list(main)).resolves.toEqual([])
   })
 })

@@ -11,7 +11,7 @@ import {
 import type { KeyboardEvent, PointerEvent } from 'react'
 import { TASK_CHROME_LAYOUT } from '@/canvas/layout'
 import { nodeHasVisibleContent } from '@/canvas/contextComposer'
-import type { CanvasNode, CanvasTask } from '@/canvas/model'
+import { canvasNodeFrame, type CanvasNode, type CanvasTask } from '@/canvas/model'
 import {
   taskChromeFrame,
   taskPrimaryOutputFrame,
@@ -395,7 +395,7 @@ function taskRunPanelPosition(
   const chrome = taskChromeFrame(view.task, view.nodes, view.ghosts, view.presentation)
   const primary = taskPrimaryOutputFrame(view.nodes, view.ghosts)
   const outputFrames = [
-    ...view.nodes.map((node) => node.frame),
+    ...view.nodes.map((node) => canvasNodeFrame(node)),
     ...view.ghosts.map((ghost) => ghost.frame),
   ]
   const anchor = primary ?? chrome
@@ -570,7 +570,7 @@ function TaskSummary({
   artifactCount: number
 }) {
   const previews = [
-    ...nodes.slice(0, 3).map((node) => ({ key: node.id, type: node.type, pending: false })),
+    ...nodes.slice(0, 3).map((node) => ({ key: node.id, type: node.typeRef.id, pending: false })),
     ...ghosts.slice(0, Math.max(0, 3 - nodes.length)).map((ghost) => ({
       key: ghost.key,
       type: ghost.pluginId ?? 'file',

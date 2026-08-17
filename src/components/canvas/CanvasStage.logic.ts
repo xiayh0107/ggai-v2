@@ -1,11 +1,11 @@
 import type { CanvasCommand } from '@/canvas/commands'
 import { canonicalizeCanvasSelection, selectionKey } from '@/canvas/interaction'
 import { COLLECTION_CHROME_LAYOUT } from '@/canvas/layout'
-import type {
-  CanvasDocument,
-  CanvasEntityRef,
-  CanvasNode,
-  CanvasPoint,
+import {
+  type CanvasDocument,
+  type CanvasEntityRef,
+  type CanvasFrame,
+  type CanvasPoint,
 } from '@/canvas/model'
 import type { CanvasSelectionTarget } from '@/canvas/persistence'
 import type { CanvasStoreState } from '@/canvas/store'
@@ -134,7 +134,7 @@ export function portCreatedNodeFrame(
   source: CanvasBounds,
   side: CanvasConnectionPortSide,
   width: number,
-): CanvasNode['frame'] {
+): CanvasFrame {
   const gap = 56
   const height = 256
   const centerX = Math.round(source.x + source.w / 2 - width / 2)

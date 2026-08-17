@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { lstat, mkdir, open, realpath } from 'node:fs/promises'
+import { lstat, mkdir, open, realpath, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import {
   CUSTOM_NODE_MANIFEST_SCHEMA_VERSION,
@@ -111,6 +111,10 @@ export class NodeDefinitionCatalog {
     } catch (error) {
       throw new TypeError('node definition catalog is invalid JSON', { cause: error })
     }
+    if (isRecord(parsed) && parsed.schemaVersion === 1 && Array.isArray(parsed.definitions)) {
+      await unlinkCurrentCatalog(this.filePath)
+      return { schemaVersion: CATALOG_SCHEMA_VERSION, definitions: [] }
+    }
     if (!isRecord(parsed)
       || parsed.schemaVersion !== CATALOG_SCHEMA_VERSION
       || !Array.isArray(parsed.definitions)
@@ -164,6 +168,14 @@ export class NodeDefinitionCatalog {
     this.#operationTail = result.then(() => undefined, () => undefined)
     return result
   }
+}
+
+async function unlinkCurrentCatalog(filePath: string): Promise<void> {
+  const info = await lstat(filePath)
+  if (!info.isFile() || info.isSymbolicLink()) {
+    throw new TypeError('old node definition catalog is not a safe regular file')
+  }
+  await unlink(filePath)
 }
 
 function parseManifest(input: unknown): CustomNodeManifest {
