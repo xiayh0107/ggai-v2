@@ -76,6 +76,7 @@ describe('CanvasEdgeLayer drag preview', () => {
           taskViewsById={new Map([['task-plot', taskView!]])}
           collectionViewsById={new Map()}
           collapsedCollectionIds={new Set()}
+          taskIdsWithoutTopChrome={new Set()}
           preview={preview}
           nodeFrames={new Map()}
           onDeleteEdges={() => undefined}
@@ -93,5 +94,61 @@ describe('CanvasEdgeLayer drag preview', () => {
 
     expect(restingPath).toBe('M 200 140 C 305 140, 395 140, 500 140')
     expect(previewPath).toBe('M 240 160 C 331 160, 409 140, 500 140')
+  })
+
+  it('announces agent-only connections as read-only and ignores delete keys', () => {
+    const canvasDocument = emptyCanvasDocument()
+    canvasDocument.nodes.push(
+      {
+        id: 'node-source',
+        type: 'text',
+        frame: { x: 100, y: 100, w: 100, h: 80, z: 1 },
+        title: 'Source',
+        artifactRefs: [],
+        origin: { kind: 'user' },
+      },
+      {
+        id: 'node-target',
+        type: 'text',
+        frame: { x: 500, y: 100, w: 100, h: 80, z: 2 },
+        title: 'Target',
+        artifactRefs: [],
+        origin: { kind: 'user' },
+      },
+    )
+    canvasDocument.edges.push({
+      id: 'edge-agent',
+      from: { kind: 'node', id: 'node-source' },
+      to: { kind: 'node', id: 'node-target' },
+      relation: 'references',
+      contextRole: 'summary',
+      origin: { kind: 'agent', runId: 'run-1', planId: 'plan-1' },
+    })
+    const deleted: string[][] = []
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    act(() => root?.render(
+      <CanvasEdgeLayer
+        document={canvasDocument}
+        taskViewsById={new Map()}
+        collectionViewsById={new Map()}
+        collapsedCollectionIds={new Set()}
+        taskIdsWithoutTopChrome={new Set()}
+        preview={null}
+        nodeFrames={new Map()}
+        onDeleteEdges={(edgeIds) => deleted.push(edgeIds)}
+      />,
+    ))
+
+    const bundle = container.querySelector<SVGGElement>('[data-edge-bundle-count]')
+    expect(bundle?.getAttribute('role')).toBe('group')
+    expect(bundle?.getAttribute('aria-label')).toContain('Agent 创建的连接，只读')
+    act(() => bundle?.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Delete',
+      bubbles: true,
+      cancelable: true,
+    })))
+    expect(deleted).toEqual([])
   })
 })

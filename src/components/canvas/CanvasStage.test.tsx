@@ -2033,7 +2033,7 @@ describe('Canvas interactive stage', () => {
     expect(host.querySelector('[aria-label="节点专属快捷指令"]')).toBeNull()
   })
 
-  it('hides edges between a chromeless task strip and its only node', async () => {
+  it('keeps internal Task-to-Node edges hidden while a chromeless Task is selected', async () => {
     const canvasDocument = fixtureDocument()
     canvasDocument.edges.push(
       {
@@ -2058,7 +2058,8 @@ describe('Canvas interactive stage', () => {
     expect(host.querySelectorAll('[data-edge-bundle-count]')).toHaveLength(1)
 
     act(() => store.setSelection([{ kind: 'task', id: 'task-single' }]))
-    expect(host.querySelectorAll('[data-edge-bundle-count]')).toHaveLength(2)
+    expect(host.querySelector('[data-task-id="task-single"] [data-task-border]')).toBeNull()
+    expect(host.querySelectorAll('[data-edge-bundle-count]')).toHaveLength(1)
   })
 
   it('routes an edge targeting a chromeless Task to its visible output Node', async () => {
@@ -2071,7 +2072,7 @@ describe('Canvas interactive stage', () => {
       contextRole: 'full',
       origin: { kind: 'user' },
     })
-    const { host } = await createSubject(undefined, canvasDocument)
+    const { store, host } = await createSubject(undefined, canvasDocument)
     const target = canvasDocument.nodes.find((node) => node.id === 'node-single')!
     const expectedX = target.frame.x + target.frame.w
     const expectedY = target.frame.y + target.frame.h / 2
@@ -2082,6 +2083,13 @@ describe('Canvas interactive stage', () => {
     expect(visiblePath?.getAttribute('d')).toMatch(
       new RegExp(`, ${expectedX} ${expectedY}$`),
     )
+
+    act(() => store.setSelection([{ kind: 'task', id: 'task-single' }]))
+    expect(host.querySelector('[data-task-id="task-single"] [data-task-border]')).toBeNull()
+    const selectedBundle = [...host.querySelectorAll<SVGGElement>('[data-edge-bundle-count]')]
+      .find((entry) => entry.getAttribute('aria-label')?.startsWith('引用连接'))
+    expect(selectedBundle?.querySelector('path:not([stroke="transparent"])')
+      ?.getAttribute('d')).toMatch(new RegExp(`, ${expectedX} ${expectedY}$`))
   })
 
   it('opens the creation menu at the drop point when a wire is dragged to blank canvas', async () => {
@@ -2117,6 +2125,25 @@ describe('Canvas interactive stage', () => {
         && edge.to.kind === 'node' && edge.to.id === created.id)).toBe(true)
     })
     expect(host.querySelector('[data-create-node-menu]')).toBeNull()
+  })
+
+  it('cleans up a cancelled wire drag and allows the next drag to start', async () => {
+    const { store, host } = await createSubject({ camera: { x: 0, y: 0, zoom: 1 } })
+    act(() => store.setSelection([{ kind: 'node', id: 'node-single' }]))
+    const port = required<HTMLButtonElement>(host, '[data-selection-port="right"]')
+
+    act(() => dispatchPointer(port, 'pointerdown', { clientX: 600, clientY: 200 }))
+    act(() => dispatchPointer(window, 'pointermove', { clientX: 640, clientY: 240 }))
+    expect(host.querySelector('path[stroke-dasharray="5 4"]')).not.toBeNull()
+
+    act(() => dispatchPointer(window, 'pointercancel', { clientX: 640, clientY: 240 }))
+    expect(host.querySelector('path[stroke-dasharray="5 4"]')).toBeNull()
+
+    act(() => dispatchPointer(port, 'pointerdown', { clientX: 600, clientY: 200 }))
+    act(() => dispatchPointer(window, 'pointermove', { clientX: 650, clientY: 260 }))
+    expect(host.querySelector('path[stroke-dasharray="5 4"]')).not.toBeNull()
+    act(() => dispatchPointer(window, 'pointercancel', { clientX: 650, clientY: 260 }))
+    expect(host.querySelector('path[stroke-dasharray="5 4"]')).toBeNull()
   })
 
   it('opens the creation menu and connects every member when a compound wire is dropped on blank canvas', async () => {

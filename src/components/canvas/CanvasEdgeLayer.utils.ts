@@ -11,6 +11,7 @@ import {
   type CanvasTaskView,
 } from '@/canvas/selectors'
 import type { CanvasEdgeEndpoint } from './CanvasEdgeLayer'
+import type { CanvasConnectionPortSide } from './CanvasConnectionPort'
 
 export function relationLabel(relation: CanvasEdgeRelation): string {
   const labels: Record<CanvasEdgeRelation, string> = {
@@ -95,6 +96,42 @@ export function edgeCurvePath(fromBounds: CanvasBounds, toBounds: CanvasBounds) 
     : `M ${from.x} ${from.y} C ${from.x} ${from.y + curve * direction}, ${to.x} ${to.y - curve * direction}, ${to.x} ${to.y}`
   const reversed = axis === 'horizontal' ? to.x < from.x : to.y < from.y
   return { from, to, axis, path, reversed }
+}
+
+/** Keeps a draft wire attached to the spatial port where the pointer left. */
+export function edgeDraftCurvePath(
+  fromBounds: CanvasBounds,
+  toBounds: CanvasBounds,
+  fromSide?: CanvasConnectionPortSide,
+) {
+  if (!fromSide) return edgeCurvePath(fromBounds, toBounds)
+  const from = edgePointForSide(fromBounds, fromSide)
+  const to = { x: toBounds.x + toBounds.w / 2, y: toBounds.y + toBounds.h / 2 }
+  const axis = fromSide === 'left' || fromSide === 'right'
+    ? 'horizontal' as const
+    : 'vertical' as const
+  const sourceDirection = fromSide === 'right' || fromSide === 'bottom' ? 1 : -1
+  const targetDirection = axis === 'horizontal'
+    ? Math.sign(to.x - from.x) || sourceDirection
+    : Math.sign(to.y - from.y) || sourceDirection
+  const distance = axis === 'horizontal'
+    ? Math.abs(to.x - from.x)
+    : Math.abs(to.y - from.y)
+  const curve = Math.max(48, distance * 0.35)
+  const path = axis === 'horizontal'
+    ? `M ${from.x} ${from.y} C ${from.x + curve * sourceDirection} ${from.y}, ${to.x - curve * targetDirection} ${to.y}, ${to.x} ${to.y}`
+    : `M ${from.x} ${from.y} C ${from.x} ${from.y + curve * sourceDirection}, ${to.x} ${to.y - curve * targetDirection}, ${to.x} ${to.y}`
+  const reversed = axis === 'horizontal' ? to.x < from.x : to.y < from.y
+  return { from, to, axis, path, reversed }
+}
+
+function edgePointForSide(bounds: CanvasBounds, side: CanvasConnectionPortSide) {
+  switch (side) {
+    case 'top': return { x: bounds.x + bounds.w / 2, y: bounds.y }
+    case 'right': return { x: bounds.x + bounds.w, y: bounds.y + bounds.h / 2 }
+    case 'bottom': return { x: bounds.x + bounds.w / 2, y: bounds.y + bounds.h }
+    case 'left': return { x: bounds.x, y: bounds.y + bounds.h / 2 }
+  }
 }
 
 function edgeBoundaryPoints(from: CanvasBounds, to: CanvasBounds) {

@@ -43,7 +43,7 @@ export default function CanvasEdgeLayer({
   taskViewsById,
   collectionViewsById,
   collapsedCollectionIds,
-  chromelessTaskIds,
+  taskIdsWithoutTopChrome,
   preview,
   nodeFrames,
   onDeleteEdges,
@@ -52,19 +52,19 @@ export default function CanvasEdgeLayer({
   taskViewsById: ReadonlyMap<string, CanvasTaskView>
   collectionViewsById: ReadonlyMap<string, CanvasEdgeCollectionView>
   collapsedCollectionIds: ReadonlySet<string>
-  /** 标题条被隐藏的单产物任务：任务与其唯一节点之间的边不再绘制（避免悬空线头）。 */
-  chromelessTaskIds?: ReadonlySet<string>
+  /** 没有可见顶部 chrome 的任务：边改落到其首个可见输出 Node。 */
+  taskIdsWithoutTopChrome?: ReadonlySet<string>
   preview: CanvasEdgePreview
   nodeFrames: ReadonlyMap<string, CanvasBounds>
   onDeleteEdges: (edgeIds: string[]) => void
 }) {
   const taskById = new Map(document.tasks.map((task) => [task.id, task]))
   const nodeById = new Map(document.nodes.map((node) => [node.id, node]))
-  const isChromelessTaskPair = (a: CanvasEntityRef, b: CanvasEntityRef): boolean => {
-    if (!chromelessTaskIds || chromelessTaskIds.size === 0) return false
+  const isHiddenTaskChromePair = (a: CanvasEntityRef, b: CanvasEntityRef): boolean => {
+    if (!taskIdsWithoutTopChrome || taskIdsWithoutTopChrome.size === 0) return false
     const taskRef = a.kind === 'task' ? a : b.kind === 'task' ? b : null
     const nodeRef = a.kind === 'node' ? a : b.kind === 'node' ? b : null
-    if (!taskRef || !nodeRef || !chromelessTaskIds.has(taskRef.id)) return false
+    if (!taskRef || !nodeRef || !taskIdsWithoutTopChrome.has(taskRef.id)) return false
     return nodeById.get(nodeRef.id)?.homeTaskId === taskRef.id
   }
   const visualRef = (ref: CanvasEntityRef): CanvasEdgeEndpoint => {
@@ -72,7 +72,7 @@ export default function CanvasEdgeLayer({
     // Task must terminate on its visible output Node; otherwise the geometry
     // points at the hidden strip above the Node and the wire appears to float
     // or loop back through the card.
-    if (ref.kind === 'task' && chromelessTaskIds?.has(ref.id)) {
+    if (ref.kind === 'task' && taskIdsWithoutTopChrome?.has(ref.id)) {
       const primaryNode = taskViewsById.get(ref.id)?.nodes[0]
       if (primaryNode) return { kind: 'node', id: primaryNode.id }
     }
@@ -100,10 +100,10 @@ export default function CanvasEdgeLayer({
     relation: CanvasEdgeRelation
     contextRole: CanvasEdgeContextRole
     edgeIds: string[]
-    agentAuthored: boolean
+    userEdgeIds: string[]
   }>()
   for (const edge of document.edges) {
-    if (isChromelessTaskPair(edge.from, edge.to)) continue
+    if (isHiddenTaskChromePair(edge.from, edge.to)) continue
     const from = visualRef(edge.from)
     const to = visualRef(edge.to)
     if (visualEntityKey(from) === visualEntityKey(to)) continue
@@ -116,7 +116,7 @@ export default function CanvasEdgeLayer({
     const current = bundles.get(key)
     if (current) {
       current.edgeIds.push(edge.id)
-      current.agentAuthored = current.agentAuthored && edge.origin.kind === 'agent'
+      if (edge.origin.kind === 'user') current.userEdgeIds.push(edge.id)
     } else {
       bundles.set(key, {
         from,
@@ -124,7 +124,7 @@ export default function CanvasEdgeLayer({
         relation: edge.relation,
         contextRole: edge.contextRole,
         edgeIds: [edge.id],
-        agentAuthored: edge.origin.kind === 'agent',
+        userEdgeIds: edge.origin.kind === 'user' ? [edge.id] : [],
       })
     }
   }
@@ -205,18 +205,21 @@ export default function CanvasEdgeLayer({
         // Short edges (e.g. a Task strip to its own output) keep their
         // semantics in the tooltip and aria-label instead of cramped text.
         const showLabel = length >= EDGE_LABEL_MIN_LENGTH
+        const deletable = bundle.userEdgeIds.length > 0
         return (
           <g
             key={`${pathId}:${bundle.edgeIds.join(':')}`}
-            role="button"
+            role="group"
             tabIndex={0}
-            aria-label={`${label}。按 Delete 删除用户连接`}
+            aria-label={deletable
+              ? `${label}。按 Delete 删除用户连接`
+              : `${label}。Agent 创建的连接，只读`}
             data-edge-bundle-count={bundle.edgeIds.length}
-            className="pointer-events-auto outline-none"
+            className="pointer-events-auto outline-none focus-visible:drop-shadow-[0_0_2px_#1769E0]"
             onKeyDown={(event) => {
-              if (event.key !== 'Delete' && event.key !== 'Backspace') return
+              if (!deletable || (event.key !== 'Delete' && event.key !== 'Backspace')) return
               event.preventDefault()
-              onDeleteEdges(bundle.edgeIds)
+              onDeleteEdges(bundle.userEdgeIds)
             }}
           >
             <title>{label}</title>
@@ -231,7 +234,7 @@ export default function CanvasEdgeLayer({
             <path
               d={path}
               fill="none"
-              stroke={bundle.agentAuthored ? '#A7B8CE' : '#7DA7E8'}
+              stroke={deletable ? '#7DA7E8' : '#A7B8CE'}
               strokeWidth={bundle.edgeIds.length > 1 ? 2.4 : 1.4}
               strokeDasharray={bundle.contextRole === 'none' ? '4 4' : undefined}
               vectorEffect="non-scaling-stroke"
