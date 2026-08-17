@@ -23,6 +23,28 @@ describe('gg CLI foundation', () => {
     expect(new URL(String(fetch.mock.calls[0]?.[0])).pathname).toBe('/health')
   })
 
+  it('invokes daemon bootstrap unless explicitly disabled', async () => {
+    const output = io()
+    const ensureDaemon = vi.fn(async () => undefined)
+    const fetch = vi.fn(async () => json({
+      status: 'ok',
+      capabilities: { canvas: true },
+      canvas: { schemaVersion: 2 },
+      projectRoot: '/workspace',
+    }))
+    await runCli(['doctor'], { io: output, fetch, environment: {}, ensureDaemon })
+    expect(ensureDaemon).toHaveBeenCalledOnce()
+
+    ensureDaemon.mockClear()
+    await runCli(['--no-start-daemon', 'doctor'], {
+      io: output,
+      fetch,
+      environment: {},
+      ensureDaemon,
+    })
+    expect(ensureDaemon).not.toHaveBeenCalled()
+  })
+
   it('emits stable JSON for project list', async () => {
     const output = io()
     const project = fixtureProject()

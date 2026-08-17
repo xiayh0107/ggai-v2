@@ -40,7 +40,7 @@ src/
 ```
 
 ```text
-cli/                 # `gg` headless shell; daemon HTTP only, no CanvasStore or direct .gg access
+cli/                 # `ggai` headless shell; daemon HTTP only, no CanvasStore or direct .gg access
 ```
 
 ```

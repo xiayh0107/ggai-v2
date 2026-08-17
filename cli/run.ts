@@ -155,7 +155,7 @@ async function startAcceptedTask(
       if (event.type === 'permission-request') {
         permissionResolutions.push(dependencies.runs.resolvePermission(event.id, {
           decision: request.permissionDecision,
-          reason: `gg CLI explicit permission policy: ${request.permissionDecision}`,
+          reason: `ggai CLI explicit permission policy: ${request.permissionDecision}`,
         }))
       }
     },
