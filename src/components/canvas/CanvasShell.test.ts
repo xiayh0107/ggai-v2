@@ -4,13 +4,16 @@ import { createRoot } from 'react-dom/client'
 import { MemoryRouter } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { CanvasContext } from '@/canvas/hooks'
+import type { CanvasEnvelope } from '@/canvas/daemonClient'
 import { emptyCanvasDocument } from '@/canvas/model'
 import { CanvasPersistence, MemoryCanvasPersistenceAdapter } from '@/canvas/persistence'
 import { CanvasStore } from '@/canvas/store'
 import { generatedContentHref } from '@/resources/resourceRoutes'
 import CanvasShell, { type CanvasShellProps } from './CanvasShell'
 
-vi.mock('./CanvasStage', () => ({ default: () => null }))
+vi.mock('./CanvasStage', () => ({
+  default: () => createElement('div', { 'data-testid': 'mock-canvas-stage' }),
+}))
 
 const Shell = CanvasShell as ComponentType<CanvasShellProps>
 
@@ -24,6 +27,14 @@ class FailingOncePersistenceAdapter extends MemoryCanvasPersistenceAdapter {
     }
     return super.readView(scopeKey)
   }
+}
+
+function deferred<Value>() {
+  let resolve!: (value: Value | PromiseLike<Value>) => void
+  const promise = new Promise<Value>((resolvePromise) => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
 }
 
 describe('CanvasShell resource navigation', () => {
@@ -150,6 +161,68 @@ describe('CanvasShell resource navigation', () => {
 
     expect(host.querySelector('[role="alert"]')).toBeNull()
     expect(host.textContent).toContain('恢复后的项目')
+
+    act(() => root.unmount())
+    host.remove()
+    store.dispose()
+  })
+
+  it('keeps the Stage mounted during a background Canvas refresh', async () => {
+    const pending = deferred<CanvasEnvelope>()
+    let reads = 0
+    const store = new CanvasStore({
+      daemonBaseUrl: 'http://127.0.0.1:7380',
+      scope: { projectDir: '/workspace/project', branch: 'main' },
+      persistence: new CanvasPersistence({
+        adapter: new MemoryCanvasPersistenceAdapter(),
+      }),
+      client: {
+        getCanvas: async () => {
+          reads += 1
+          if (reads > 1) return pending.promise
+          return {
+            branch: 'main',
+            revision: 1,
+            updatedAt: '2026-08-10T00:00:00.000Z',
+            lastMutationId: null,
+            document: emptyCanvasDocument(),
+          }
+        },
+        flushOutbox: async () => ({ status: 'flushed', acknowledged: 0, envelope: null }),
+      },
+    })
+    await store.load()
+
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    act(() => root.render(createElement(
+      MemoryRouter,
+      null,
+      createElement(
+        CanvasContext.Provider,
+        { value: store },
+        createElement(Shell, { projectTitle: '刷新中的项目' }),
+      ),
+    )))
+
+    let refresh!: Promise<void>
+    act(() => {
+      refresh = store.reload()
+    })
+    await vi.waitFor(() => expect(store.getSnapshot().refresh.status).toBe('refreshing'))
+    expect(host.querySelector('[data-testid="mock-canvas-stage"]')).not.toBeNull()
+    expect(host.textContent).not.toContain('正在打开画布')
+
+    pending.resolve({
+      branch: 'main',
+      revision: 2,
+      updatedAt: '2026-08-10T00:00:01.000Z',
+      lastMutationId: null,
+      document: emptyCanvasDocument(),
+    })
+    await act(async () => refresh)
+    expect(host.querySelector('[data-testid="mock-canvas-stage"]')).not.toBeNull()
 
     act(() => root.unmount())
     host.remove()

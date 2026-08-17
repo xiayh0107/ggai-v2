@@ -148,7 +148,12 @@ export class CanvasTaskRunLifecycle {
     const scopeKey = JSON.stringify([canvas.scope.projectDir, canvas.scope.branch])
     const existing = this.#recoveryByScope.get(scopeKey)
     if (existing) return existing
-    const operation = this.#recover(scopeKey)
+    const recovery = this.#recover(scopeKey)
+    const operation: Promise<void> = recovery.then((succeeded) => {
+      if (!succeeded && this.#recoveryByScope.get(scopeKey) === operation) {
+        this.#recoveryByScope.delete(scopeKey)
+      }
+    })
     this.#recoveryByScope.set(scopeKey, operation)
     return operation
   }
@@ -255,11 +260,13 @@ export class CanvasTaskRunLifecycle {
     this.#listeners.clear()
   }
 
-  async #recover(scopeKey: string): Promise<void> {
+  async #recover(scopeKey: string): Promise<boolean> {
     this.#setSnapshot({ ...this.#snapshot, recovering: true })
+    let succeeded = false
     try {
       const handles = await this.#controller.recoverAll()
       for (const handle of handles) this.#observeHandle(handle)
+      succeeded = true
     } catch (error) {
       if (!this.#disposed && !isAbortError(error)) this.#recordError('recover', error)
     } finally {
@@ -267,12 +274,15 @@ export class CanvasTaskRunLifecycle {
         this.#setSnapshot({
           ...this.#snapshot,
           recovering: false,
-          recoveredScopeKeys: this.#snapshot.recoveredScopeKeys.includes(scopeKey)
+          recoveredScopeKeys: !succeeded
+            ? this.#snapshot.recoveredScopeKeys
+            : this.#snapshot.recoveredScopeKeys.includes(scopeKey)
             ? this.#snapshot.recoveredScopeKeys
             : [...this.#snapshot.recoveredScopeKeys, scopeKey],
         })
       }
     }
+    return succeeded
   }
 
   #observeHandle(handle: CanvasTaskRunHandle): void {

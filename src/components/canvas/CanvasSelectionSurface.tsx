@@ -3,7 +3,6 @@ import {
   Copy,
   FolderPlus,
   MessageSquareText,
-  Plus,
   Trash2,
   X,
 } from 'lucide-react'
@@ -11,12 +10,13 @@ import type { PointerEvent as ReactPointerEvent } from 'react'
 import type { CanvasCameraState } from '@/canvas/persistence'
 import type { CanvasBounds } from '@/canvas/selectors'
 import type { NodeMark } from '@/plugins/types'
+import CanvasConnectionPort, {
+  type CanvasConnectionPortSide,
+} from './CanvasConnectionPort'
 import CanvasNodeShell from './CanvasNodeShell'
 
-export type CanvasSelectionPortSide = 'top' | 'right' | 'bottom' | 'left'
-
 const PORTS: Array<{
-  side: CanvasSelectionPortSide
+  side: CanvasConnectionPortSide
   label: string
   className: string
 }> = [
@@ -56,34 +56,25 @@ export function CanvasSelectionWorldSurface({
   /** Task 仍持有选中输出时保留选择轮廓，但不暴露结构连接入口。 */
   showPorts?: boolean
   count: number
-  activePortSide: CanvasSelectionPortSide | null
-  onPortActivate: (side: CanvasSelectionPortSide) => void
+  activePortSide: CanvasConnectionPortSide | null
+  onPortActivate: (side: CanvasConnectionPortSide) => void
   /** 按住端口拖出一根线：落到实体上完成连接，落到空白弹新建节点菜单。 */
   onPortDragStart?: (
-    side: CanvasSelectionPortSide,
+    side: CanvasConnectionPortSide,
     event: ReactPointerEvent<HTMLButtonElement>,
   ) => void
 }) {
   const ports = showPorts && PORTS.map(({ side, label, className }) => (
-    <button
+    <CanvasConnectionPort
       key={side}
-      type="button"
-      aria-label={`${label}${compound ? '组合节点' : '所选节点'}端口`}
-      aria-pressed={activePortSide === side}
+      label={`${label}${compound ? '组合节点' : '所选节点'}端口`}
       title={compound ? '连接全部选中项' : '从节点新建节点'}
-      data-selection-port={side}
-      data-no-drag
-      onPointerDown={(event) => {
-        event.stopPropagation()
-        onPortDragStart?.(side, event)
-      }}
-      onClick={() => onPortActivate(side)}
-      className={`pointer-events-auto absolute z-30 flex h-[18px] w-[18px] items-center justify-center rounded-full border-[1.5px] border-gg-select bg-white text-gg-select outline-none hover:scale-110 hover:bg-[#EAF1FD] focus-visible:ring-2 focus-visible:ring-gg-primary/40 motion-reduce:transform-none ${className} ${
-        activePortSide === side ? 'bg-[#EAF1FD]' : ''
-      }`}
-    >
-      <Plus size={11} strokeWidth={2.2} aria-hidden="true" />
-    </button>
+      active={activePortSide === side}
+      side={side}
+      className={className}
+      onDragStart={(event) => onPortDragStart?.(side, event)}
+      onActivate={() => onPortActivate(side)}
+    />
   ))
 
   if (compound) {

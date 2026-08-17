@@ -29,6 +29,17 @@ afterAll(() => {
 })
 
 describe('NodeStudio', () => {
+  it('frames custom nodes inside the platform lifecycle and ownership model', async () => {
+    await renderStudio(nodeApi())
+
+    expect(container?.textContent).toContain('节点在画布中的生命周期')
+    expect(container?.textContent).toContain('控制归属')
+    expect(container?.textContent).toContain('生成、权限和重试始终由所属 Task 控制')
+    expect(container?.textContent).not.toContain('空态标题')
+    expect(required('[data-testid="node-studio-platform-preview"] [data-node-shell="true"]'))
+      .toBeTruthy()
+  })
+
   it('applies a real Agent result as an uninstalled candidate without saving it', async () => {
     const candidate = {
       ...createBlankCustomNodeManifest(new Date('2026-01-02T00:00:00.000Z')),

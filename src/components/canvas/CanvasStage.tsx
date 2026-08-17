@@ -75,12 +75,10 @@ import {
 } from '@/canvas/runLogViewerContext'
 import CanvasArtifactViewer from './CanvasArtifactViewer'
 import CanvasRunLogViewer from './CanvasRunLogViewer'
-import CanvasEdgeLayer, {
-  type CanvasEdgeEndpoint,
-} from './CanvasEdgeLayer'
+import CanvasEdgeLayer from './CanvasEdgeLayer'
 import {
   collapsedCollectionBounds,
-  edgeCurvePath,
+  edgeDraftCurvePath,
   edgeSemanticKey,
   relationLabel,
   taskInteractionBounds,
@@ -90,9 +88,17 @@ import CanvasNodeCard from './CanvasNodeCard'
 import {
   CanvasSelectionToolbar,
   CanvasSelectionWorldSurface,
-  type CanvasSelectionPortSide,
 } from './CanvasSelectionSurface'
+import type { CanvasConnectionPortSide } from './CanvasConnectionPort'
+import {
+  connectionEndpointKey,
+  connectionEndpointLabel,
+  connectionEndpointTitle,
+  type CanvasConnectionEndpoint as EdgeEndpoint,
+  type CanvasCreateNodeMenuState as CreateNodeMenuState,
+} from './CanvasConnectionState'
 import CanvasTaskGroup from './CanvasTaskGroup'
+import { canvasTaskChromeState } from './CanvasTaskChrome'
 import CanvasCreateNodeMenu from './CanvasCreateNodeMenu'
 import { useCanvasActionHistory } from './CanvasActionHistory'
 import CanvasActionFeedback from './CanvasActionFeedback'
@@ -169,36 +175,12 @@ type GesturePreview =
   | { kind: 'resize'; id: string; frame: CanvasNode['frame'] }
   | null
 
-type EdgeEndpoint = (CanvasEdgeEndpoint & {
-  portSide?: CanvasSelectionPortSide
-}) | {
-  kind: 'selection'
-  id: string
-  members: CanvasEntityRef[]
-  portSide?: CanvasSelectionPortSide
-}
-
 interface CollectionView {
   collection: CanvasCollection
   bounds: CanvasBounds
   collapsed: boolean
   memberCount: number
   artifactCount: number
-}
-
-interface CreateNodeMenuState {
-  sx: number
-  sy: number
-  world: CanvasPoint
-  /** Toolbar-created nodes cascade so repeated creation never stacks exactly. */
-  cascade: boolean
-  /** 从实体或组合节点的「+」端口打开时：新节点落在该侧，并自动建立来源边。 */
-  source?: {
-    endpoint: EdgeEndpoint
-    side: CanvasSelectionPortSide
-  }
-  /** 拖线到空白松手时的线头落点：新节点落在落点处，菜单期间持续绘制虚线。 */
-  tipWorld?: CanvasPoint
 }
 
 export default function CanvasStage() {
@@ -224,10 +206,12 @@ export default function CanvasStage() {
   const [connectCursor, setConnectCursor] = useState<CanvasPoint | null>(null)
   const connectDragRef = useRef<{
     endpoint: EdgeEndpoint
+    pointerId: number
     startX: number
     startY: number
     dragging: boolean
   } | null>(null)
+  const connectDragCleanupRef = useRef<(() => void) | null>(null)
   const suppressPortClickRef = useRef(false)
   const onPortActivateRef = useRef<(endpoint: EdgeEndpoint) => void>(() => {})
   const edgeDraftRef = useRef<EdgeEndpoint | null>(null)
@@ -248,6 +232,12 @@ export default function CanvasStage() {
   useEffect(() => {
     stateRef.current = state
   }, [state])
+
+  useEffect(() => () => {
+    connectDragCleanupRef.current?.()
+    connectDragCleanupRef.current = null
+    connectDragRef.current = null
+  }, [])
 
 
   useEffect(() => {
@@ -856,8 +846,13 @@ export default function CanvasStage() {
   }
 
   const onStageKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== 'Escape' || !currentEdgeDraft) return
+    if (event.key !== 'Escape' || (!currentEdgeDraft && !connectDragRef.current)) return
     event.preventDefault()
+    connectDragCleanupRef.current?.()
+    connectDragCleanupRef.current = null
+    connectDragRef.current = null
+    suppressPortClickRef.current = false
+    setConnectCursor(null)
     setEdgeDraft(null)
     setNotice('已取消连接')
   }
@@ -963,14 +958,14 @@ export default function CanvasStage() {
     ...selectedNodeIds,
     ...compoundCoverage.nodeIds,
   ])
-  // 与 CanvasTaskGroup 的 chromeless 判定保持一致：标题条隐藏的单产物任务，
-  // 任务与其唯一节点之间的边不再绘制（否则节点上方会留下悬空线头）。
-  const chromelessTaskIds = new Set(visibleTaskViews
-    .filter((view) => view.containerKind === 'title-strip'
-      && view.presentation === 'expanded'
-      && view.nodes.length === 1
-      && !selectedTaskIds.has(view.task.id)
-      && !compoundSelectedTaskIds.has(view.task.id))
+  // Edge routing must use the exact same chrome decision as CanvasTaskGroup.
+  // Otherwise restoring a selected single-output Task can briefly route its
+  // external wires to the hidden title strip above the visible Node.
+  const taskIdsWithoutTopChrome = new Set(visibleTaskViews
+    .filter((view) => view.nodes.length > 0 && canvasTaskChromeState(view, {
+      selectedTask: selectedTaskIds.has(view.task.id),
+      compoundSelectedTask: compoundSelection && compoundSelectedTaskIds.has(view.task.id),
+    }).noTopChrome)
     .map((view) => view.task.id))
   const selectionSurfaceBounds = contextSelectionBounds
     ? compoundSelection
@@ -1170,10 +1165,10 @@ export default function CanvasStage() {
   const onPortActivate = (endpoint: EdgeEndpoint) => {
     if (!currentEdgeDraft) {
       setEdgeDraft(endpoint)
-      setNotice(`已选择${endpointLabel(stageDocument, endpoint)}作为连接起点`)
+      setNotice(`已选择${connectionEndpointLabel(stageDocument, endpoint)}作为连接起点`)
       return
     }
-    if (edgeEndpointKey(currentEdgeDraft) === edgeEndpointKey(endpoint)) {
+    if (connectionEndpointKey(currentEdgeDraft) === connectionEndpointKey(endpoint)) {
       setEdgeDraft(null)
       setNotice('已取消连接')
       return
@@ -1428,7 +1423,7 @@ export default function CanvasStage() {
     setCreateMenu({ sx, sy, world, cascade: false })
   }
   /** 点击选中节点的「+」端口：在该侧打开类型菜单，创建后自动接一条来源边。 */
-  const openPortCreateMenu = (endpoint: EdgeEndpoint, side: CanvasSelectionPortSide) => {
+  const openPortCreateMenu = (endpoint: EdgeEndpoint, side: CanvasConnectionPortSide) => {
     const frame = endpointRectForWire(endpoint)
     if (!frame) return
     const world: CanvasPoint = side === 'top'
@@ -1490,10 +1485,31 @@ export default function CanvasStage() {
    * 拖到空白松手在落点弹出新建节点菜单，菜单期间虚线保持，创建后变成真实连线。
    * 原位点击（位移 < 6px）不拦截，继续走端口的点击逻辑。
    */
-  const beginConnectDrag = (endpoint: EdgeEndpoint, startX: number, startY: number) => {
+  const beginConnectDrag = (
+    endpoint: EdgeEndpoint,
+    pointerEvent: ReactPointerEvent<HTMLButtonElement>,
+  ) => {
     if (connectDragRef.current) return
-    connectDragRef.current = { endpoint, startX, startY, dragging: false }
+    connectDragRef.current = {
+      endpoint,
+      pointerId: pointerEvent.pointerId,
+      startX: pointerEvent.clientX,
+      startY: pointerEvent.clientY,
+      dragging: false,
+    }
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onCancel)
+      window.removeEventListener('blur', onBlur)
+      if (connectDragCleanupRef.current === cleanup) connectDragCleanupRef.current = null
+    }
+    const isActivePointer = (event: PointerEvent) => {
+      const drag = connectDragRef.current
+      return Boolean(drag && event.pointerId === drag.pointerId)
+    }
     const onMove = (event: PointerEvent) => {
+      if (!isActivePointer(event)) return
       const drag = connectDragRef.current
       if (!drag) return
       if (!drag.dragging) {
@@ -1505,8 +1521,8 @@ export default function CanvasStage() {
       setConnectCursor(screenToWorld(event, stateRef.current.view.camera, viewportRect()))
     }
     const onUp = (event: PointerEvent) => {
-      window.removeEventListener('pointermove', onMove)
-      window.removeEventListener('pointerup', onUp)
+      if (!isActivePointer(event)) return
+      cleanup()
       const drag = connectDragRef.current
       connectDragRef.current = null
       setConnectCursor(null)
@@ -1548,8 +1564,23 @@ export default function CanvasStage() {
       }
       setNotice('已取消连接')
     }
+    const cancel = (announce: boolean) => {
+      cleanup()
+      connectDragRef.current = null
+      suppressPortClickRef.current = false
+      setConnectCursor(null)
+      setEdgeDraft(null)
+      if (announce) setNotice('已取消连接')
+    }
+    const onCancel = (event: PointerEvent) => {
+      if (isActivePointer(event)) cancel(true)
+    }
+    const onBlur = () => cancel(false)
+    connectDragCleanupRef.current = cleanup
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onCancel)
+    window.addEventListener('blur', onBlur)
   }
   const createNodeOfType = (pluginId: string) => {
     const menu = createMenu
@@ -1603,7 +1634,7 @@ export default function CanvasStage() {
       }]
     })
     const sourceTitle = sourceEndpoint
-      ? endpointSourceTitle(stageDocument, sourceEndpoint)
+      ? connectionEndpointTitle(stageDocument, sourceEndpoint)
       : null
     void store.dispatchCommand({ type: 'CreateNode', node }).then(async () => {
       if (edges.length > 0) await store.dispatchCommand({ type: 'CreateEdges', edges })
@@ -1628,17 +1659,21 @@ export default function CanvasStage() {
     if (connectCursor && currentEdgeDraft) {
       const rect = endpointRectForWire(currentEdgeDraft)
       if (!rect) return null
-      return edgeCurvePath(rect, { x: connectCursor.x, y: connectCursor.y, w: 1, h: 1 }).path
+      return edgeDraftCurvePath(
+        rect,
+        { x: connectCursor.x, y: connectCursor.y, w: 1, h: 1 },
+        currentEdgeDraft.portSide,
+      ).path
     }
     if (createMenu?.source && createMenu.tipWorld) {
       const rect = endpointRectForWire(createMenu.source.endpoint)
       if (!rect) return null
-      return edgeCurvePath(rect, {
+      return edgeDraftCurvePath(rect, {
         x: createMenu.tipWorld.x,
         y: createMenu.tipWorld.y,
         w: 1,
         h: 1,
-      }).path
+      }, createMenu.source.side).path
     }
     return null
   })()
@@ -1700,8 +1735,7 @@ export default function CanvasStage() {
             }}
             onPortDragStart={(event) => beginConnectDrag(
               { kind: 'collection', id: view.collection.id },
-              event.clientX,
-              event.clientY,
+              event,
             )}
             onMenuAction={(action) => onCollectionMenuAction(view.collection, action)}
             registerFocusable={(element) => registerFocusable(
@@ -1715,7 +1749,7 @@ export default function CanvasStage() {
           taskViewsById={taskViewsById}
           collectionViewsById={collectionViewsById}
           collapsedCollectionIds={collapsedCollectionIds}
-          chromelessTaskIds={chromelessTaskIds}
+          taskIdsWithoutTopChrome={taskIdsWithoutTopChrome}
           preview={preview}
           nodeFrames={nodeFrames}
           onDeleteEdges={(edgeIds) => {
@@ -1767,7 +1801,7 @@ export default function CanvasStage() {
                 && currentEdgeDraft.id === effectiveSelection[0]?.id
                 ? currentEdgeDraft.portSide ?? null
                 : null}
-            onPortActivate={(side: CanvasSelectionPortSide) => {
+            onPortActivate={(side: CanvasConnectionPortSide) => {
               if (consumeSuppressedPortClick()) return
               if (compoundSelection && temporarySelectionEndpoint) {
                 onPortActivate({ ...temporarySelectionEndpoint, portSide: side })
@@ -1782,18 +1816,17 @@ export default function CanvasStage() {
               }
               openPortCreateMenu({ ...target, portSide: side }, side)
             }}
-            onPortDragStart={(side: CanvasSelectionPortSide, event) => {
+            onPortDragStart={(side: CanvasConnectionPortSide, event) => {
               if (compoundSelection && temporarySelectionEndpoint) {
                 beginConnectDrag(
                   { ...temporarySelectionEndpoint, portSide: side },
-                  event.clientX,
-                  event.clientY,
+                  event,
                 )
                 return
               }
               const target = effectiveSelection[0]
               if (target?.kind !== 'node') return
-              beginConnectDrag({ ...target, portSide: side }, event.clientX, event.clientY)
+              beginConnectDrag({ ...target, portSide: side }, event)
             }}
           />
         )}
@@ -1834,8 +1867,7 @@ export default function CanvasStage() {
             }}
             onTaskPortDragStart={(event, task) => beginConnectDrag(
               { kind: 'task', id: task.id },
-              event.clientX,
-              event.clientY,
+              event,
             )}
             activeConnectionKey={currentEdgeDraft && currentEdgeDraft.kind !== 'selection'
               ? visualEntityKey(currentEdgeDraft)
@@ -1894,7 +1926,7 @@ export default function CanvasStage() {
           x={createMenu.sx}
           y={createMenu.sy}
           sourceTitle={createMenu.source
-            ? endpointSourceTitle(stageDocument, createMenu.source.endpoint)
+            ? connectionEndpointTitle(stageDocument, createMenu.source.endpoint)
             : undefined}
           onSelect={createNodeOfType}
         />
@@ -2083,14 +2115,6 @@ function nodeParentPreviewOffset(
   return null
 }
 
-function edgeEndpointKey(endpoint: EdgeEndpoint): string {
-  if (endpoint.kind !== 'selection') return visualEntityKey(endpoint)
-  return `selection:${endpoint.members
-    .map((member) => `${member.kind}:${member.id}`)
-    .sort()
-    .join('|')}`
-}
-
 function entityBounds(
   document: CanvasDocument,
   taskViewsById: ReadonlyMap<string, CanvasTaskView>,
@@ -2099,26 +2123,4 @@ function entityBounds(
   if (ref.kind === 'node') return document.nodes.find((node) => node.id === ref.id)?.frame ?? null
   const view = taskViewsById.get(ref.id)
   return view ? taskInteractionBounds(view) : null
-}
-
-function endpointLabel(document: CanvasDocument, endpoint: EdgeEndpoint): string {
-  if (endpoint.kind === 'selection') return `组合节点（${endpoint.members.length} 项）`
-  if (endpoint.kind === 'collection') {
-    return `集合“${document.collections.find((entry) => entry.id === endpoint.id)?.title ?? endpoint.id}”`
-  }
-  if (endpoint.kind === 'task') {
-    return `任务“${document.tasks.find((entry) => entry.id === endpoint.id)?.title ?? endpoint.id}”`
-  }
-  return `节点“${document.nodes.find((entry) => entry.id === endpoint.id)?.title ?? endpoint.id}”`
-}
-
-function endpointSourceTitle(document: CanvasDocument, endpoint: EdgeEndpoint): string {
-  if (endpoint.kind === 'selection') return `组合节点 · ${endpoint.members.length} 项`
-  if (endpoint.kind === 'collection') {
-    return document.collections.find((entry) => entry.id === endpoint.id)?.title ?? endpoint.id
-  }
-  if (endpoint.kind === 'task') {
-    return document.tasks.find((entry) => entry.id === endpoint.id)?.title ?? endpoint.id
-  }
-  return document.nodes.find((entry) => entry.id === endpoint.id)?.title ?? endpoint.id
 }

@@ -1,35 +1,335 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "principles": [
+    {
+      "id": "content-first",
+      "label": "内容优先",
+      "description": "节点只承载内容，静止时外壳与辅助操作保持克制。"
+    },
+    {
+      "id": "task-owns-generation",
+      "label": "Task 控制生成",
+      "description": "运行、权限、重试与能力选择属于 Task；节点不复制后端控制面。"
+    },
+    {
+      "id": "progressive-disclosure",
+      "label": "分层披露",
+      "description": "节点只显示一行状态摘要，过程、日志和配置进入统一侧栏。"
+    },
+    {
+      "id": "shared-language",
+      "label": "统一设计语言",
+      "description": "所有节点复用同一个外壳、圆角、选择态与平台内容模板。"
+    }
+  ],
+  "journeys": [
+    {
+      "id": "node-lifecycle",
+      "label": "节点生成生命周期",
+      "description": "按空节点、生成中、完成和失败顺序检查控制权与视觉层次。"
+    },
+    {
+      "id": "node-disclosure",
+      "label": "节点分层披露",
+      "description": "从节点摘要进入运行过程和节点 Skills，不把详情堆回节点。"
+    },
+    {
+      "id": "node-studio",
+      "label": "节点创作边界",
+      "description": "检查 Node Studio 设计的是内容节点，而不是新的后端控制面。"
+    },
+    {
+      "id": "run-setup",
+      "label": "生成前准备",
+      "description": "检查预检、可信附件与能力摘要只在需要时出现。"
+    }
+  ],
   "scenarios": [
     {
-      "id": "task-run-draft",
-      "title": "空输出节点 · 默认运行面板",
-      "viewport": { "width": 760, "height": 520 },
-      "readySelector": "[data-ui-render-scenario='task-run-draft'][data-ui-render-settled='true'] [data-preflight-status='ready']"
+      "id": "node-lifecycle-empty",
+      "title": "空节点 · Task 准备生成",
+      "description": "空白内容面保持安静，生成目标和能力入口集中在节点下方的 Task 控件。",
+      "journeyId": "node-lifecycle",
+      "step": 1,
+      "viewport": { "width": 860, "height": 760 },
+      "readySelector": "[data-ui-render-scenario='node-lifecycle-empty'][data-ui-render-settled='true'] [data-testid='canvas-empty-surface']",
+      "state": {
+        "phase": "空节点",
+        "selection": "选中输出槽",
+        "controlOwner": "Task",
+        "disclosure": "目标与运行入口"
+      },
+      "principleIds": ["content-first", "task-owns-generation", "shared-language"],
+      "checkpoints": [
+        "内容区没有等待文案、内层卡片或重复操作。",
+        "节点操作被 Task 控权隐藏，提示词控件锚定在节点下方。"
+      ],
+      "checks": [
+        { "kind": "selector-count", "selector": "[data-node-shell='true']", "count": 1, "label": "只存在一个平台节点外壳" },
+        { "kind": "selector-visible", "selector": "[data-testid='canvas-empty-surface']", "label": "安静空白内容面可见" },
+        { "kind": "selector-count", "selector": "[data-testid='canvas-generating-surface']", "count": 0, "label": "未运行时不显示生成动画" },
+        { "kind": "selector-count", "selector": "[aria-label$='节点操作']", "count": 0, "label": "空输出槽不旁路 Task 控权" },
+        { "kind": "text-absent", "text": "等待内容", "label": "空态不使用等待内容占位文案" }
+      ]
     },
     {
-      "id": "task-run-preflight-blocked",
-      "title": "空输出节点 · 生成服务需要处理",
-      "viewport": { "width": 760, "height": 580 },
-      "readySelector": "[data-ui-render-scenario='task-run-preflight-blocked'][data-ui-render-settled='true'] [data-preflight-status='blocked']"
+      "id": "node-lifecycle-generating",
+      "title": "生成中节点 · Task 持续控权",
+      "description": "节点内容面只呈现轻量动画，运行目标和取消操作仍停留在原 Task 控件。",
+      "journeyId": "node-lifecycle",
+      "step": 2,
+      "viewport": { "width": 860, "height": 760 },
+      "readySelector": "[data-ui-render-scenario='node-lifecycle-generating'][data-ui-render-settled='true'] [aria-label='取消运行']",
+      "state": {
+        "phase": "生成中",
+        "selection": "选中输出槽",
+        "controlOwner": "Task",
+        "disclosure": "单一实时状态"
+      },
+      "principleIds": ["content-first", "task-owns-generation", "progressive-disclosure"],
+      "checkpoints": [
+        "生成动画没有文案、渐变或第二层卡片。",
+        "运行控件几何不变，发送键原位变为取消键。",
+        "节点操作与连接能力在 Task active 期间隐藏。"
+      ],
+      "checks": [
+        { "kind": "selector-visible", "selector": "[data-testid='canvas-generating-surface']", "label": "节点使用平台生成动画" },
+        { "kind": "selector-visible", "selector": "[aria-label='取消运行']", "label": "Task 原位提供取消操作" },
+        { "kind": "selector-count", "selector": "[aria-label$='节点操作']", "count": 0, "label": "生成期间节点操作隐藏" },
+        { "kind": "text-absent", "text": "等待内容", "label": "生成态不回退为空态文案" }
+      ]
     },
     {
-      "id": "task-run-attachments",
-      "title": "空输出节点 · 从生成内容选择可信附件",
-      "viewport": { "width": 820, "height": 720 },
-      "readySelector": "body:has([data-ui-render-scenario='task-run-attachments'][data-ui-render-settled='true']) > [role='dialog'][aria-label='添加附件'] [role='checkbox']"
+      "id": "node-lifecycle-complete",
+      "title": "完成节点 · 内容与轻量活动摘要",
+      "description": "真实内容成为主角，节点只保留一行已完成摘要；选中后才披露上下文操作。",
+      "journeyId": "node-lifecycle",
+      "step": 3,
+      "viewport": { "width": 860, "height": 760 },
+      "readySelector": "[data-ui-render-scenario='node-lifecycle-complete'][data-ui-render-settled='true']",
+      "state": {
+        "phase": "已完成",
+        "selection": "选中内容节点",
+        "controlOwner": "Node",
+        "disclosure": "内容、活动摘要与上下文操作"
+      },
+      "principleIds": ["content-first", "progressive-disclosure", "shared-language"],
+      "checkpoints": [
+        "内容占据节点主体，活动摘要只占底部一行。",
+        "选中时披露节点操作，不在正文中复制运行能力。"
+      ],
+      "checks": [
+        { "kind": "selector-visible", "selector": "[data-node-template='document']", "label": "平台内容模板显示真实内容" },
+        { "kind": "selector-visible", "selector": "[aria-label$='节点操作']", "label": "选中后显示上下文操作" },
+        { "kind": "text-present", "text": "已完成", "label": "节点底部显示轻量完成摘要" },
+        { "kind": "selector-count", "selector": "[data-testid='canvas-generating-surface']", "count": 0, "label": "完成态不残留生成动画" }
+      ]
     },
     {
-      "id": "task-run-skills-summary",
-      "title": "空输出节点 · Skills 摘要入口",
-      "viewport": { "width": 760, "height": 540 },
-      "readySelector": "[data-ui-render-scenario='task-run-skills-summary'][data-ui-render-settled='true'] [data-testid='canvas-task-skills-summary']"
+      "id": "node-lifecycle-failed",
+      "title": "失败节点 · 空槽回到 Task 重试",
+      "description": "失败状态留在活动摘要，空槽不伪装成内容节点，原 Task 控件恢复可编辑重试。",
+      "journeyId": "node-lifecycle",
+      "step": 4,
+      "viewport": { "width": 860, "height": 780 },
+      "readySelector": "[data-ui-render-scenario='node-lifecycle-failed'][data-ui-render-settled='true'] [data-testid='canvas-empty-surface']",
+      "state": {
+        "phase": "失败",
+        "selection": "选中空输出槽",
+        "controlOwner": "Task",
+        "disclosure": "失败摘要与重试入口"
+      },
+      "principleIds": ["task-owns-generation", "progressive-disclosure", "shared-language"],
+      "checkpoints": [
+        "节点仅显示失败摘要，不在内容区堆错误详情。",
+        "空槽继续由 Task 控权，用户可在原输入区调整后重试。"
+      ],
+      "checks": [
+        { "kind": "selector-visible", "selector": "[data-testid='canvas-empty-surface']", "label": "失败后的空槽仍是空白内容面" },
+        { "kind": "text-present", "text": "生成失败", "label": "活动条保留准确失败摘要" },
+        { "kind": "selector-count", "selector": "[aria-label$='节点操作']", "count": 0, "label": "空槽不开放节点操作" },
+        { "kind": "selector-count", "selector": "[data-testid='canvas-generating-surface']", "count": 0, "label": "失败态不残留生成动画" }
+      ]
+    },
+    {
+      "id": "node-process-drawer",
+      "title": "完成节点 · 过程进入右侧抽屉",
+      "description": "节点保持轻量，友好过程和结构化日志在统一右侧抽屉中展开。",
+      "journeyId": "node-disclosure",
+      "step": 1,
+      "viewport": { "width": 1280, "height": 800 },
+      "readySelector": "[data-ui-render-scenario='node-process-drawer'][data-ui-render-settled='true'] [data-testid='canvas-run-log-viewer'] [aria-label='生成步骤']",
+      "state": {
+        "phase": "已完成",
+        "selection": "内容节点保持原位",
+        "controlOwner": "Run detail drawer",
+        "disclosure": "过程详情"
+      },
+      "principleIds": ["content-first", "progressive-disclosure", "shared-language"],
+      "checkpoints": [
+        "详情使用右侧贴边抽屉，不覆盖成居中弹窗。",
+        "过程是友好步骤，原始日志仍可通过相邻页签访问。"
+      ],
+      "checks": [
+        { "kind": "selector-visible", "selector": "[data-testid='canvas-run-log-viewer']", "label": "统一右侧运行详情抽屉可见" },
+        { "kind": "selector-visible", "selector": "[aria-label='生成步骤']", "label": "过程页呈现友好步骤" },
+        { "kind": "selector-visible", "selector": "[role='tab'][aria-selected='true']", "label": "当前披露层级有明确页签" },
+        { "kind": "selector-count", "selector": "[data-node-shell='true']", "count": 1, "label": "抽屉后仍保留原节点上下文" }
+      ]
     },
     {
       "id": "task-run-skills-workbench",
-      "title": "空输出节点 · 打开既有节点 Skills 工作台",
+      "title": "空节点 · 打开既有节点 Skills 工作台",
+      "description": "节点只显示 Skills 数量摘要，具体绑定在共享左侧工作台中管理。",
+      "journeyId": "node-disclosure",
+      "step": 2,
       "viewport": { "width": 1280, "height": 800 },
-      "readySelector": "[data-ui-render-scenario='task-run-skills-workbench'][data-ui-render-settled='true'] [aria-label='节点 Skills'] [aria-label='可用 Skills']"
+      "readySelector": "[data-ui-render-scenario='task-run-skills-workbench'][data-ui-render-settled='true'] [aria-label='节点 Skills'] [aria-label='可用 Skills']",
+      "state": {
+        "phase": "生成前",
+        "selection": "选中输出槽",
+        "controlOwner": "Workspace Skills workbench",
+        "disclosure": "能力配置"
+      },
+      "principleIds": ["task-owns-generation", "progressive-disclosure"],
+      "checkpoints": [
+        "Task 控件只显示 Skills N，不复制完整绑定表。",
+        "工作台沿用当前项目和节点上下文。"
+      ],
+      "checks": [
+        { "kind": "selector-visible", "selector": "[data-testid='canvas-task-skills-summary']", "label": "Task 只显示能力数量摘要" },
+        { "kind": "selector-visible", "selector": "[aria-label='节点 Skills']", "label": "能力详情进入共享工作台" },
+        { "kind": "selector-visible", "selector": "[aria-label='可用 Skills']", "label": "工作台显示可信 Skill 列表" }
+      ]
+    },
+    {
+      "id": "task-run-draft",
+      "title": "运行控件 · 默认准备态",
+      "description": "默认只披露提示词、输出类型和必要输入入口，不提前展开后端能力。",
+      "journeyId": "run-setup",
+      "step": 1,
+      "viewport": { "width": 760, "height": 520 },
+      "readySelector": "[data-ui-render-scenario='task-run-draft'][data-ui-render-settled='true'] [data-preflight-status='ready']",
+      "state": {
+        "phase": "准备",
+        "selection": "选中输出槽",
+        "controlOwner": "Task",
+        "disclosure": "最小生成输入"
+      },
+      "principleIds": ["content-first", "task-owns-generation"],
+      "checkpoints": [
+        "默认态没有预检成功噪音或基础设施身份。",
+        "主操作只有一个，辅助入口保持轻量。"
+      ],
+      "checks": [
+        { "kind": "selector-visible", "selector": "[data-testid^='canvas-task-run-panel-']", "label": "真实 Task 运行控件可见" },
+        { "kind": "selector-count", "selector": "[data-testid='canvas-generation-preflight-notice']", "count": 0, "label": "ready 状态不显示冗余提示" },
+        { "kind": "text-absent", "text": "digest", "label": "不泄漏内部能力身份" }
+      ]
+    },
+    {
+      "id": "node-studio-lifecycle",
+      "title": "Node Studio · 画布生命周期与平台边界",
+      "description": "工作台用真实节点外壳预览生命周期，并把平台能力与节点可定义内容明确分开。",
+      "journeyId": "node-studio",
+      "step": 1,
+      "viewport": { "width": 1440, "height": 900 },
+      "readySelector": "[data-testid='node-studio-platform-preview'] [data-node-shell='true']",
+      "state": {
+        "phase": "节点定义草稿",
+        "selection": "已完成预览",
+        "controlOwner": "Node Studio + Canvas platform",
+        "disclosure": "定义边界与生命周期"
+      },
+      "principleIds": ["content-first", "task-owns-generation", "progressive-disclosure", "shared-language"],
+      "checkpoints": [
+        "预览直接使用真实 CanvasNodeCard，而不是相似的演示卡片。",
+        "Studio 只编辑内容模板、示例和快捷指令，不编辑平台空态与运行态。",
+        "四个生命周期状态明确显示控制归属与下一层披露位置。"
+      ],
+      "checks": [
+        { "kind": "selector-count", "selector": "[data-testid='node-studio-platform-preview'] [data-node-shell='true']", "count": 1, "label": "Studio 复用唯一平台节点外壳" },
+        { "kind": "selector-visible", "selector": "[aria-label='当前节点状态契约']", "label": "当前生命周期与控制归属可见" },
+        { "kind": "text-present", "text": "生成、权限和重试始终由所属 Task 控制", "label": "Studio 明示 Task 控权边界" },
+        { "kind": "text-absent", "text": "空态标题", "label": "不再提供无效的插件空态编辑" }
+      ]
+    },
+    {
+      "id": "task-run-preflight-blocked",
+      "title": "运行控件 · 生成服务需要处理",
+      "description": "只有明确阻断时才增量披露原因与重新检测，不改变整体控件形态。",
+      "journeyId": "run-setup",
+      "step": 2,
+      "viewport": { "width": 760, "height": 580 },
+      "readySelector": "[data-ui-render-scenario='task-run-preflight-blocked'][data-ui-render-settled='true'] [data-preflight-status='blocked']",
+      "state": {
+        "phase": "预检阻断",
+        "selection": "选中输出槽",
+        "controlOwner": "Task",
+        "disclosure": "可恢复问题"
+      },
+      "principleIds": ["task-owns-generation", "progressive-disclosure"],
+      "checkpoints": [
+        "问题在原控件内增量出现，没有另起错误面板。",
+        "文案面向用户且提供重新检测。"
+      ],
+      "checks": [
+        { "kind": "selector-visible", "selector": "[data-testid='canvas-generation-preflight-notice']", "label": "明确阻断问题可见" },
+        { "kind": "text-present", "text": "重新检测", "label": "提供就地恢复操作" },
+        { "kind": "text-absent", "text": "provider", "label": "不暴露 provider 实现名" }
+      ]
+    },
+    {
+      "id": "task-run-attachments",
+      "title": "运行控件 · 选择可信生成内容",
+      "description": "附件入口按需打开资源选择器，只接受已登记的生成内容身份。",
+      "journeyId": "run-setup",
+      "step": 3,
+      "viewport": { "width": 820, "height": 720 },
+      "readySelector": "body:has([data-ui-render-scenario='task-run-attachments'][data-ui-render-settled='true']) > [role='dialog'][aria-label='添加附件'] [role='checkbox']",
+      "state": {
+        "phase": "准备附件",
+        "selection": "选中输出槽",
+        "controlOwner": "Task attachment picker",
+        "disclosure": "可信输入选择"
+      },
+      "principleIds": ["task-owns-generation", "progressive-disclosure"],
+      "checkpoints": [
+        "附件选择器按需出现，关闭后回到原运行控件。",
+        "界面只展示用户可理解的资源标题，不展示路径协议与摘要。"
+      ],
+      "checks": [
+        { "kind": "selector-visible", "selector": "[role='dialog'][aria-label='添加附件']", "label": "可信附件选择器可见" },
+        { "kind": "selector-visible", "selector": "[role='checkbox']", "label": "已登记资源可选择" },
+        { "kind": "text-absent", "text": "artifact_", "label": "不显示内部资源身份" },
+        { "kind": "text-absent", "text": "contentDigest", "label": "不显示内容摘要字段" }
+      ]
+    },
+    {
+      "id": "task-run-skills-summary",
+      "title": "运行控件 · Skills 数量摘要",
+      "description": "能力存在时只增加一个 Skills N 入口，默认运行界面仍保持简洁。",
+      "journeyId": "run-setup",
+      "step": 4,
+      "viewport": { "width": 760, "height": 540 },
+      "readySelector": "[data-ui-render-scenario='task-run-skills-summary'][data-ui-render-settled='true'] [data-testid='canvas-task-skills-summary']",
+      "state": {
+        "phase": "能力已解析",
+        "selection": "选中输出槽",
+        "controlOwner": "Task",
+        "disclosure": "能力数量摘要"
+      },
+      "principleIds": ["content-first", "task-owns-generation", "progressive-disclosure"],
+      "checkpoints": [
+        "只显示 Skills 数量，不把 revision、digest 或来源面板塞进节点。",
+        "入口与输出类型同属轻量 footer 元信息。"
+      ],
+      "checks": [
+        { "kind": "selector-visible", "selector": "[data-testid='canvas-task-skills-summary']", "label": "Skills 数量摘要可见" },
+        { "kind": "text-present", "text": "Skills 2", "label": "摘要数量与有效绑定一致" },
+        { "kind": "text-absent", "text": "revision", "label": "不显示内部 revision" },
+        { "kind": "text-absent", "text": "digest", "label": "不显示内部 digest" }
+      ]
     }
   ]
 }

@@ -3,7 +3,7 @@ import type { KeyboardEvent, PointerEvent } from 'react'
 import { COLLECTION_CHROME_LAYOUT } from '@/canvas/layout'
 import type { CanvasCollection } from '@/canvas/model'
 import type { CanvasBounds } from '@/canvas/selectors'
-import CanvasEdgePort from './CanvasEdgePort'
+import CanvasConnectionPort from './CanvasConnectionPort'
 import CanvasEntityMenu from './CanvasEntityMenu'
 
 export default function CanvasCollectionFrame({
@@ -109,10 +109,11 @@ export default function CanvasCollectionFrame({
           )}
         </button>
         {!compoundSelected && (
-          <CanvasEdgePort
+          <CanvasConnectionPort
             label={connectionActive
               ? `取消从集合${collection.title}的连接`
               : `从集合${collection.title}开始或完成连接`}
+            title="连接集合"
             active={connectionActive}
             onActivate={onPortActivate}
             onDragStart={onPortDragStart}

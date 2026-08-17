@@ -381,6 +381,100 @@ describe('Canvas store', () => {
     expect(await subjectPersistence.readViewState(persistenceScope)).toEqual(liveView)
   })
 
+  it('keeps the hydrated Canvas mounted while a background refresh is pending', async () => {
+    const subjectPersistence = persistence()
+    const refreshEnvelope = deferred<CanvasEnvelope>()
+    const initialDocument = documentWithTask('Initial')
+    const refreshedDocument = documentWithTask('Refreshed')
+    let reads = 0
+    const store = new CanvasStore({
+      daemonBaseUrl: persistenceScope.daemonBaseUrl,
+      scope,
+      persistence: subjectPersistence,
+      client: {
+        getCanvas: async () => reads++ === 0
+          ? envelope(initialDocument, 1)
+          : refreshEnvelope.promise,
+        flushOutbox: vi.fn(),
+      },
+    })
+    await store.load()
+
+    const refresh = store.reload()
+    await vi.waitFor(() => expect(store.getSnapshot().refresh.status).toBe('refreshing'))
+    expect(store.getSnapshot()).toMatchObject({
+      hydration: { status: 'ready' },
+      document: { tasks: [{ goal: 'Initial' }] },
+    })
+
+    refreshEnvelope.resolve(envelope(refreshedDocument, 2))
+    await refresh
+    expect(store.getSnapshot()).toMatchObject({
+      hydration: { status: 'ready' },
+      refresh: { status: 'idle', error: null },
+      document: { tasks: [{ goal: 'Refreshed' }] },
+    })
+  })
+
+  it('serializes repeated refresh requests and rejects stale envelopes', async () => {
+    const subjectPersistence = persistence()
+    const firstRefresh = deferred<CanvasEnvelope>()
+    let reads = 0
+    const store = new CanvasStore({
+      daemonBaseUrl: persistenceScope.daemonBaseUrl,
+      scope,
+      persistence: subjectPersistence,
+      client: {
+        getCanvas: async () => {
+          reads += 1
+          if (reads === 1) return envelope(documentWithTask('Initial'), 5)
+          if (reads === 2) return firstRefresh.promise
+          return envelope(documentWithTask('Stale'), 4)
+        },
+        flushOutbox: vi.fn(),
+      },
+    })
+    await store.load()
+
+    const first = store.reload()
+    await vi.waitFor(() => expect(reads).toBe(2))
+    const second = store.reload()
+    firstRefresh.resolve(envelope(documentWithTask('Newest'), 6))
+    await Promise.all([first, second])
+
+    expect(reads).toBe(3)
+    expect(store.getSnapshot()).toMatchObject({
+      envelope: { revision: 6 },
+      document: { tasks: [{ goal: 'Newest' }] },
+      refresh: { status: 'idle', error: null },
+    })
+  })
+
+  it('keeps the current document available when a background refresh fails', async () => {
+    const subjectPersistence = persistence()
+    let reads = 0
+    const store = new CanvasStore({
+      daemonBaseUrl: persistenceScope.daemonBaseUrl,
+      scope,
+      persistence: subjectPersistence,
+      client: {
+        getCanvas: async () => {
+          if (reads++ === 0) return envelope(documentWithTask('Available'), 1)
+          throw new Error('refresh unavailable')
+        },
+        flushOutbox: vi.fn(),
+      },
+    })
+    await store.load()
+
+    await expect(store.reload()).rejects.toThrow('refresh unavailable')
+    expect(store.getSnapshot()).toMatchObject({
+      hydration: { status: 'ready' },
+      refresh: { status: 'error', error: 'refresh unavailable' },
+      document: { tasks: [{ goal: 'Available' }] },
+    })
+  })
+
   it('never replaces the live view with an older stored view when reload persistence fails', async () => {
     const adapter = new MemoryCanvasPersistenceAdapter()
     const subjectPersistence = persistence(adapter)

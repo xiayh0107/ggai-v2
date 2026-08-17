@@ -35,6 +35,8 @@ export type CanvasGhostOutputPhase = 'discovered' | 'writing' | 'ready'
 export interface CanvasGhostOutput {
   key: string
   title: string
+  /** Optional durable output-slot identity supplied by file-write events. */
+  nodeId?: string
   pluginId?: string
   /**
    * Run 已启动、但 Agent 尚未声明具体产物时由 selector 投射的临时输出面。
@@ -331,26 +333,29 @@ export function selectTaskView(
   const runtimeActive = runtime?.phase === 'queued'
     || runtime?.phase === 'running'
     || runtime?.phase === 'awaiting-permission'
+  const runtimeOutputIsMaterialized = Boolean(runtime?.runId
+    && taskHasMaterializedRunOutput(document, taskId, runtime.runId))
   // 空白画布或已有内容派生的 Task 会让 Agent 在 Run 中决定 output 类型。
   // 在首个 artifact/path 事件到达前，runtime.ghosts 为空；如果直接按 0 output
   // 渲染，就会短暂退回完整 Task 卡片，形成“生成中 / 尚无产物”残壳。
   // 这里投射一个不猜类型、不持久化的输出面，真实 ghost / Node 到达后自然替换。
-  const runtimeGhosts: readonly CanvasGhostOutput[] = runtimeActive
-    && nodes.length === 0
-    && (runtime?.ghosts.length ?? 0) === 0
-    ? [{
-        key: `pending-output:${task.id}`,
-        title: '生成结果',
-        phase: 'writing',
-        provisional: true,
-      }]
-    : runtime?.ghosts ?? []
-  // 空输出槽节点本身就是「等待内容」的占位：正在写进槽位的 ghost 不再重复绘制，
-  // 否则说明条会吸附到锚点处的 ghost 上，与槽节点脱开；其余 ghost 接续节点网格。
-  const emptySlotCount = nodes.filter((node) => !nodeHasVisibleContent(node)).length
+  const runtimeGhosts: readonly CanvasGhostOutput[] = runtimeOutputIsMaterialized
+    ? []
+    : runtimeActive && nodes.length === 0 && (runtime?.ghosts.length ?? 0) === 0
+      ? [{
+          key: `pending-output:${task.id}`,
+          title: '生成结果',
+          phase: 'writing',
+          provisional: true,
+        }]
+      : runtime?.ghosts ?? []
+  // A bound Node already owns the visual slot, so its transient ghost is not
+  // drawn separately. Unbound ghosts remain visible instead of being guessed
+  // away by array position.
+  const nodeIds = new Set(nodes.map((node) => node.id))
   const ghosts = layoutGhostOutputs(
     task,
-    runtimeGhosts.slice(emptySlotCount),
+    runtimeGhosts.filter((ghost) => !ghost.nodeId || !nodeIds.has(ghost.nodeId)),
     nodes.length,
   )
   const status = deriveTaskStatus(runtime, nodes)
@@ -380,6 +385,18 @@ export function selectTaskView(
     artifactCount,
     accessibility,
   }
+}
+
+/** Durable projections replace every transient file-write ghost from the same Run. */
+export function taskHasMaterializedRunOutput(
+  document: CanvasDocument,
+  taskId: string,
+  runId: string,
+): boolean {
+  return document.nodes.some((node) => node.homeTaskId === taskId && (
+    (node.origin.kind === 'agent-output' && node.origin.runId === runId)
+    || node.artifactRefs.some((artifact) => artifact.runId === runId)
+  ))
 }
 
 export function indexEdges(document: CanvasDocument): CanvasEdgeIndex {

@@ -20,11 +20,12 @@ import {
   type CanvasTaskView,
 } from '@/canvas/selectors'
 import { getPlugin } from '@/plugins/types'
-import CanvasEdgePort from './CanvasEdgePort'
+import CanvasConnectionPort from './CanvasConnectionPort'
 import CanvasEntityMenu, { type CanvasMenuItem } from './CanvasEntityMenu'
 import CanvasNodeCard from './CanvasNodeCard'
 import CanvasTaskProposalReview from './CanvasTaskProposalReview'
 import CanvasTaskRunPanel from './CanvasTaskRunPanel'
+import { canvasTaskChromeState } from './CanvasTaskChrome'
 
 export interface CanvasTaskGroupProps {
   view: CanvasTaskView
@@ -92,38 +93,16 @@ export default function CanvasTaskGroup({
   registerFocusable,
 }: CanvasTaskGroupProps) {
   const { task } = view
-  const collapsed = view.presentation === 'collapsed'
-  const compact = view.presentation === 'compact'
-  const runActive = view.status.kind === 'queued'
-    || view.status.kind === 'generating'
-    || view.status.kind === 'needs-attention'
-  // 生成阶段：运行已启动（排队 / 生成中 / 等待确认）或 ghost 占位存在，但还没有任何
-  // 可见产物内容——包括「输出槽派生任务」（任务已认领空槽节点，节点还是空的）。
-  const generatingPhase = !collapsed
-    && !compact
-    && (view.ghosts.length > 0 || runActive)
-    && view.nodes.every((node) => !nodeHasVisibleContent(node))
-  // 单产物任务与生成阶段都不绘制任何顶部条——完整标题条和轻量说明条都不要：
-  // 生成状态由下方运行面板表达（产物节点底部另有活动记录条），任务级操作并入
-  // 节点右上角图标条（task: 前缀路由回任务处理器），节点拖拽整体移动任务。
-  const chromelessSingleNode = view.containerKind === 'title-strip'
-    && !collapsed
-    && !compact
-    && !compoundSelectedTask
-    && view.nodes.length === 1
-  // 多产物任务（产物已有内容）在展开态且任务未被选中时，标题条减重为一行轻量
-  // 说明条（无卡片边框 / 阴影 / 状态徽章）：保留任务焦点、整体拖拽锚点、连接端口，
-  // 折叠与菜单悬停显现，任务级操作同时并入每个产物节点的菜单。
-  // 任务被选中（继续任务）时恢复完整标题条。
-  const slimMultiNodeChrome = view.containerKind === 'output-frame'
-    && !collapsed
-    && !compact
-    && !selectedTask
-    && !compoundSelectedTask
-    && !generatingPhase
-  const noTopChrome = chromelessSingleNode || generatingPhase
-  const captionChrome = slimMultiNodeChrome
-  const liteTaskChrome = chromelessSingleNode || slimMultiNodeChrome
+  const {
+    collapsed,
+    compact,
+    runActive,
+    generatingPhase,
+    chromelessSingleNode,
+    captionChrome,
+    liteTaskChrome,
+    noTopChrome,
+  } = canvasTaskChromeState(view, { selectedTask, compoundSelectedTask })
   const outputCount = view.nodes.length + view.ghosts.length
   const outputRegionId = `canvas-task-${task.id}-outputs`
   const taskKey = `task:${task.id}`
@@ -282,10 +261,11 @@ export default function CanvasTaskGroup({
             )}
           </button>
           {onTaskPortActivate && (
-            <CanvasEdgePort
+            <CanvasConnectionPort
               label={activeConnectionKey === taskKey
                 ? `取消从任务${task.title}的连接`
                 : `从任务${task.title}开始或完成连接`}
+              title="连接任务"
               active={activeConnectionKey === taskKey}
               onActivate={() => onTaskPortActivate(task)}
               onDragStart={onTaskPortDragStart
@@ -481,10 +461,11 @@ function TaskHeader({
         <span className="truncate text-[12.5px] font-semibold text-gg-ink">{task.title}</span>
       </button>
       {onPortActivate && (
-        <CanvasEdgePort
+        <CanvasConnectionPort
           label={connectionActive
             ? `取消从任务${task.title}的连接`
             : `从任务${task.title}开始或完成连接`}
+          title="连接任务"
           active={connectionActive}
           onActivate={onPortActivate}
           onDragStart={onPortDragStart}

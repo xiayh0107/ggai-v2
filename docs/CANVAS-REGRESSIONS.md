@@ -106,11 +106,12 @@
 
 - **现象**：单产物 / 生成阶段的 Task 标题条被隐藏后，外部连线仍以 Task 的交互框为终点，
   线头悬在节点上方，甚至先向上绕行再折回节点。
-- **根因**：边层把 Task 的逻辑实体直接交给 `taskInteractionBounds`，没有考虑该 Task
-  当前没有可见标题条；逻辑端点与视觉端点脱节。
-- **修复**：对 chromeless Task 的外部边，将 Task 视觉映射到其首个可见输出 Node；Task 与
-  自身输出槽的内部边仍然隐藏，避免重复线头。
-- **回归测试**：外部 Node → chromeless Task 的路径终点必须落在输出 Node 可见边界。
+- **根因**：边层曾维护一份独立的 chromeless 判定，并把“Task 被选中”误认为顶部条已恢复；
+  实际单产物 Task 在继续任务和刷新恢复选择时仍不绘制顶部条，逻辑端点与视觉端点脱节。
+- **修复**：Task renderer 与边层共用唯一的顶部 chrome 判定；没有可见顶部条时，外部边将
+  Task 视觉映射到其首个可见输出 Node，Task 与自身输出槽的内部边仍然隐藏。
+- **回归测试**：外部 Node → chromeless Task 的路径终点在普通、继续任务和刷新恢复选择后
+  都必须落在输出 Node 可见边界。
 
 ### 14. Run 刚启动时重新出现「生成中 / 尚无产物」Task 残壳
 
@@ -135,6 +136,33 @@
 - **回归测试**：draft → queued / running → done / cancelled 的共享 surface 几何保持一致；
   运行控件内部切换不替换 surface DOM，不得新增第二张运行卡，终态后 textarea 原位恢复。
 
+### 16. 打开项目首秒把已生成 Node 重复计为 ghost 产物
+
+- **现象**：项目打开后，已有单产物 Task 短暂显示「生成中 / 2 个产物」说明条，连线先落到
+  Node 上方，随后说明条和重复产物消失，连线才恢复到 Node 边界。
+- **根因**：恢复 Run 时会回放永久日志中的 `file-write`；当同一 Run 的 durable Node 已经在
+  Canvas 中物化，回放仍创建 transient ghost，selector 因而短暂看到 `1 Node + 1 ghost`。
+- **修复**：Run controller 不再恢复已物化 Run 的 file-write ghost；Task selector 同时以
+  `taskId + runId` 去重 durable Node 与 transient ghost。新 ghost 使用 `nodeId + 受限相对路径`
+  作为身份；只有唯一空槽时才允许安全绑定，不再按数组位置或 basename 猜测。
+- **回归测试**：同一 Run 已有 Node 时，日志回放后 runtime ghosts 为空，Task 始终保持
+  `title-strip`；打开真实项目的连续采样中不得出现 output-frame 或「2 个产物」。
+
+### 17. Run 恢复把历史进度重新演成实时状态，并重挂整个 Canvas
+
+- **现象**：打开项目后，已完成 Task 短暂重新显示“生成中 / 等待确认”；随后 Canvas 整体消失，
+  数百毫秒后重新挂载，抽屉、菜单或拖线草稿可能被关闭。
+- **根因**：永久日志回放与 live stream 共用同一副作用入口，终态 thinking / permission 仍会
+  改写 runtime；每个 Run settle 又把 hydration 改回 loading，且并发 reload 没有串行和
+  revision 单调性保护。
+- **修复**：明确 `live / replay-active / replay-history` 三种事件应用模式；终态回放只恢复日志。
+  已物化 active summary 以 durable Node 为准。CanvasStore 将初次 hydration 与 background
+  refresh 分离，刷新串行补跑并拒绝旧 revision，失败保留当前 document；失败的 recovery 不再
+  永久记为成功，可显式重试。
+- **回归测试**：终态回放不得产生 running / permission；terminal recovery 不 reload；后台刷新
+  期间 hydration 保持 ready 且 Stage 不卸载；并发刷新最终保留最高 revision；恢复失败后第二次
+  调用必须重新访问 controller。
+
 ## 根因模式
 
 1. **复制架构代替滚动演进**：按记忆并行重做交互，没有逐条对照当前行为基准。
@@ -149,6 +177,10 @@
    直接把新的 artifact catalog 命名为整个「资源库」，会隐去项目文件、节点能力、连接与运行环境等
    已稳定的信息架构。实现 provider 前必须先确认它在上位 IA 中的位置，详见
    [`RESOURCE-LIBRARY.md`](./RESOURCE-LIBRARY.md)。
+9. **把历史数据当实时事件重放**：永久日志适合重建可读历史，不自动拥有再次改变 runtime、
+   权限和可见 UI 的授权；恢复必须声明副作用模式。
+10. **把后台刷新当初次加载**：已有可信 document 时不得回退全屏 loading。刷新需要独立状态、
+    单飞/补跑语义与 revision 单调性，不能靠组件卸载清空中间态。
 
 ## 防复发清单（改 canvas 前过一遍）
 

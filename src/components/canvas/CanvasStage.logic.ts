@@ -10,7 +10,7 @@ import type {
 import type { CanvasSelectionTarget } from '@/canvas/persistence'
 import type { CanvasStoreState } from '@/canvas/store'
 import type { CanvasBounds } from '@/canvas/selectors'
-import type { CanvasSelectionPortSide } from './CanvasSelectionSurface'
+import type { CanvasConnectionPortSide } from './CanvasConnectionPort'
 
 export function moveTargetsForSelection(
   selection: readonly CanvasSelectionTarget[],
@@ -132,7 +132,7 @@ export function errorMessage(error: unknown): string {
 /** Places a node created from a port with a stable gap and center alignment. */
 export function portCreatedNodeFrame(
   source: CanvasBounds,
-  side: CanvasSelectionPortSide,
+  side: CanvasConnectionPortSide,
   width: number,
 ): CanvasNode['frame'] {
   const gap = 56

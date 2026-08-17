@@ -11,7 +11,11 @@ import type {
   TaskRunPreflightApi,
   TaskRunPreflightResult,
 } from '@/agent/taskRunPreflightClient'
-import { emptyCanvasDocument, type CanvasDocument } from '@/canvas/model'
+import {
+  emptyCanvasDocument,
+  type CanvasDocument,
+  type CanvasTask,
+} from '@/canvas/model'
 import {
   CanvasPersistence,
   MemoryCanvasPersistenceAdapter,
@@ -32,8 +36,14 @@ import {
   CanvasWorkbenchControllerProvider,
   type CanvasWorkbenchSection,
 } from '@/canvas/workbenchController'
+import type { CanvasTaskRuntime, CanvasTaskStatus } from '@/canvas/selectors'
+import CanvasNodeCard from '@/components/canvas/CanvasNodeCard'
+import CanvasRunLogViewer from '@/components/canvas/CanvasRunLogViewer'
 import CanvasTaskRunPanel from '@/components/canvas/CanvasTaskRunPanel'
 import CanvasWorkbench from '@/components/canvas/CanvasWorkbench'
+import type { NodeDefinitionApi } from '@/node-studio/client'
+import { createBlankCustomNodeManifest } from '@/node-studio/model'
+import NodeStudio from '@/pages/NodeStudio'
 import type {
   ProjectArtifactCatalogApi,
   ProjectArtifactResource,
@@ -54,6 +64,24 @@ const task = {
   anchor: { x: 120, y: 90 },
   origin: { kind: 'user' as const },
 }
+
+const lifecycleTask: CanvasTask = {
+  id: 'task-node-lifecycle',
+  title: '形成研究结论',
+  goal: '梳理现有证据，形成一段清晰、可引用的研究结论',
+  anchor: { x: 120, y: 90 },
+  origin: { kind: 'user' },
+}
+const LIFECYCLE_NODE_ID = 'node-lifecycle-output'
+const LIFECYCLE_RUN_ID = 'run-node-lifecycle'
+const LIFECYCLE_LOGS: readonly CanvasTaskRunLogEntry[] = [
+  { eventId: 1, kind: 'thinking', text: '正在核对材料中的主要证据与限制条件。' },
+  { eventId: 2, kind: 'tool', text: '→ read_evidence {"scope":"selected attachments"}' },
+  { eventId: 3, kind: 'tool', text: '← 已读取 4 项可信材料' },
+  { eventId: 4, kind: 'text', text: '已形成结论，并保留不确定性说明。' },
+]
+
+type NodeLifecyclePhase = 'empty' | 'generating' | 'complete' | 'failed'
 
 const READY: TaskRunPreflightResult = { status: 'ready', issues: [] }
 const BLOCKED: TaskRunPreflightResult = {
@@ -136,6 +164,42 @@ const RESOURCES: ProjectArtifactResource[] = [
 
 const scenarios: readonly UiRenderScenario[] = [
   {
+    id: 'node-lifecycle-empty',
+    title: '空节点 · Task 准备生成',
+    render: () => <NodeLifecycleScenario id="node-lifecycle-empty" phase="empty" />,
+  },
+  {
+    id: 'node-lifecycle-generating',
+    title: '生成中节点 · Task 持续控权',
+    render: () => <NodeLifecycleScenario id="node-lifecycle-generating" phase="generating" />,
+  },
+  {
+    id: 'node-lifecycle-complete',
+    title: '完成节点 · 内容与轻量活动摘要',
+    render: () => <NodeLifecycleScenario id="node-lifecycle-complete" phase="complete" />,
+  },
+  {
+    id: 'node-lifecycle-failed',
+    title: '失败节点 · 空槽回到 Task 重试',
+    render: () => <NodeLifecycleScenario id="node-lifecycle-failed" phase="failed" />,
+  },
+  {
+    id: 'node-process-drawer',
+    title: '完成节点 · 过程进入右侧抽屉',
+    render: () => (
+      <NodeLifecycleScenario id="node-process-drawer" phase="complete" showProcessDrawer />
+    ),
+  },
+  {
+    id: 'node-studio-lifecycle',
+    title: 'Node Studio · 画布生命周期与平台边界',
+    render: () => (
+      <MemoryRouter>
+        <NodeStudio api={renderNodeDefinitionApi()} />
+      </MemoryRouter>
+    ),
+  },
+  {
     id: 'task-run-draft',
     title: '空输出节点 · 默认运行面板',
     render: () => <TaskRunScenario id="task-run-draft" preflight={READY} />,
@@ -180,6 +244,128 @@ export function getUiRenderScenario(id: string): UiRenderScenario {
   const scenario = scenarios.find((candidate) => candidate.id === id)
   if (!scenario) throw new Error(`Unknown UI render scenario: ${id}`)
   return scenario
+}
+
+function NodeLifecycleScenario({
+  id,
+  phase,
+  showProcessDrawer = false,
+}: {
+  id: string
+  phase: NodeLifecyclePhase
+  showProcessDrawer?: boolean
+}) {
+  const document = useMemo(() => createLifecycleDocument(phase), [phase])
+  const store = useMemo(() => createStore(document), [document])
+  const controller = useMemo(() => new RenderController({
+    summary: {
+      runId: LIFECYCLE_RUN_ID,
+      taskId: lifecycleTask.id,
+      agentId: 'ui-render-agent',
+      canvasBranch: 'main',
+      baseRevision: 12,
+      prompt: lifecycleTask.goal,
+      status: phase === 'failed' ? 'error' : phase === 'generating' ? 'running' : 'done',
+      startedAt: Date.parse('2026-08-16T00:00:00.000Z'),
+      ...(phase === 'failed' ? { error: '生成过程意外中断' } : {}),
+    },
+    detailLogs: LIFECYCLE_LOGS,
+  }), [phase])
+  const daemonClient = useMemo(() => renderDaemonClient(), [])
+  const preflightApi = useMemo<TaskRunPreflightApi>(() => ({
+    check: async () => structuredClone(READY),
+  }), [])
+  const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+  const runtime = lifecycleRuntime(phase)
+
+  useEffect(() => {
+    if (state.hydration.status !== 'ready') return
+    if (state.view.selection.length !== 1
+      || state.view.selection[0]?.kind !== 'node'
+      || state.view.selection[0].id !== LIFECYCLE_NODE_ID) {
+      store.setSelection([{ kind: 'node', id: LIFECYCLE_NODE_ID }])
+    }
+    if (runtime && state.runtimeByTaskId[lifecycleTask.id]?.phase !== runtime.phase) {
+      store.setTaskRuntime(runtime)
+    }
+  }, [runtime, state.hydration.status, state.runtimeByTaskId, state.view.selection, store])
+
+  const node = state.document.nodes.find((candidate) => candidate.id === LIFECYCLE_NODE_ID)
+  const taskStatus = lifecycleTaskStatus(phase)
+  const settled = state.hydration.status === 'ready'
+    && Boolean(node)
+    && (runtime === undefined
+      || state.runtimeByTaskId[lifecycleTask.id]?.phase === runtime.phase)
+
+  return (
+    <MemoryRouter>
+      <CanvasProvider store={store}>
+        <CanvasTaskRunProvider
+          store={store}
+          daemonClient={daemonClient}
+          controllerFactory={controller.factory}
+        >
+          <div
+            data-ui-render-scenario={id}
+            data-ui-render-settled={settled ? 'true' : 'false'}
+            className="relative h-screen w-screen overflow-hidden bg-gg-bg font-sans text-gg-ink"
+          >
+            <div
+              className={`relative flex h-full ${
+                showProcessDrawer ? 'items-center justify-start pl-24' : 'items-center justify-center'
+              }`}
+              style={{
+                backgroundImage: 'radial-gradient(#D8E2F0 1px, transparent 1px)',
+                backgroundSize: '24px 24px',
+              }}
+            >
+              <div className="flex w-[460px] flex-col gap-6">
+                <div className="relative h-[300px] w-[460px]">
+                  {node && (
+                    <CanvasNodeCard
+                      node={node}
+                      frame={{ ...node.frame, x: 0, y: 0 }}
+                      projectDir="/ui-render/project"
+                      selected
+                      compact={false}
+                      taskStatus={taskStatus}
+                      taskRunId={phase === 'empty' ? undefined : LIFECYCLE_RUN_ID}
+                      controlsLocked={phase !== 'complete'}
+                      tabIndex={0}
+                      onFocus={() => undefined}
+                      onKeyDown={() => undefined}
+                      onDragStart={() => undefined}
+                      onResizeStart={() => undefined}
+                      onMenuAction={() => undefined}
+                      registerFocusable={() => undefined}
+                    />
+                  )}
+                </div>
+                {!showProcessDrawer && (
+                  <CanvasTaskRunPanel
+                    task={lifecycleTask}
+                    width={460}
+                    preflightApi={preflightApi}
+                  />
+                )}
+              </div>
+            </div>
+
+            {showProcessDrawer && (
+              <CanvasRunLogViewer
+                request={{
+                  runId: LIFECYCLE_RUN_ID,
+                  title: '研究结论',
+                  initialTab: 'process',
+                }}
+                onClose={() => undefined}
+              />
+            )}
+          </div>
+        </CanvasTaskRunProvider>
+      </CanvasProvider>
+    </MemoryRouter>
+  )
 }
 
 function TaskRunScenario({
@@ -269,8 +455,7 @@ function TaskRunScenario({
   )
 }
 
-function createStore(): CanvasStore {
-  const document = createDocument()
+function createStore(document = createDocument()): CanvasStore {
   return new CanvasStore({
     daemonBaseUrl: 'http://127.0.0.1:7380',
     scope: { projectDir: '/ui-render/project', branch: 'main' },
@@ -292,6 +477,79 @@ function createStore(): CanvasStore {
       }),
     },
   })
+}
+
+function createLifecycleDocument(phase: NodeLifecyclePhase): CanvasDocument {
+  const document = emptyCanvasDocument()
+  document.everCreated = true
+  document.tasks.push(lifecycleTask)
+  document.nodes.push({
+    id: LIFECYCLE_NODE_ID,
+    type: 'text',
+    frame: { x: 180, y: 180, w: 460, h: 300, z: 1 },
+    title: '研究结论',
+    ...(phase === 'complete'
+      ? {
+          text: '现有证据支持干预方案能够稳定提升完成率；不同样本间仍存在差异，结论应保留适用范围说明。',
+        }
+      : {}),
+    artifactRefs: [],
+    homeTaskId: lifecycleTask.id,
+    origin: phase === 'empty'
+      ? { kind: 'user' }
+      : {
+          kind: 'agent-output',
+          taskId: lifecycleTask.id,
+          runId: LIFECYCLE_RUN_ID,
+          planId: 'plan-node-lifecycle',
+          outputKey: 'research-conclusion',
+        },
+  })
+  return document
+}
+
+function lifecycleRuntime(phase: NodeLifecyclePhase): CanvasTaskRuntime | undefined {
+  if (phase === 'empty') return undefined
+  if (phase === 'generating') {
+    return {
+      taskId: lifecycleTask.id,
+      runId: LIFECYCLE_RUN_ID,
+      phase: 'running',
+      progress: 0.56,
+      message: '正在组织研究证据',
+      ghosts: [],
+    }
+  }
+  if (phase === 'failed') {
+    return {
+      taskId: lifecycleTask.id,
+      runId: LIFECYCLE_RUN_ID,
+      phase: 'error',
+      message: '生成失败，可调整目标后重试',
+      ghosts: [],
+    }
+  }
+  return {
+    taskId: lifecycleTask.id,
+    runId: LIFECYCLE_RUN_ID,
+    phase: 'done',
+    progress: 1,
+    message: '研究结论已生成',
+    ghosts: [],
+  }
+}
+
+function lifecycleTaskStatus(phase: NodeLifecyclePhase): CanvasTaskStatus | undefined {
+  if (phase === 'generating') {
+    return { kind: 'generating', label: '正在组织研究证据', progress: 0.56, live: 'off' }
+  }
+  if (phase === 'complete') {
+    return { kind: 'done', label: '已完成', progress: 1, live: 'off' }
+  }
+  if (phase === 'failed') {
+    return { kind: 'failed', label: '生成失败', live: 'off' }
+  }
+  return undefined
 }
 
 function createDocument(): CanvasDocument {
@@ -341,7 +599,43 @@ function renderSkillApi(): SkillAssetApi {
   }
 }
 
+function renderNodeDefinitionApi(): NodeDefinitionApi {
+  const definition = {
+    ...createBlankCustomNodeManifest(new Date('2026-08-16T00:00:00.000Z')),
+    revision: 3,
+    installed: true,
+    id: '@local/research-insight',
+    label: '研究洞察',
+    description: '承载证据支持的研究结论与适用范围',
+    contentKind: 'text' as const,
+    icon: 'text' as const,
+    sampleTitle: '研究洞察示例',
+    sampleContent: '主要证据支持该方案有效；仍需保留样本差异与适用范围说明。',
+    placeholder: '补充证据，或说明需要重新组织的结论…',
+    actions: ['补充证据', '压缩结论'],
+  }
+  return {
+    list: async () => [structuredClone(definition)],
+    save: async () => Promise.reject(new Error('UI render does not save node definitions')),
+    delete: async () => Promise.reject(new Error('UI render does not delete node definitions')),
+    startAgent: async () => Promise.reject(new Error('UI render does not start Node Studio runs')),
+    getAgentRun: async () => Promise.reject(new Error('UI render has no Node Studio runs')),
+    cancelAgentRun: async () => Promise.reject(new Error('UI render has no Node Studio runs')),
+  }
+}
+
 class RenderController implements CanvasTaskRunControllerLike {
+  readonly #summary?: CanvasTaskRunSummary
+  readonly #detailLogs: readonly CanvasTaskRunLogEntry[]
+
+  constructor(input: {
+    summary?: CanvasTaskRunSummary
+    detailLogs?: readonly CanvasTaskRunLogEntry[]
+  } = {}) {
+    this.#summary = input.summary
+    this.#detailLogs = input.detailLogs ?? []
+  }
+
   readonly factory = (): CanvasTaskRunControllerLike => this
 
   runTask(): Promise<CanvasTaskRunHandle> {
@@ -361,11 +655,21 @@ class RenderController implements CanvasTaskRunControllerLike {
   }
 
   readTaskRunSummary(): Promise<CanvasTaskRunSummary> {
-    return Promise.reject(new Error('The baseline scenario has no historical Run'))
+    return this.#summary
+      ? Promise.resolve(structuredClone(this.#summary))
+      : Promise.reject(new Error('The baseline scenario has no historical Run'))
   }
 
-  readTaskRunLog() {
-    return Promise.resolve({ entries: [], nextEventId: null, closed: false })
+  readTaskRunLog(_runId: string, afterEventId: number) {
+    const entries = this.#detailLogs.filter((entry) => entry.eventId > afterEventId)
+    return Promise.resolve({
+      entries: structuredClone(entries),
+      nextEventId: null,
+      closed: this.#summary?.status === 'done'
+        || this.#summary?.status === 'error'
+        || this.#summary?.status === 'cancelled'
+        || this.#summary?.status === 'interrupted',
+    })
   }
 
   dispose(): void {

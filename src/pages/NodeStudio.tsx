@@ -369,16 +369,17 @@ export default function NodeStudio({ api: injectedApi }: { api?: NodeDefinitionA
         <main className="flex min-w-[460px] flex-1 flex-col bg-[#F7F9FC]">
           <div className="flex h-12 shrink-0 items-center justify-between border-b border-gg-line bg-white px-5">
             <div>
-              <p className="text-[12.5px] font-semibold">内容模板预览</p>
-              <p className="text-[10px] text-gg-muted">与 Canvas 共用声明式内容渲染器</p>
+              <p className="text-[12.5px] font-semibold">节点在画布中的生命周期</p>
+              <p className="text-[10px] text-gg-muted">真实节点外壳 · 平台状态 · 分层披露</p>
             </div>
             <div role="tablist" aria-label="预览状态" className="flex rounded-[9px] bg-gg-subtle p-0.5">
-              {([['empty', '空白'], ['content', '有内容'], ['running', '生成中'], ['error', '失败']] as const).map(([state, label]) => (
+              {([['empty', '空节点'], ['running', '生成中'], ['content', '已完成'], ['error', '失败']] as const).map(([state, label]) => (
                 <button key={state} type="button" role="tab" aria-selected={previewState === state} onClick={() => setPreviewState(state)} className={`rounded-[7px] px-3 py-1.5 text-[10.5px] ${previewState === state ? 'bg-white font-medium text-gg-ink shadow-sm' : 'text-gg-muted'}`}>{label}</button>
               ))}
             </div>
           </div>
-          <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto p-10" style={{ backgroundImage: 'radial-gradient(#D8E2F0 1px, transparent 1px)', backgroundSize: '24px 24px' }}>
+          <div className="relative flex min-h-0 flex-1 flex-col items-center justify-center gap-6 overflow-auto p-8" style={{ backgroundImage: 'radial-gradient(#D8E2F0 1px, transparent 1px)', backgroundSize: '24px 24px' }}>
+            <NodeStudioStateContract state={previewState} />
             <NodeStudioPreview manifest={draft} state={previewState} />
           </div>
           {(notice || error) && (
@@ -416,9 +417,7 @@ export default function NodeStudio({ api: injectedApi }: { api?: NodeDefinitionA
             <Field label={`默认宽度 · ${draft.defaultWidth}px`}><input type="range" min="280" max="640" step="20" value={draft.defaultWidth} onChange={(event) => patchDraft({ defaultWidth: Number(event.target.value) })} /></Field>
           </Section>
 
-          <Section title="空态与示例">
-            <Field label="空态标题"><input value={draft.emptyTitle} onChange={(event) => patchDraft({ emptyTitle: event.target.value })} /></Field>
-            <Field label="辅助说明"><input value={draft.emptyDescription} onChange={(event) => patchDraft({ emptyDescription: event.target.value })} /></Field>
+          <Section title="内容示例">
             <Field label="示例内容"><textarea value={draft.sampleContent} onChange={(event) => patchDraft({ sampleContent: event.target.value })} rows={4} /></Field>
           </Section>
 
@@ -433,6 +432,14 @@ export default function NodeStudio({ api: injectedApi }: { api?: NodeDefinitionA
             ) : validationErrors.map((item) => (
               <div key={item} className="mb-1 flex items-start gap-2 rounded-[9px] bg-red-50 px-2.5 py-2 text-[10.5px] text-gg-danger"><CircleAlert size={12} className="mt-0.5 shrink-0" /> {item}</div>
             ))}
+          </Section>
+
+          <Section title="平台边界">
+            <ul className="space-y-2 text-[10.5px] leading-4 text-gg-muted">
+              <li className="flex items-start gap-2"><Check size={12} className="mt-0.5 shrink-0 text-gg-success" />节点定义只控制内容模板与快捷指令。</li>
+              <li className="flex items-start gap-2"><Check size={12} className="mt-0.5 shrink-0 text-gg-success" />生成、权限和重试始终由所属 Task 控制。</li>
+              <li className="flex items-start gap-2"><Check size={12} className="mt-0.5 shrink-0 text-gg-success" />过程、日志和能力配置进入平台侧栏。</li>
+            </ul>
           </Section>
 
           <button type="button" onClick={() => void removeDraft()} className="mt-4 flex h-8 w-full items-center justify-center gap-1.5 rounded-[9px] text-[10.5px] text-gg-muted hover:bg-red-50 hover:text-gg-danger">
@@ -455,7 +462,7 @@ function NodeStudioPreview({ manifest, state }: { manifest: CustomNodeManifest; 
     ...(state === 'content' ? { text: manifest.sampleContent } : {}),
     payload: {},
     artifactRefs: [],
-    origin: state === 'running' || state === 'error'
+    origin: state === 'running' || state === 'error' || state === 'content'
       ? {
           kind: 'agent-output',
           taskId: 'node-studio-preview-task',
@@ -471,6 +478,9 @@ function NodeStudioPreview({ manifest, state }: { manifest: CustomNodeManifest; 
     }
     if (state === 'error') {
       return { kind: 'failed', label: '运行失败', live: 'off' }
+    }
+    if (state === 'content') {
+      return { kind: 'done', label: '已完成', progress: 1, live: 'off' }
     }
     return undefined
   }, [state])
@@ -488,16 +498,63 @@ function NodeStudioPreview({ manifest, state }: { manifest: CustomNodeManifest; 
         selected={state === 'content'}
         compact={false}
         taskStatus={taskStatus}
-        taskRunId={state === 'running' || state === 'error'
+        taskRunId={state === 'running' || state === 'error' || state === 'content'
           ? 'node-studio-preview-run'
           : undefined}
+        controlsLocked={state !== 'content'}
         tabIndex={0}
         onFocus={() => undefined}
         onKeyDown={() => undefined}
         onDragStart={() => undefined}
         onResizeStart={() => undefined}
+        onMenuAction={() => undefined}
         registerFocusable={() => undefined}
       />
+    </div>
+  )
+}
+
+function NodeStudioStateContract({ state }: { state: PreviewState }) {
+  const contract = {
+    empty: {
+      owner: 'Task',
+      node: '安静空白内容面',
+      disclosure: '提示词与生成入口在节点外',
+    },
+    running: {
+      owner: 'Task',
+      node: '平台生成动画 + 单行活动摘要',
+      disclosure: '节点操作锁定',
+    },
+    content: {
+      owner: '节点',
+      node: '真实内容 + 轻量完成摘要',
+      disclosure: '选中后显示上下文操作',
+    },
+    error: {
+      owner: 'Task',
+      node: '空白内容面 + 失败摘要',
+      disclosure: '回到原 Task 调整并重试',
+    },
+  }[state]
+
+  return (
+    <div
+      aria-label="当前节点状态契约"
+      className="grid w-full max-w-[620px] grid-cols-3 gap-px overflow-hidden rounded-[12px] border border-gg-line bg-gg-line shadow-sm"
+    >
+      <StateFact label="控制归属" value={contract.owner} />
+      <StateFact label="节点只表达" value={contract.node} />
+      <StateFact label="下一层披露" value={contract.disclosure} />
+    </div>
+  )
+}
+
+function StateFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="bg-white px-3 py-2.5">
+      <p className="text-[9.5px] text-gg-muted">{label}</p>
+      <p className="mt-1 text-[10.5px] font-medium leading-4 text-gg-ink">{value}</p>
     </div>
   )
 }
