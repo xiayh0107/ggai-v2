@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import { listHeadlessRunArtifacts, readHeadlessRunHistory } from './history'
+import {
+  listHeadlessRunArtifacts,
+  readHeadlessRunHistory,
+  summarizeHeadlessRunHistory,
+} from './history'
 
 describe('gg durable Run inspection', () => {
   it('reads paginated logs and extracts verified manifest entries', async () => {
@@ -48,6 +52,10 @@ describe('gg durable Run inspection', () => {
 
     const history = await readHeadlessRunHistory({ project: 'demo', runId: 'run-1' }, dependencies)
     expect(history.entries.map((entry) => entry.event)).toEqual(['agent-event', 'close'])
+    expect(summarizeHeadlessRunHistory(history.entries, false)).toEqual([
+      { id: 1, kind: 'thinking', message: 'working' },
+      { id: 2, kind: 'done', message: 'done · 1 artifact(s)' },
+    ])
 
     getRunLog.mockClear()
     getRunLog.mockResolvedValueOnce({ entries: history.entries, nextEventId: null })

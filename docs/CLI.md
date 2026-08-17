@@ -16,6 +16,9 @@ node dist-cli/gg.js run "Create a scatter plot" --project demo --wait
 node dist-cli/gg.js continue task-id "Refine the title" --project demo --wait
 node dist-cli/gg.js log run-id --project demo
 node dist-cli/gg.js artifact list run-id --project demo
+node dist-cli/gg.js canvas show --project demo
+node dist-cli/gg.js canvas graph --project demo --format mermaid
+node dist-cli/gg.js node show node-id --project demo
 ```
 
 Use `--daemon-url` or `GGAI_DAEMON_URL` to select a daemon. The default is
@@ -69,3 +72,17 @@ RunIntent. `--wait` consumes the durable SSE close and prints verified manifest
 entries. Permission requests are denied by default; `--permission allow` is an
 explicit opt-in suitable only for a trusted interactive invocation. Durable log
 and artifact commands read daemon APIs rather than `.gg/` or artifact paths.
+
+## Canvas and Node inspection
+
+The CLI projects Canvas into semantic views instead of reproducing an infinite
+surface:
+
+- `canvas show` renders Tasks, output Nodes, top-level Nodes, and Collections.
+- `canvas graph` renders typed relations as ASCII, Mermaid, DOT, or JSON.
+- `node show` renders content and verified artifact metadata; layout is hidden
+  unless `--debug-layout` is explicitly requested.
+
+`gg log` now emits a bounded, path-safe event summary by default. `--tools`
+adds tool lifecycle rows without dumping tool payloads. `--raw` explicitly
+returns the complete decoded permanent log for diagnostics.
