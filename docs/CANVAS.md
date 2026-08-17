@@ -6,6 +6,7 @@
 Agent 整图构建的信任边界见 [validated graph proposals](./GRAPH-PROPOSALS.md)。
 PDF.js 基线与 Agent 工具拆解规则见 [trusted PDF imports](./PDF-IMPORTS.md)。
 可编辑 PowerPoint、fallback 与 provenance 见 [presentation export](./PRESENTATION-EXPORT.md)。
+可复用树、revision pin 与 detach 语义见 [NodeTree instances](./NODE-TREE-INSTANCES.md)。
 
 本文是 Canvas 的规范性架构文档。实现、测试与协议若和本文冲突，以本文定义的信任边界与不变量为准。节点、社区插件与 Agent 上下文的映射另见 [`PLUGIN-CONTEXT-CONTRACT.md`](./PLUGIN-CONTEXT-CONTRACT.md)。仓库只维护一套当前实现；已归档格式不能和当前 daemon 交叉写入同一分支。
 

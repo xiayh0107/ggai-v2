@@ -116,6 +116,8 @@ import {
   PresentationExporter,
   PresentationExportError,
 } from './presentationExporter.js'
+import { NodeTreeCatalog } from './nodeTreeCatalog.js'
+import { InstanceService, InstanceServiceError } from './instanceService.js'
 import {
   createHttpRouter,
   type HttpRoute,
@@ -154,6 +156,8 @@ export interface DaemonServerOptions {
   computeExecutor?: ComputeExecutor
   pdfImportService?: PdfImportService
   presentationExporter?: PresentationExporter
+  nodeTreeCatalog?: NodeTreeCatalog
+  instanceService?: InstanceService
 }
 
 export interface DaemonServer {
@@ -171,6 +175,8 @@ export interface DaemonServer {
   filesystem: FilesystemService
   pdfImports: PdfImportService
   presentations: PresentationExporter
+  nodeTrees: NodeTreeCatalog
+  instances: InstanceService
   close(): Promise<void>
 }
 
@@ -227,6 +233,11 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   const filesystem = new FilesystemService(metadata, canvas)
   const pdfImports = options.pdfImportService ?? new PdfImportService()
   const presentations = options.presentationExporter ?? new PresentationExporter()
+  const nodeTrees = options.nodeTreeCatalog ?? new NodeTreeCatalog(options.projectRoot)
+  const instances = options.instanceService ?? new InstanceService(nodeTrees, async () => [
+    ...builtinNodeTypeSnapshots(),
+    ...await nodeDefinitions.listSnapshots(),
+  ])
   const projectionCanvases = workspaceProjectionCommitter(versions)
   const runs = options.runManager ?? new RunManager({
     projectRoot: options.projectRoot,
@@ -305,6 +316,8 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
       metadata,
       pdfImports,
       presentations,
+      nodeTrees,
+      instances,
     }, domainRouter)
       .catch((error: unknown) => writeError(response, error))
   })
@@ -328,6 +341,8 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     filesystem,
     pdfImports,
     presentations,
+    nodeTrees,
+    instances,
     close() {
       closePromise ??= filesystem.close().then(() => closeDaemonServer(
         server,
@@ -369,6 +384,8 @@ interface RouteContext extends HttpRouteContext {
   metadata: MetadataStore
   pdfImports: PdfImportService
   presentations: PresentationExporter
+  nodeTrees: NodeTreeCatalog
+  instances: InstanceService
 }
 
 async function route(
@@ -660,6 +677,7 @@ async function route(
       throw new ProtocolError('PPTX export body is invalid', 'invalid_pptx_export', 400)
     }
     const canvas = (await context.versions.getCanvas(projectDir, branch)).canvas
+    const exportDocument = await context.instances.resolveDocument(canvas.document)
     const leasedProjectDir = await context.canvas.acquireProjectLease(projectDir)
     const mode = body.mode === undefined
       ? undefined
@@ -671,7 +689,7 @@ async function route(
       projectDir: leasedProjectDir,
       canvasBranch: branch,
       canvasRevision: canvas.revision,
-      document: canvas.document,
+      document: exportDocument,
       presentationNodeId: parseTaskId(requiredBodyString(body, 'presentationNodeId', 200)),
       ...(mode ? { mode } : {}),
     })
@@ -713,6 +731,151 @@ async function route(
       ...await context.nodeDefinitions.listSnapshots(),
     ].sort((left, right) => left.id.localeCompare(right.id) || left.revision - right.revision)
     writeJson(response, 200, { schemaVersion: 1, nodeTypes })
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/node-tree-definitions') {
+    writeJson(response, 200, {
+      schemaVersion: 1,
+      definitions: await context.nodeTrees.list(),
+    })
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/node-tree-definitions') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const body = requestObject(await readJson(request))
+    if (!hasExactBodyKeys(body, [
+      'branch', 'rootNodeId', 'definitionId', 'title', 'expectedRevision',
+      'overrideAllowlist', 'exposedPorts',
+    ]) || !Array.isArray(body.overrideAllowlist) || !Array.isArray(body.exposedPorts)) {
+      throw new ProtocolError('NodeTreeDefinition body is invalid', 'invalid_node_tree_definition', 400)
+    }
+    const branch = parseCanvasBranch(requiredBodyString(body, 'branch', 200))
+    const canvas = (await context.versions.getCanvas(projectDir, branch)).canvas
+    const definition = await context.instances.capture({
+      document: canvas.document,
+      rootNodeId: parseTaskId(requiredBodyString(body, 'rootNodeId', 200)),
+      definitionId: requiredBodyString(body, 'definitionId', 200),
+      title: requiredBodyString(body, 'title', 240),
+      expectedRevision: requiredBodySafeInteger(body, 'expectedRevision', {
+        min: 0, max: Number.MAX_SAFE_INTEGER,
+      }),
+      overrideAllowlist: body.overrideAllowlist as Array<{ nodeId: string; field: string }>,
+      exposedPorts: body.exposedPorts as Array<{
+        key: string
+        nodeId: string
+        port: string
+        direction: 'input' | 'output'
+        schema: string
+      }>,
+    })
+    writeJson(response, 201, { schemaVersion: 1, definition })
+    return
+  }
+
+  const nodeTreeDefinitionMatch = pathname.match(/^\/node-tree-definitions\/([^/]+)$/u)
+  if (nodeTreeDefinitionMatch && request.method === 'GET') {
+    const definitionId = decodeURIComponent(nodeTreeDefinitionMatch[1]!)
+    const revision = optionalIntegerQuery(url, 'revision', { min: 1, max: Number.MAX_SAFE_INTEGER })
+    const definition = await context.nodeTrees.get(definitionId, revision)
+    if (!definition) throw new InstanceServiceError('definition_not_found', 'NodeTreeDefinition does not exist', 404)
+    writeJson(response, 200, { schemaVersion: 1, definition })
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/instances') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const body = requestObject(await readJson(request))
+    const expected = [
+      'branch', 'baseRevision', 'mutationId', 'nodeId', 'definitionId', 'revision',
+      'overrides', 'x', 'y',
+      ...(body.title === undefined ? [] : ['title']),
+      ...(body.homeTaskId === undefined ? [] : ['homeTaskId']),
+      ...(body.collectionId === undefined ? [] : ['collectionId']),
+    ]
+    if (!hasExactBodyKeys(body, expected) || !isRecord(body.overrides)
+      || typeof body.x !== 'number' || !Number.isFinite(body.x)
+      || typeof body.y !== 'number' || !Number.isFinite(body.y)) {
+      throw new ProtocolError('Instance body is invalid', 'invalid_instance', 400)
+    }
+    const branch = parseCanvasBranch(requiredBodyString(body, 'branch', 200))
+    const node = await context.instances.createInstanceNode({
+      nodeId: parseTaskId(requiredBodyString(body, 'nodeId', 200)),
+      definitionId: requiredBodyString(body, 'definitionId', 200),
+      revision: requiredBodySafeInteger(body, 'revision', { min: 1, max: Number.MAX_SAFE_INTEGER }),
+      title: optionalBodyString(body, 'title', 240),
+      overrides: body.overrides,
+      x: body.x,
+      y: body.y,
+      homeTaskId: optionalBodyString(body, 'homeTaskId', 200),
+      collectionId: optionalBodyString(body, 'collectionId', 200),
+    })
+    const committed = (await context.versions.commitCanvas(
+      projectDir,
+      branch,
+      requiredBodySafeInteger(body, 'baseRevision', { min: 0, max: Number.MAX_SAFE_INTEGER }),
+      requiredBodyString(body, 'mutationId', 200),
+      { type: 'CreateInstance', node },
+    )).canvas
+    writeJson(response, 201, { schemaVersion: 1, node, canvas: committed })
+    return
+  }
+
+  const instanceResolvedMatch = pathname.match(/^\/instances\/([^/]+)\/resolved$/u)
+  if (instanceResolvedMatch && request.method === 'GET') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
+    const nodeId = parseTaskId(decodeURIComponent(instanceResolvedMatch[1]!))
+    const canvas = (await context.versions.getCanvas(projectDir, branch)).canvas
+    writeJson(response, 200, {
+      schemaVersion: 1,
+      resolved: await context.instances.resolveInstance(canvas.document, nodeId),
+    })
+    return
+  }
+
+  const instancePreviewMatch = pathname.match(/^\/instances\/([^/]+)\/update-preview$/u)
+  if (instancePreviewMatch && request.method === 'GET') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
+    const nodeId = parseTaskId(decodeURIComponent(instancePreviewMatch[1]!))
+    const revision = optionalIntegerQuery(url, 'revision', { min: 1, max: Number.MAX_SAFE_INTEGER })
+    if (revision === undefined) throw new ProtocolError('revision is required')
+    const canvas = (await context.versions.getCanvas(projectDir, branch)).canvas
+    const node = canvas.document.nodes.find((candidate) => candidate.id === nodeId)
+    if (!node) throw new InstanceServiceError('instance_not_found', 'Instance does not exist', 404)
+    writeJson(response, 200, {
+      schemaVersion: 1,
+      preview: await context.instances.previewUpdate(node, revision),
+    })
+    return
+  }
+
+  const instanceUpdateMatch = pathname.match(/^\/instances\/([^/]+)\/update$/u)
+  if (instanceUpdateMatch && request.method === 'POST') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const body = requestObject(await readJson(request))
+    if (!hasExactBodyKeys(body, [
+      'branch', 'baseRevision', 'mutationId', 'targetRevision', 'accept',
+    ]) || body.accept !== true) throw new ProtocolError('Instance update body is invalid')
+    const branch = parseCanvasBranch(requiredBodyString(body, 'branch', 200))
+    const canvas = (await context.versions.getCanvas(projectDir, branch)).canvas
+    const nodeId = parseTaskId(decodeURIComponent(instanceUpdateMatch[1]!))
+    const node = canvas.document.nodes.find((candidate) => candidate.id === nodeId)
+    if (!node) throw new InstanceServiceError('instance_not_found', 'Instance does not exist', 404)
+    const updated = await context.instances.updateInstanceNode(
+      node,
+      requiredBodySafeInteger(body, 'targetRevision', { min: 1, max: Number.MAX_SAFE_INTEGER }),
+    )
+    const committed = (await context.versions.commitCanvas(
+      projectDir,
+      branch,
+      requiredBodySafeInteger(body, 'baseRevision', { min: 0, max: Number.MAX_SAFE_INTEGER }),
+      requiredBodyString(body, 'mutationId', 200),
+      { type: 'UpdateInstanceRef', nodeId, instanceRef: updated.instanceRef! },
+    )).canvas
+    writeJson(response, 200, { schemaVersion: 1, node: updated, canvas: committed })
     return
   }
 
@@ -1074,6 +1237,27 @@ async function route(
   if (request.method === 'POST' && pathname === '/canvas/commands') {
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
     const parsed = parseCanvasCommandRequest(await readJson(request))
+    if (parsed.command.type === 'DetachInstance') {
+      const detachNodeId = parsed.command.nodeId
+      const current = (await context.versions.getCanvas(projectDir, parsed.branch)).canvas
+      const node = current.document.nodes.find((candidate) => candidate.id === detachNodeId)
+      if (!node?.instanceRef) {
+        writeJson(response, 200, current)
+        return
+      }
+      const expansion = await context.instances.detachExpansion(
+        current.document, detachNodeId,
+      )
+      const committed = (await context.versions.commitCanvas(
+        projectDir,
+        parsed.branch,
+        parsed.baseRevision,
+        parsed.mutationId,
+        { type: 'DetachInstance', nodeId: detachNodeId, expansion },
+      )).canvas
+      writeJson(response, 200, committed)
+      return
+    }
     if (parsed.command.type === 'MaterializeDecompositionPlan') {
       const leasedProjectDir = await context.canvas.acquireProjectLease(projectDir)
       const plan = await context.pdfImports.getPlan(leasedProjectDir, parsed.command.planId)
@@ -1195,6 +1379,25 @@ async function route(
     const settledPlanIds = new Set<string>()
     const mutations: Array<{ mutationId: string; command: CanvasCommand }> = []
     for (const mutation of parsed.mutations) {
+      if (mutation.command.type === 'DetachInstance') {
+        const detachNodeId = mutation.command.nodeId
+        const source = (await context.versions.getCanvas(
+          projectDir, parsed.sourceBranch,
+        )).canvas.document
+        const node = source.nodes.find((candidate) => candidate.id === detachNodeId)
+        if (!node?.instanceRef) {
+          throw new InstanceServiceError('instance_not_found', 'Instance does not exist', 404)
+        }
+        mutations.push({
+          mutationId: mutation.mutationId,
+          command: {
+            type: 'DetachInstance',
+            nodeId: detachNodeId,
+            expansion: await context.instances.detachExpansion(source, detachNodeId),
+          },
+        })
+        continue
+      }
       if (mutation.command.type === 'MaterializeDecompositionPlan') {
         const leasedProjectDir = await context.canvas.acquireProjectLease(projectDir)
         const plan = await context.pdfImports.getPlan(leasedProjectDir, mutation.command.planId)
@@ -1422,12 +1625,13 @@ async function route(
       throw new ProtocolError('execution body must contain only force', 'invalid_execution_request', 400)
     }
     const canvas = (await context.versions.getCanvas(projectDir, branch)).canvas
+    const executionDocument = await context.instances.resolveDocument(canvas.document)
     const leasedProjectDir = await context.canvas.acquireProjectLease(projectDir)
     const execution = await context.executions.start({
       projectId: operationalProjectId(projectDir),
       projectDir: leasedProjectDir,
       canvasBranch: branch,
-      document: canvas.document,
+      document: executionDocument,
       nodeId,
       force: body.force,
     })
@@ -1467,13 +1671,14 @@ async function route(
       throw new ProtocolError('approval body must contain approve: true', 'invalid_execution_approval', 400)
     }
     const canvas = (await context.versions.getCanvas(projectDir, branch)).canvas
+    const approvalDocument = await context.instances.resolveDocument(canvas.document)
     const leasedProjectDir = await context.canvas.acquireProjectLease(projectDir)
     const execution = await context.executions.approve({
       executionId,
       projectId: operationalProjectId(projectDir),
       projectDir: leasedProjectDir,
       canvasBranch: branch,
-      document: canvas.document,
+      document: approvalDocument,
     })
     writeJson(response, 202, { schemaVersion: 1, execution })
     return
@@ -2602,6 +2807,10 @@ function operationalProjectId(projectDir: string): string {
   return `project-scope-${createHash('sha256').update(path.resolve(projectDir)).digest('hex')}`
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 function parseRunIntentForServer(value: unknown): RunIntent {
   try {
     return parseRunIntent(value)
@@ -2641,6 +2850,12 @@ function writeError(response: ServerResponse, error: unknown): void {
     return
   }
   if (error instanceof PresentationExportError) {
+    writeJson(response, error.status, {
+      error: { code: error.code, message: error.message },
+    })
+    return
+  }
+  if (error instanceof InstanceServiceError) {
     writeJson(response, error.status, {
       error: { code: error.code, message: error.message },
     })

@@ -64,10 +64,11 @@ type CanvasTrustedCommandWire =
       edits?: CanvasTaskProposalEditsWire
     }
   | { type: 'DismissPlan'; planId: string }
+  | { type: 'DetachInstance'; nodeId: string }
 
 export type CanvasCommandWire =
   | Exclude<CanvasCommand, {
-      type: 'MaterializeProjectionPlan' | 'MaterializeGraphPlan' | 'MaterializeDecompositionPlan' | 'AcceptTaskProposals' | 'DismissPlan'
+      type: 'MaterializeProjectionPlan' | 'MaterializeGraphPlan' | 'MaterializeDecompositionPlan' | 'AcceptTaskProposals' | 'DismissPlan' | 'CreateInstance' | 'DetachInstance' | 'UpdateInstanceRef'
     }>
   | CanvasTrustedCommandWire
 
@@ -390,6 +391,8 @@ export function serializeCanvasCommand(command: CanvasCommand): CanvasCommandWir
     }
     case 'DismissPlan':
       return { type: command.type, planId: command.plan.planId }
+    case 'DetachInstance':
+      return { type: command.type, nodeId: command.nodeId }
     case 'CreateTask':
     case 'UpdateTaskGoal':
     case 'CreateNode':
@@ -426,6 +429,9 @@ export function serializeCanvasCommand(command: CanvasCommand): CanvasCommandWir
     case 'DuplicateCollection':
     case 'DuplicateTaskAsDraft':
       return structuredClone(command)
+    case 'CreateInstance':
+    case 'UpdateInstanceRef':
+      throw new CanvasProtocolError('Internal instance command cannot be serialized')
     default:
       command satisfies never
       throw new CanvasProtocolError('Unsupported Canvas command')

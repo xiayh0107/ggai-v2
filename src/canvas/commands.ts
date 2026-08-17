@@ -97,6 +97,12 @@ export interface TrustedGraphMaterializationPlanInput {
   digest: string
 }
 
+export interface TrustedInstanceExpansion {
+  nodes: CanvasNode[]
+  edges: CanvasEdge[]
+  edgePatches: Array<{ edgeId: string; from?: CanvasEntityRef; to?: CanvasEntityRef }>
+}
+
 export interface UpdateNodeContentPatch {
   title?: string
   text?: string | null
@@ -218,6 +224,17 @@ export type CanvasCommand =
   | {
       type: 'MaterializeDecompositionPlan'
       plan: PdfMaterializationPlan
+    }
+  | { type: 'CreateInstance'; node: CanvasNode }
+  | {
+      type: 'DetachInstance'
+      nodeId: string
+      expansion?: TrustedInstanceExpansion
+    }
+  | {
+      type: 'UpdateInstanceRef'
+      nodeId: string
+      instanceRef: { definitionId: string; revision: number; digest: string }
     }
 
 export class CanvasCommandError extends Error {
@@ -366,6 +383,15 @@ export function applyCanvasCommand(
       break
     case 'MaterializeDecompositionPlan':
       materializeDecompositionPlan(next, command.plan)
+      break
+    case 'CreateInstance':
+      createInstance(next, command.node)
+      break
+    case 'DetachInstance':
+      detachInstance(next, command.nodeId, command.expansion)
+      break
+    case 'UpdateInstanceRef':
+      updateInstanceRef(next, command.nodeId, command.instanceRef)
       break
     default:
       command satisfies never
@@ -1454,6 +1480,59 @@ function materializeDecompositionPlan(
     nodes: plan.nodes.map((entry) => ({ logicalKey: entry.logicalKey, nodeId: entry.node.id })),
   })
   document.everCreated = true
+}
+
+function createInstance(document: CanvasDocument, node: CanvasNode): void {
+  requireClientOwnedId(node.id, 'node')
+  ensureEntityIdAvailable(document, node.id)
+  if (node.typeRef.id !== 'instance' || !node.instanceRef
+    || node.origin.kind !== 'user' || node.artifactRefs.length > 0) {
+    throw new CanvasCommandError('invalid-instance', 'Trusted instance node is invalid')
+  }
+  if (node.parentId) requireNode(document, node.parentId)
+  if (node.homeTaskId) requireTask(document, node.homeTaskId)
+  if (node.collectionId) requireCollection(document, node.collectionId)
+  document.nodes.push(structuredClone(node))
+  document.everCreated = true
+}
+
+function detachInstance(
+  document: CanvasDocument,
+  nodeId: string,
+  expansion?: TrustedInstanceExpansion,
+): void {
+  if (!expansion) return
+  const instance = requireNode(document, nodeId)
+  if (!instance.instanceRef) throw new CanvasCommandError('not-an-instance', 'Node is not an instance')
+  if (document.nodes.some((node) => node.parentId === instance.id)) {
+    throw new CanvasCommandError('instance-has-children', 'Instance cannot own persisted children before detach')
+  }
+  document.nodes = document.nodes.filter((node) => node.id !== instance.id)
+  for (const node of expansion.nodes) {
+    ensureEntityIdAvailable(document, node.id)
+    if (node.instanceRef) throw new CanvasCommandError('invalid-instance-expansion', 'Detached nodes retain instance refs')
+    document.nodes.push(structuredClone(node))
+  }
+  for (const edge of expansion.edges) {
+    ensureEdgeIdAvailable(document, edge.id)
+    document.edges.push(structuredClone(edge))
+  }
+  for (const patch of expansion.edgePatches) {
+    const edge = document.edges.find((candidate) => candidate.id === patch.edgeId)
+    if (!edge) throw new CanvasCommandError('invalid-instance-expansion', 'Instance edge patch is dangling')
+    if (patch.from) edge.from = structuredClone(patch.from)
+    if (patch.to) edge.to = structuredClone(patch.to)
+  }
+}
+
+function updateInstanceRef(
+  document: CanvasDocument,
+  nodeId: string,
+  instanceRef: { definitionId: string; revision: number; digest: string },
+): void {
+  const node = requireNode(document, nodeId)
+  if (!node.instanceRef) throw new CanvasCommandError('not-an-instance', 'Node is not an instance')
+  node.instanceRef = structuredClone(instanceRef)
 }
 
 function acceptTaskProposals(

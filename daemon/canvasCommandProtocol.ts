@@ -42,7 +42,11 @@ type TrustedPlanCommand = Extract<CanvasCommand, {
   type: 'MaterializeProjectionPlan' | 'MaterializeGraphPlan' | 'MaterializeDecompositionPlan' | 'AcceptTaskProposals' | 'DismissPlan'
 }>
 
-export type OrdinaryCanvasCommand = Exclude<CanvasCommand, TrustedPlanCommand>
+type TrustedInstanceCommand = Extract<CanvasCommand, {
+  type: 'CreateInstance' | 'DetachInstance' | 'UpdateInstanceRef'
+}>
+
+export type OrdinaryCanvasCommand = Exclude<CanvasCommand, TrustedPlanCommand | TrustedInstanceCommand>
 
 export type TaskProposalEditWire = TaskProposalEdit
 
@@ -64,6 +68,7 @@ export type CanvasCommandWire =
       edits?: Record<string, TaskProposalEditWire>
     }
   | { type: 'DismissPlan'; planId: string }
+  | { type: 'DetachInstance'; nodeId: string }
 
 export interface CanvasCommandRequestWire {
   branch: string
@@ -162,6 +167,9 @@ export function parseCanvasCommandWire(value: unknown): CanvasCommandWire {
     case 'DismissPlan':
       assertCommandKeys(value, ['type', 'planId'], ['type', 'planId'])
       return { type: value.type, planId: parsePlanId(value.planId) }
+    case 'DetachInstance':
+      assertCommandKeys(value, ['type', 'nodeId'], ['type', 'nodeId'])
+      return { type: value.type, nodeId: parseIdentifier(value.nodeId, 'command.nodeId') }
     case 'CreateTask':
       assertCommandKeys(value, ['type', 'task'], ['type', 'task'])
       return { type: value.type, task: parseUserTask(value.task) }
@@ -683,6 +691,9 @@ function parseUserNode(value: unknown): CanvasNode {
     throw new ProtocolError('CreateNode only accepts a user-origin node')
   }
   parseClientIdentifier(value.id, 'command.node.id')
+  if (value.instanceRef !== undefined) {
+    throw new ProtocolError('CreateNode cannot forge an instanceRef')
+  }
   if (!Array.isArray(value.artifactRefs) || value.artifactRefs.length !== 0) {
     throw new ProtocolError('CreateNode cannot attach daemon-owned artifactRefs')
   }

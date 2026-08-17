@@ -342,6 +342,13 @@ describe('Canvas daemon client', () => {
       type: 'DismissPlan',
       planId: trustedPlan.planId,
     })
+    expect(serializeCanvasCommand({
+      type: 'DetachInstance',
+      nodeId: 'instance-node',
+    })).toEqual({
+      type: 'DetachInstance',
+      nodeId: 'instance-node',
+    })
   })
 
   it('exposes a 409 currentRevision without hiding it', async () => {

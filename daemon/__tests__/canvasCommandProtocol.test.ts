@@ -387,6 +387,10 @@ test('plan operations remain opaque discriminated wire commands', () => {
     type: 'DismissPlan',
     planId,
   }), { type: 'DismissPlan', planId })
+  assert.deepEqual(parseCanvasCommandWire({
+    type: 'DetachInstance',
+    nodeId: 'instance-node',
+  }), { type: 'DetachInstance', nodeId: 'instance-node' })
 })
 
 test('rejects extra request and ordinary-command fields', () => {

@@ -194,6 +194,14 @@ export const BUILTIN_PAYLOAD_SCHEMAS: readonly AnySchema[] = [
       },
     }, additionalProperties: false,
   },
+  {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    $id: 'ggai://schema/payload/instance',
+    type: 'object', required: ['overrides'],
+    properties: {
+      overrides: { type: 'object', maxProperties: 256, additionalProperties: true },
+    }, additionalProperties: false,
+  },
 ]
 
 export function createBuiltinPayloadSchemaRegistry(): NodePayloadSchemaRegistry {
