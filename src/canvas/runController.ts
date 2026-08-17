@@ -6,6 +6,7 @@ import {
   taskHasMaterializedRunOutput,
   type CanvasGhostOutput,
   type CanvasTaskRuntime,
+  nodeHasVisibleContent,
 } from './selectors'
 
 export type CanvasAttachmentRef =
@@ -197,7 +198,11 @@ interface ActiveExecution {
   cursor: number
   abort: AbortController
   completion: Promise<CanvasTaskRunClose>
+  replayApplication: AgentEventApplication
+  refreshOnSettle: boolean
 }
+
+type AgentEventApplication = 'live' | 'replay-active' | 'replay-history'
 
 const ACTIVE_STATUSES = new Set<CanvasTaskRunStatus>([
   'preparing',
@@ -285,7 +290,8 @@ export class CanvasTaskRunController {
         ghosts: [],
       })
 
-      let recovered = false
+      let replayDurableLog = false
+      let replayApplication: AgentEventApplication = 'live'
       try {
         const created = await this.#client.createTaskRun({
           projectDir: snapshot.scope.projectDir,
@@ -302,14 +308,19 @@ export class CanvasTaskRunController {
         })
         if (!summary) throw cause
         assertSummaryIdentity(summary, intent)
-        recovered = true
+        replayDurableLog = true
+        replayApplication = ACTIVE_STATUSES.has(summary.status)
+          ? 'replay-active'
+          : 'replay-history'
       }
 
       return this.#beginExecution({
         taskId: input.taskId,
         runId: queuedRunId,
         projectDir: snapshot.scope.projectDir,
-        replayDurableLog: recovered,
+        replayDurableLog,
+        replayApplication,
+        refreshOnSettle: true,
         signal: input.signal,
       })
     } catch (error) {
@@ -450,10 +461,21 @@ export class CanvasTaskRunController {
         ? latestTerminal
         : undefined)
     if (!summary) return null
+    const materializedOutput = taskHasMaterializedRunOutput(
+      snapshot.document,
+      taskId,
+      summary.runId,
+    )
+    const summaryIsActive = ACTIVE_STATUSES.has(summary.status)
     this.#store.setTaskRuntime({
       taskId,
       runId: summary.runId,
-      phase: summaryPhase(summary.status),
+      // A durable projection from this same Run outranks a stale active
+      // summary during project recovery. Live events can still move it back
+      // to running if the daemon truly continues the Run.
+      phase: materializedOutput && summaryIsActive
+        ? 'done'
+        : summaryPhase(summary.status),
       ...(summary.error ? { message: summary.error } : {}),
       ghosts: [],
     })
@@ -462,6 +484,10 @@ export class CanvasTaskRunController {
       runId: summary.runId,
       projectDir: snapshot.scope.projectDir,
       replayDurableLog: true,
+      replayApplication: summaryIsActive && !materializedOutput
+        ? 'replay-active'
+        : 'replay-history',
+      refreshOnSettle: summaryIsActive && !materializedOutput,
     })
   }
 
@@ -470,6 +496,8 @@ export class CanvasTaskRunController {
     runId: string
     projectDir: string
     replayDurableLog: boolean
+    replayApplication: AgentEventApplication
+    refreshOnSettle: boolean
     signal?: AbortSignal
   }): CanvasTaskRunHandle {
     let resolve!: (close: CanvasTaskRunClose) => void
@@ -495,6 +523,8 @@ export class CanvasTaskRunController {
       cursor: 0,
       abort,
       completion,
+      replayApplication: input.replayApplication,
+      refreshOnSettle: input.refreshOnSettle,
     }
     this.#activeByTaskId.set(input.taskId, execution)
     if (this.#isCurrent(execution)) {
@@ -557,7 +587,12 @@ export class CanvasTaskRunController {
       for (const entry of page.entries) {
         if (entry.id <= execution.cursor) continue
         if (entry.event === 'agent-event') {
-          this.#applyAgentEvent(execution, entry.id, entry.data)
+          this.#applyAgentEvent(
+            execution,
+            entry.id,
+            entry.data,
+            execution.replayApplication,
+          )
         } else if (entry.event === 'close') {
           execution.cursor = entry.id
           close = entry.data
@@ -579,6 +614,7 @@ export class CanvasTaskRunController {
     execution: ActiveExecution,
     eventId: number,
     event: CanvasAgentEvent,
+    application: AgentEventApplication = 'live',
   ): void {
     if (!this.#isCurrent(execution) || this.#settledRunIds.has(execution.runId)) return
     if (eventId <= execution.cursor) return
@@ -587,13 +623,48 @@ export class CanvasTaskRunController {
     const current = snapshot.runtimeByTaskId[execution.taskId]
     if (!current || current.runId !== execution.runId) return
 
+    if (application !== 'live') {
+      if (application === 'replay-active') {
+        if (event.type === 'file-write') {
+          if (!taskHasMaterializedRunOutput(
+            snapshot.document,
+            execution.taskId,
+            execution.runId,
+          )) {
+            const ghost = ghostFromPath(
+              event.path,
+              resolveGhostNodeId(snapshot.document, execution.taskId, event.nodeId),
+            )
+            if (ghost) this.#store.upsertTaskGhost(execution.taskId, ghost)
+          }
+        } else if (event.type === 'permission-request'
+          && current.phase === 'awaiting-permission') {
+          this.#store.setTaskRuntime({
+            ...current,
+            message: event.detail || event.action,
+          })
+          this.#notifyPermission(execution, event)
+        } else {
+          const message = recoveredEventMessage(event)
+          if (message && (current.phase === 'queued' || current.phase === 'running')) {
+            this.#store.setTaskRuntime({ ...current, message })
+          }
+        }
+      }
+      this.#appendAgentEventLog(execution.runId, eventId, event)
+      return
+    }
+
     if (event.type === 'file-write') {
       if (taskHasMaterializedRunOutput(
         snapshot.document,
         execution.taskId,
         execution.runId,
       )) return
-      const ghost = ghostFromPath(event.path)
+      const ghost = ghostFromPath(
+        event.path,
+        resolveGhostNodeId(snapshot.document, execution.taskId, event.nodeId),
+      )
       if (ghost) this.#store.upsertTaskGhost(execution.taskId, ghost)
       return
     }
@@ -603,13 +674,7 @@ export class CanvasTaskRunController {
         phase: 'awaiting-permission',
         message: event.detail || event.action,
       })
-      this.#notifyAsync(this.#onPermissionRequest, {
-        taskId: execution.taskId,
-        runId: execution.runId,
-        permissionId: event.id,
-        action: event.action,
-        detail: event.detail,
-      })
+      this.#notifyPermission(execution, event)
       return
     }
     if (event.type === 'thinking') {
@@ -625,9 +690,7 @@ export class CanvasTaskRunController {
     } else if (event.type === 'done') {
       this.#markRunning(current, '正在持久化产物')
     }
-    for (const line of runLogLinesForAgentEvent(event)) {
-      this.#appendLog(execution.runId, eventId, line.kind, line.text)
-    }
+    this.#appendAgentEventLog(execution.runId, eventId, event)
   }
 
   async #settle(
@@ -638,7 +701,7 @@ export class CanvasTaskRunController {
       throw new Error(`Run close belonged to ${close.runId}, expected ${execution.runId}`)
     }
     if (this.#settledRunIds.has(close.runId)) return close
-    await this.#store.reload()
+    if (execution.refreshOnSettle) await this.#store.reload()
     const snapshot = this.#store.getSnapshot()
     if (snapshot.hydration.status !== 'ready') {
       throw new Error(snapshot.hydration.error ?? 'Canvas reload after Run close failed')
@@ -691,6 +754,25 @@ export class CanvasTaskRunController {
       characters -= removed?.text.length ?? 0
     }
     this.#logsByRunId.set(runId, entries)
+  }
+
+  #appendAgentEventLog(runId: string, eventId: number, event: CanvasAgentEvent): void {
+    for (const line of runLogLinesForAgentEvent(event)) {
+      this.#appendLog(runId, eventId, line.kind, line.text)
+    }
+  }
+
+  #notifyPermission(
+    execution: ActiveExecution,
+    event: Extract<CanvasAgentEvent, { type: 'permission-request' }>,
+  ): void {
+    this.#notifyAsync(this.#onPermissionRequest, {
+      taskId: execution.taskId,
+      runId: execution.runId,
+      permissionId: event.id,
+      action: event.action,
+      detail: event.detail,
+    })
   }
 
   #markRunning(runtime: CanvasTaskRuntime, message: string): void {
@@ -787,7 +869,7 @@ function isPlanReviewSettled(document: CanvasDocument, planId: string): boolean 
     && (receipt.kind === 'proposal-acceptance' || receipt.kind === 'plan-dismissal'))
 }
 
-function ghostFromPath(rawPath: string): CanvasGhostOutput | null {
+function ghostFromPath(rawPath: string, nodeId?: string): CanvasGhostOutput | null {
   const parts = rawPath.normalize('NFKC').replaceAll('\\', '/').split('/')
     .map((part) => stripControlCharacters(part).trim())
     .filter(Boolean)
@@ -796,15 +878,42 @@ function ghostFromPath(rawPath: string): CanvasGhostOutput | null {
   if (!rawName || rawName === '.' || rawName === '..' || rawName.startsWith('.')) return null
   if (/^(?:~.*|.*(?:\.tmp|\.part|\.swp|~))$/iu.test(rawName)) return null
   const title = rawName.slice(0, 180)
-  const normalizedKey = title.toLocaleLowerCase('en-US')
+  const normalizedPath = parts.join('/').toLocaleLowerCase('en-US')
     .replace(/[^\p{Letter}\p{Number}._-]+/gu, '-')
     .replace(/^-+|-+$/gu, '')
-    .slice(0, 120) || 'output'
+    .slice(-160) || 'output'
+  const normalizedNodeId = nodeId?.normalize('NFKC')
+    .replace(/[^a-zA-Z0-9._:-]+/gu, '-')
+    .slice(0, 120)
   return {
-    key: `file:${normalizedKey}`,
+    key: `file:${normalizedNodeId ? `${normalizedNodeId}:` : ''}${normalizedPath}`,
     title,
     phase: 'writing',
+    ...(nodeId ? { nodeId } : {}),
   }
+}
+
+function resolveGhostNodeId(
+  document: CanvasDocument,
+  taskId: string,
+  requestedNodeId?: string,
+): string | undefined {
+  const taskNodes = document.nodes.filter((node) => node.homeTaskId === taskId)
+  if (requestedNodeId && taskNodes.some((node) => node.id === requestedNodeId)) {
+    return requestedNodeId
+  }
+  const emptySlots = taskNodes.filter((node) => !nodeHasVisibleContent(node))
+  return emptySlots.length === 1 ? emptySlots[0]!.id : undefined
+}
+
+function recoveredEventMessage(event: CanvasAgentEvent): string | null {
+  if (event.type === 'thinking') return '正在思考'
+  if (event.type === 'text-delta') return '正在生成'
+  if (event.type === 'tool-call') return `正在使用 ${event.name}`
+  if (event.type === 'tool-result') return '工具调用完成'
+  if (event.type === 'error') return event.message
+  if (event.type === 'done') return '正在持久化产物'
+  return null
 }
 
 function stripControlCharacters(value: string): string {

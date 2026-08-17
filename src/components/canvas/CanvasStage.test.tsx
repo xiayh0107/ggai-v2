@@ -1142,6 +1142,7 @@ describe('Canvas interactive stage', () => {
       message: '正在生成评论',
       ghosts: [{
         key: 'review',
+        nodeId: 'node-slot',
         title: '画面评论',
         pluginId: 'text',
         phase: 'writing',

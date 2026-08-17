@@ -392,12 +392,49 @@ describe('CanvasTaskRunController', () => {
     })
 
     expect(store.snapshot.runtimeByTaskId['task-a']?.ghosts).toEqual([{
-      key: 'file:classic-scatter-plot.png',
+      key: 'file:artifacts-nested-classic-scatter-plot.png',
       title: 'Classic Scatter Plot.PNG',
       phase: 'writing',
     }])
+    client.emit(handle.runId, 2, {
+      type: 'file-write',
+      path: 'artifacts/alternate/Classic Scatter Plot.PNG',
+    })
+    expect(store.snapshot.runtimeByTaskId['task-a']?.ghosts.map((ghost) => ghost.key))
+      .toEqual([
+        'file:artifacts-nested-classic-scatter-plot.png',
+        'file:artifacts-alternate-classic-scatter-plot.png',
+      ])
     expect(store.snapshot.document.nodes).toBe(originalNodes)
     expect(store.snapshot.document.nodes).toHaveLength(0)
+  })
+
+  it('binds a file-write ghost to the sole owned output slot', async () => {
+    const document = taskDocument('task-a')
+    document.nodes.push({
+      id: 'node-slot',
+      type: 'text',
+      frame: { x: 40, y: 80, w: 320, h: 256, z: 1 },
+      title: 'Empty slot',
+      artifactRefs: [],
+      homeTaskId: 'task-a',
+      origin: { kind: 'user' },
+    })
+    const store = new FakeStore(document)
+    const client = new FakeClient()
+    const handle = await controller(store, client).runTask({
+      taskId: 'task-a',
+      agentId: 'codex',
+    })
+
+    client.emit(handle.runId, 1, { type: 'file-write', path: 'files/result.md' })
+
+    expect(store.snapshot.runtimeByTaskId['task-a']?.ghosts).toEqual([{
+      key: 'file:node-slot:files-result.md',
+      nodeId: 'node-slot',
+      title: 'result.md',
+      phase: 'writing',
+    }])
   })
 
   it('does not treat Agent done as terminal and reloads only after durable close', async () => {
@@ -609,6 +646,7 @@ describe('CanvasTaskRunController', () => {
 
     expect(handle?.runId).toBe('recovered-run')
     expect(store.snapshot.runtimeByTaskId['task-a']?.ghosts).toEqual([])
+    expect(store.snapshot.runtimeByTaskId['task-a']?.phase).toBe('done')
     expect(client.attaches.get('recovered-run')?.input.afterEventId).toBe(3)
   })
 
@@ -648,10 +686,10 @@ describe('CanvasTaskRunController', () => {
     await expect(handle?.completion).resolves.toEqual(close)
     expect(client.readRunIds).toEqual(['recovered-close'])
     expect(client.attaches.size).toBe(0)
-    expect(store.reloadCount).toBe(1)
+    expect(store.reloadCount).toBe(0)
     expect(onProjectionPlan).toHaveBeenCalledTimes(1)
     expect(await subject.recoverTask('task-a')).toBeNull()
-    expect(store.reloadCount).toBe(1)
+    expect(store.reloadCount).toBe(0)
   })
 
   it('does not redeliver a terminal plan settled by a persistent Canvas receipt', async () => {
@@ -702,8 +740,60 @@ describe('CanvasTaskRunController', () => {
     const handle = await subject.recoverTask('task-a')
     await handle?.completion
 
-    expect(store.reloadCount).toBe(1)
+    expect(store.reloadCount).toBe(0)
     expect(onProjectionPlan).not.toHaveBeenCalled()
+  })
+
+  it('replays a terminal Run as history without restoring progress or permissions', async () => {
+    const store = new FakeStore()
+    const client = new FakeClient()
+    const permission = vi.fn()
+    const close: CanvasTaskRunClose = {
+      runId: 'terminal-run',
+      status: 'done',
+      artifactsComplete: true,
+    }
+    client.summaries = [{
+      runId: 'terminal-run',
+      taskId: 'task-a',
+      agentId: 'codex',
+      canvasBranch: 'main',
+      status: 'done',
+      startedAt: 10,
+    }]
+    client.logEntries = {
+      entries: [
+        { id: 1, event: 'agent-event', data: { type: 'thinking', text: 'Old thought' } },
+        {
+          id: 2,
+          event: 'agent-event',
+          data: {
+            type: 'permission-request',
+            id: 'old-permission',
+            action: 'write',
+            detail: 'Old request',
+          },
+        },
+        { id: 3, event: 'agent-event', data: { type: 'done', stopReason: 'end_turn' } },
+        { id: 4, event: 'close', data: close },
+      ],
+      nextEventId: null,
+    }
+    const subject = controller(store, client, { onPermissionRequest: permission })
+
+    const handle = await subject.recoverTask('task-a')
+    await expect(handle?.completion).resolves.toEqual(close)
+
+    expect(permission).not.toHaveBeenCalled()
+    expect(store.order).not.toContain('runtime:running')
+    expect(store.order).not.toContain('runtime:awaiting-permission')
+    expect(store.snapshot.runtimeByTaskId['task-a']?.phase).toBe('done')
+    expect(subject.getRunLog('terminal-run')).toContainEqual({
+      eventId: 1,
+      kind: 'thinking',
+      text: 'Old thought',
+    })
+    expect(store.reloadCount).toBe(0)
   })
 
   it('keeps a bounded thinking/tool/text log and ignores duplicate event ids', async () => {

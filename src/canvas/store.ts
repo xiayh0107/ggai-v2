@@ -27,6 +27,7 @@ import {
 } from './selectors'
 
 export type CanvasHydrationStatus = 'idle' | 'loading' | 'ready' | 'error'
+export type CanvasRefreshStatus = 'idle' | 'refreshing' | 'error'
 export type CanvasCommandSyncStatus =
   | 'idle'
   | 'pending'
@@ -48,6 +49,11 @@ export interface CanvasStoreState {
   scope: CanvasCanvasScope
   hydration: {
     status: CanvasHydrationStatus
+    error: string | null
+  }
+  /** Background daemon refresh; unlike initial hydration it never unmounts Canvas. */
+  refresh: {
+    status: CanvasRefreshStatus
     error: string | null
   }
   commandSync: {
@@ -143,6 +149,8 @@ export class CanvasStore {
 
   #state: CanvasStoreState
   #loadPromise: Promise<void> | null = null
+  #reloadPromise: Promise<void> | null = null
+  #reloadRequested = false
   #flushPromise: Promise<void> | null = null
   #flushRequested = false
   #enqueueTail: Promise<void> = Promise.resolve()
@@ -181,6 +189,7 @@ export class CanvasStore {
     this.#state = {
       scope: structuredClone(options.scope),
       hydration: { status: 'idle', error: null },
+      refresh: { status: 'idle', error: null },
       commandSync: {
         status: 'idle',
         pendingCount: 0,
@@ -211,20 +220,31 @@ export class CanvasStore {
   }
 
   async reload(): Promise<void> {
+    this.#reloadRequested = true
+    if (this.#reloadPromise) return this.#reloadPromise
+    const operation = this.#drainReloadRequests().finally(() => {
+      if (this.#reloadPromise === operation) this.#reloadPromise = null
+    })
+    this.#reloadPromise = operation
+    return operation
+  }
+
+  async #drainReloadRequests(): Promise<void> {
+    while (this.#reloadRequested) {
+      this.#reloadRequested = false
+      await this.#reloadOnce()
+    }
+  }
+
+  async #reloadOnce(): Promise<void> {
     if (this.#flushPromise) await this.#flushPromise
     if (this.#state.viewSync.status === 'pending'
       || this.#state.viewSync.status === 'saving'
       || this.#state.viewSync.status === 'error') {
       await this.flushViewState()
     }
-    this.#loadPromise = null
-    this.#setState((state) => ({
-      ...state,
-      hydration: { status: 'loading', error: null },
-    }))
-    const operation = this.#load(true)
-    this.#loadPromise = operation
-    await operation
+    const backgroundRefresh = this.#state.hydration.status === 'ready'
+    await this.#load(true, backgroundRefresh)
   }
 
   dispatchCommand(command: CanvasCommand): Promise<{ mutationId: string }> {
@@ -503,10 +523,12 @@ export class CanvasStore {
     this.#listeners.clear()
   }
 
-  async #load(preserveLiveView: boolean): Promise<void> {
+  async #load(preserveLiveView: boolean, backgroundRefresh = false): Promise<void> {
     this.#setState((state) => ({
       ...state,
-      hydration: { status: 'loading', error: null },
+      ...(backgroundRefresh
+        ? { refresh: { status: 'refreshing' as const, error: null } }
+        : { hydration: { status: 'loading' as const, error: null } }),
       commandSync: { ...state.commandSync, error: null, conflict: null },
       ...(preserveLiveView ? {} : { viewSync: { status: 'idle' as const, error: null } }),
     }))
@@ -516,12 +538,20 @@ export class CanvasStore {
         this.#persistence.readViewState(this.#persistenceScope),
         this.#outbox.list(this.#persistenceScope),
       ])
+      if (backgroundRefresh && envelope.revision < this.#acknowledgedRevision) {
+        this.#setState((state) => ({
+          ...state,
+          refresh: { status: 'idle', error: null },
+        }))
+        return
+      }
       this.#acknowledgedRevision = envelope.revision
       const replay = replayCanvasOutbox(envelope.document, entries)
       if (replay.status === 'conflict') {
         this.#setState((state) => ({
           ...state,
           hydration: { status: 'ready', error: null },
+          refresh: { status: 'idle', error: null },
           envelope,
           document: replay.document,
           view: preserveLiveView ? state.view : storedView ?? defaultCanvasViewState(),
@@ -545,6 +575,7 @@ export class CanvasStore {
       this.#setState((state) => ({
         ...state,
         hydration: { status: 'ready', error: null },
+        refresh: { status: 'idle', error: null },
         envelope,
         document: replay.document,
         view: preserveLiveView ? state.view : storedView ?? defaultCanvasViewState(),
@@ -561,6 +592,13 @@ export class CanvasStore {
       await this.#queueLegacyDeletedViewRepairs()
       if (entries.length > 0) void this.flushCommands()
     } catch (error) {
+      if (backgroundRefresh) {
+        this.#setState((state) => ({
+          ...state,
+          refresh: { status: 'error', error: errorMessage(error) },
+        }))
+        throw error
+      }
       this.#setState((state) => ({
         ...state,
         hydration: { status: 'error', error: errorMessage(error) },

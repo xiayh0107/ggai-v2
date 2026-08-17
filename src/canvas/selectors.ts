@@ -35,6 +35,8 @@ export type CanvasGhostOutputPhase = 'discovered' | 'writing' | 'ready'
 export interface CanvasGhostOutput {
   key: string
   title: string
+  /** Optional durable output-slot identity supplied by file-write events. */
+  nodeId?: string
   pluginId?: string
   /**
    * Run 已启动、但 Agent 尚未声明具体产物时由 selector 投射的临时输出面。
@@ -347,12 +349,13 @@ export function selectTaskView(
           provisional: true,
         }]
       : runtime?.ghosts ?? []
-  // 空输出槽节点本身就是「等待内容」的占位：正在写进槽位的 ghost 不再重复绘制，
-  // 否则说明条会吸附到锚点处的 ghost 上，与槽节点脱开；其余 ghost 接续节点网格。
-  const emptySlotCount = nodes.filter((node) => !nodeHasVisibleContent(node)).length
+  // A bound Node already owns the visual slot, so its transient ghost is not
+  // drawn separately. Unbound ghosts remain visible instead of being guessed
+  // away by array position.
+  const nodeIds = new Set(nodes.map((node) => node.id))
   const ghosts = layoutGhostOutputs(
     task,
-    runtimeGhosts.slice(emptySlotCount),
+    runtimeGhosts.filter((ghost) => !ghost.nodeId || !nodeIds.has(ghost.nodeId)),
     nodes.length,
   )
   const status = deriveTaskStatus(runtime, nodes)

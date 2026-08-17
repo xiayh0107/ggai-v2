@@ -45,6 +45,7 @@ class FakeStore {
   state: CanvasStoreState = {
     scope: { projectDir: '/workspace/project-one', branch: 'main' },
     hydration: { status: 'ready', error: null },
+    refresh: { status: 'idle', error: null },
     commandSync: { status: 'idle', pendingCount: 0, error: null, conflict: null },
     viewSync: { status: 'idle', error: null },
     envelope: null,

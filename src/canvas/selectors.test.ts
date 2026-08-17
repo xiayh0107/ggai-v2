@@ -174,6 +174,26 @@ describe('Canvas task selectors', () => {
     expect(view?.nodes.map((entry) => entry.id)).toEqual(['recovered-output'])
   })
 
+  it('keeps an unbound ghost visible when multiple empty slots are ambiguous', () => {
+    const document = emptyCanvasDocument()
+    document.tasks.push(task('task-1'))
+    document.nodes.push(
+      node('slot-a', 148, 216, { homeTaskId: 'task-1' }),
+      node('slot-b', 604, 216, { homeTaskId: 'task-1' }),
+    )
+
+    const view = selectTaskView(document, 'task-1', {
+      zoom: 1,
+      runtime: runtime('running', {
+        runId: 'run-new',
+        ghosts: [{ key: 'file:result', title: 'result.md', phase: 'writing' }],
+      }),
+    })
+
+    expect(view?.ghosts).toHaveLength(1)
+    expect(view?.ghosts[0]?.frame).toEqual(taskOutputFrame(task('task-1').anchor, 2))
+  })
+
   it('projects an anonymous output surface as soon as a zero-output task starts', () => {
     const document = emptyCanvasDocument()
     document.tasks.push(task('task-1', 20, 30))

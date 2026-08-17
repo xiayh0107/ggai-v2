@@ -102,6 +102,17 @@ export default function CanvasShell({
           </span>
         </div>
         <div className="flex items-center gap-3 text-[11px] text-gg-muted">
+          {state.refresh.status === 'error' && (
+            <button
+              type="button"
+              aria-label="重新刷新画布"
+              title={state.refresh.error ?? '画布刷新失败'}
+              onClick={() => void store.reload().catch(() => undefined)}
+              className="rounded-[8px] px-2 py-1 text-gg-danger outline-none hover:bg-gg-subtle focus-visible:ring-2 focus-visible:ring-gg-primary/35"
+            >
+              刷新失败，重试
+            </button>
+          )}
           {state.commandSync.pendingCount > 0 && (
             <span role="status">正在保存</span>
           )}

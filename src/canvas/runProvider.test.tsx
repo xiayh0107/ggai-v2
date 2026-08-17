@@ -413,6 +413,9 @@ describe('Canvas Task Run provider', () => {
       await vi.waitFor(() => expect(container?.querySelector('output')?.dataset.errors).toBe('1'))
     })
 
+    await act(async () => exposedLifecycle?.recoverOnce())
+    expect(controller.recoverAllMock).toHaveBeenCalledTimes(2)
+
     await act(async () => {
       await expect(exposedLifecycle?.startTask({
         taskId: 'task-1',
