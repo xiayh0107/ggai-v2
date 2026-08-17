@@ -18,7 +18,16 @@ import { HeadlessCanvasClient } from './canvasClient.js'
 import {
   listHeadlessRunArtifacts,
   readHeadlessRunHistory,
+  summarizeHeadlessRunHistory,
 } from './history.js'
+import {
+  canvasGraph,
+  canvasTreeText,
+  inspectCanvas,
+  inspectNode,
+  nodeText,
+  type GraphFormat,
+} from './inspection.js'
 import {
   CliCommandError,
   CliUsageError,
@@ -40,6 +49,9 @@ export const CLI_HELP = [
   '  continue <task-id> <prompt> --project P [--wait]',
   '  log <run-id> --project P             Read the durable Run log',
   '  artifact list <run-id> --project P   List verified Run artifacts',
+  '  canvas show --project P              Show Tasks and output Nodes',
+  '  canvas graph --project P [--format ascii|mermaid|dot|json]',
+  '  node show <node-id> --project P [--debug-layout]',
   '',
   'Global options:',
   '  --daemon-url URL        Daemon base URL (default http://127.0.0.1:7380)',
@@ -90,6 +102,9 @@ export async function runCli(argv: readonly string[], options: RunCliOptions): P
     }
     if (parsed.args[0] === 'project') {
       return await runProjectCommand(parsed, options.io, fetchImplementation)
+    }
+    if (parsed.args[0] === 'canvas' || parsed.args[0] === 'node') {
+      return await runInspectionCommand(parsed, options.io, fetchImplementation)
     }
     if (parsed.args[0] === 'run') {
       const request = parseRunRequest(parsed.args, options.environment ?? process.env)
@@ -146,7 +161,13 @@ export async function runCli(argv: readonly string[], options: RunCliOptions): P
         writeResult(options.io, parsed.json, 'artifact.list', result, artifactResultText(result.artifacts))
       } else {
         const result = await readHeadlessRunHistory(request, dependencies)
-        writeResult(options.io, parsed.json, 'log', result, logResultText(result.entries))
+        if (request.raw) {
+          writeResult(options.io, parsed.json, 'log.raw', result, rawLogText(result.entries))
+        } else {
+          const entries = summarizeHeadlessRunHistory(result.entries, request.tools)
+          const summary = { project: result.project, runId: result.runId, entries }
+          writeResult(options.io, parsed.json, 'log', summary, logResultText(entries))
+        }
       }
       return 0
     }
@@ -157,6 +178,42 @@ export async function runCli(argv: readonly string[], options: RunCliOptions): P
     if (failure.help) options.io.stderr(`\n${CLI_HELP}\n`)
     return failure.exitCode
   }
+}
+
+async function runInspectionCommand(
+  parsed: ParsedCli,
+  io: CliIo,
+  fetchImplementation: typeof globalThis.fetch,
+): Promise<number> {
+  const request = parseInspectionRequest(parsed.args)
+  const dependencies = {
+    projects: new WorkspaceProjectClient({ baseUrl: parsed.daemonUrl, fetch: fetchImplementation }),
+    canvas: new HeadlessCanvasClient({ baseUrl: parsed.daemonUrl, fetch: fetchImplementation }),
+    fetch: fetchImplementation,
+    daemonUrl: parsed.daemonUrl,
+  }
+  if (request.kind === 'node') {
+    const result = await inspectNode(request, dependencies)
+    writeResult(io, parsed.json, 'node.show', result, nodeText(result))
+    return 0
+  }
+  const result = await inspectCanvas(request, dependencies)
+  if (request.kind === 'show') {
+    const output = {
+      project: result.project,
+      branch: result.branch,
+      revision: result.revision,
+      document: result.document,
+    }
+    writeResult(io, parsed.json, 'canvas.show', output, canvasTreeText(result))
+    return 0
+  }
+  const graph = canvasGraph(result.document, request.format)
+  const output = { project: result.project, branch: result.branch, revision: result.revision, graph }
+  writeResult(io, parsed.json, 'canvas.graph', output, typeof graph === 'string'
+    ? graph
+    : JSON.stringify(graph, null, 2))
+  return 0
 }
 
 async function runProjectCommand(
@@ -354,13 +411,55 @@ function parseHistoryRequest(args: readonly string[], artifact: boolean) {
   if (artifact && args[1] !== 'list') throw new CliUsageError('artifact requires list')
   const runId = args[runIndex]
   let project = ''
+  let raw = false
+  let tools = false
   for (let index = runIndex + 1; index < args.length; index += 1) {
     if (args[index] === '--project') project = args[++index] ?? ''
+    else if (!artifact && args[index] === '--raw') raw = true
+    else if (!artifact && args[index] === '--tools') tools = true
     else throw new CliUsageError(`unknown option: ${args[index]}`)
   }
   if (!runId) throw new CliUsageError(`${artifact ? 'artifact list' : 'log'} requires a run id`)
   if (!project.trim()) throw new CliUsageError(`${artifact ? 'artifact list' : 'log'} requires --project`)
-  return { runId, project: project.trim() }
+  return { runId, project: project.trim(), raw, tools }
+}
+
+function parseInspectionRequest(args: readonly string[]):
+  | { kind: 'show'; project: string; branch: string }
+  | { kind: 'graph'; project: string; branch: string; format: GraphFormat }
+  | { kind: 'node'; project: string; branch: string; nodeId: string; debugLayout: boolean } {
+  const node = args[0] === 'node'
+  const subcommand = args[1]
+  if (subcommand !== 'show' && !(args[0] === 'canvas' && subcommand === 'graph')) {
+    throw new CliUsageError(`${args[0]} requires ${node ? 'show' : 'show or graph'}`)
+  }
+  const nodeId = node ? args[2] : undefined
+  let project = ''
+  let branch = 'main'
+  let format: GraphFormat = 'ascii'
+  let debugLayout = false
+  for (let index = node ? 3 : 2; index < args.length; index += 1) {
+    const argument = args[index]
+    if (argument === '--project') project = args[++index] ?? ''
+    else if (argument === '--branch') branch = args[++index] ?? ''
+    else if (argument === '--format') {
+      const candidate = args[++index]
+      if (candidate !== 'ascii' && candidate !== 'mermaid'
+        && candidate !== 'dot' && candidate !== 'json') {
+        throw new CliUsageError('--format must be ascii, mermaid, dot, or json')
+      }
+      format = candidate
+    } else if (node && argument === '--debug-layout') debugLayout = true
+    else throw new CliUsageError(`unknown option: ${argument}`)
+  }
+  if (!project.trim()) throw new CliUsageError(`${args[0]} ${subcommand} requires --project`)
+  if (node) {
+    if (!nodeId) throw new CliUsageError('node show requires a node id')
+    return { kind: 'node', project: project.trim(), branch, nodeId, debugLayout }
+  }
+  return subcommand === 'show'
+    ? { kind: 'show', project: project.trim(), branch }
+    : { kind: 'graph', project: project.trim(), branch, format }
 }
 
 function createRunDependencies(
@@ -424,9 +523,14 @@ function artifactResultText(artifacts: readonly { artifactId: string; mediaType:
     `${artifact.artifactId}\t${artifact.mediaType}\t${artifact.relativePath}`).join('\n')
 }
 
-function logResultText(entries: readonly { id: number; event: string; data: unknown }[]) {
+function logResultText(entries: readonly { id: number; kind: string; message: string }[]) {
   if (entries.length === 0) return 'No log entries'
-  return entries.map((entry) => `${entry.id}\t${entry.event}\t${JSON.stringify(entry.data)}`).join('\n')
+  return entries.map((entry) => `${entry.id}\t${entry.kind}\t${entry.message}`).join('\n')
+}
+
+function rawLogText(entries: readonly { id: number; event: string; data: unknown }[]) {
+  if (entries.length === 0) return 'No log entries'
+  return entries.map((entry) => JSON.stringify(entry)).join('\n')
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

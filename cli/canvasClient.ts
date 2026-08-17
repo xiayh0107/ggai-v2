@@ -80,13 +80,7 @@ export class HeadlessCanvasClient {
   ): Promise<HeadlessCanvasEnvelope> {
     const value = await response.json() as unknown
     if (!response.ok) throw new Error(responseError(value, response.status, operation))
-    if (!isExactRecord(value, [
-      'branch',
-      'revision',
-      'updatedAt',
-      'lastMutationId',
-      'document',
-    ])
+    if (!isEnvelopeRecord(value)
       || value.branch !== expectedBranch
       || !Number.isSafeInteger(value.revision)
       || (value.revision as number) < 0
@@ -115,9 +109,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function isExactRecord(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+function isEnvelopeRecord(value: unknown): value is Record<string, unknown> {
   if (!isRecord(value)) return false
   const actual = Object.keys(value)
-  return actual.length === keys.length
-    && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+  const required = ['branch', 'revision', 'updatedAt', 'lastMutationId', 'document']
+  const allowed = new Set([...required, 'lastCheckpoint'])
+  return required.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+    && actual.every((key) => allowed.has(key))
 }
