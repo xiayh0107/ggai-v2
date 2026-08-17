@@ -2,7 +2,11 @@ import type { CanvasAgentEvent } from '@/agent/types'
 import type { DaemonProjectionPlan } from '@/agent/projectionPlan'
 import type { SuggestedAction } from '@/agent/suggestedActions'
 import type { CanvasDocument } from './model'
-import type { CanvasGhostOutput, CanvasTaskRuntime } from './selectors'
+import {
+  taskHasMaterializedRunOutput,
+  type CanvasGhostOutput,
+  type CanvasTaskRuntime,
+} from './selectors'
 
 export type CanvasAttachmentRef =
   | { kind: 'artifact'; runId: string; artifactId: string }
@@ -579,10 +583,16 @@ export class CanvasTaskRunController {
     if (!this.#isCurrent(execution) || this.#settledRunIds.has(execution.runId)) return
     if (eventId <= execution.cursor) return
     if (eventId > execution.cursor) execution.cursor = eventId
-    const current = this.#store.getSnapshot().runtimeByTaskId[execution.taskId]
+    const snapshot = this.#store.getSnapshot()
+    const current = snapshot.runtimeByTaskId[execution.taskId]
     if (!current || current.runId !== execution.runId) return
 
     if (event.type === 'file-write') {
+      if (taskHasMaterializedRunOutput(
+        snapshot.document,
+        execution.taskId,
+        execution.runId,
+      )) return
       const ghost = ghostFromPath(event.path)
       if (ghost) this.#store.upsertTaskGhost(execution.taskId, ghost)
       return

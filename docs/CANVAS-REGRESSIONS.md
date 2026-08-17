@@ -136,6 +136,17 @@
 - **回归测试**：draft → queued / running → done / cancelled 的共享 surface 几何保持一致；
   运行控件内部切换不替换 surface DOM，不得新增第二张运行卡，终态后 textarea 原位恢复。
 
+### 16. 打开项目首秒把已生成 Node 重复计为 ghost 产物
+
+- **现象**：项目打开后，已有单产物 Task 短暂显示「生成中 / 2 个产物」说明条，连线先落到
+  Node 上方，随后说明条和重复产物消失，连线才恢复到 Node 边界。
+- **根因**：恢复 Run 时会回放永久日志中的 `file-write`；当同一 Run 的 durable Node 已经在
+  Canvas 中物化，回放仍创建 transient ghost，selector 因而短暂看到 `1 Node + 1 ghost`。
+- **修复**：Run controller 不再恢复已物化 Run 的 file-write ghost；Task selector 同时以
+  `taskId + runId` 去重 durable Node 与 transient ghost，保证恢复边界 fail closed。
+- **回归测试**：同一 Run 已有 Node 时，日志回放后 runtime ghosts 为空，Task 始终保持
+  `title-strip`；打开真实项目的连续采样中不得出现 output-frame 或「2 个产物」。
+
 ## 根因模式
 
 1. **复制架构代替滚动演进**：按记忆并行重做交互，没有逐条对照当前行为基准。

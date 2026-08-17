@@ -147,6 +147,33 @@ describe('Canvas task selectors', () => {
     expect(taskOutputFrame(subject.anchor, 2)).toEqual(ghosts[2]?.frame)
   })
 
+  it('does not duplicate a materialized Run output with its replayed ghost', () => {
+    const document = emptyCanvasDocument()
+    document.tasks.push(task('task-1'))
+    const output = node('recovered-output', 148, 216, { homeTaskId: 'task-1' })
+    output.origin = {
+      kind: 'agent-output',
+      taskId: 'task-1',
+      runId: 'run-recovered',
+      planId: PLAN_ID,
+      outputKey: 'image',
+    }
+    output.artifactRefs = [{ runId: 'run-recovered', artifactId: 'artifact-recovered' }]
+    document.nodes.push(output)
+
+    const view = selectTaskView(document, 'task-1', {
+      zoom: 1,
+      runtime: runtime('running', {
+        runId: 'run-recovered',
+        ghosts: [{ key: 'file:recovered.png', title: 'recovered.png', phase: 'writing' }],
+      }),
+    })
+
+    expect(view?.ghosts).toEqual([])
+    expect(view?.containerKind).toBe('title-strip')
+    expect(view?.nodes.map((entry) => entry.id)).toEqual(['recovered-output'])
+  })
+
   it('projects an anonymous output surface as soon as a zero-output task starts', () => {
     const document = emptyCanvasDocument()
     document.tasks.push(task('task-1', 20, 30))

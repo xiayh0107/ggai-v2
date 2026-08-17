@@ -569,6 +569,49 @@ describe('CanvasTaskRunController', () => {
     expect(store.snapshot.runtimeByTaskId['task-a']?.ghosts[0]?.title).toBe('recovered.png')
   })
 
+  it('does not restore file-write ghosts after the same Run output is materialized', async () => {
+    const document = taskDocument('task-a')
+    document.nodes.push({
+      id: 'node-recovered',
+      type: 'image',
+      frame: { x: 40, y: 80, w: 320, h: 256, z: 1 },
+      title: 'Recovered image',
+      artifactRefs: [{ runId: 'recovered-run', artifactId: 'artifact-recovered' }],
+      homeTaskId: 'task-a',
+      origin: {
+        kind: 'agent-output',
+        taskId: 'task-a',
+        runId: 'recovered-run',
+        planId: `plan_${'a'.repeat(64)}`,
+        outputKey: 'image',
+      },
+    })
+    const store = new FakeStore(document)
+    const client = new FakeClient()
+    client.summaries = [{
+      runId: 'recovered-run',
+      taskId: 'task-a',
+      agentId: 'codex',
+      canvasBranch: 'main',
+      status: 'running',
+      startedAt: 1,
+    }]
+    client.logEntries = {
+      entries: [{
+        id: 3,
+        event: 'agent-event',
+        data: { type: 'file-write', path: 'files/recovered.png' },
+      }],
+      nextEventId: null,
+    }
+
+    const handle = await controller(store, client).recoverTask('task-a')
+
+    expect(handle?.runId).toBe('recovered-run')
+    expect(store.snapshot.runtimeByTaskId['task-a']?.ghosts).toEqual([])
+    expect(client.attaches.get('recovered-run')?.input.afterEventId).toBe(3)
+  })
+
   it('recovers only the latest terminal close after refresh and redelivers its unsettled plan', async () => {
     const store = new FakeStore()
     const client = new FakeClient()
