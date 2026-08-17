@@ -5,9 +5,11 @@ import type {
 } from '@/canvas/model'
 import type { CanvasEdgeEndpoint } from './CanvasEdgeLayer'
 import type { CanvasConnectionPortSide } from './CanvasConnectionPort'
+import type { PortDefinition } from '@/plugins/nodeTypeContracts'
 
 export type CanvasConnectionEndpoint = (CanvasEdgeEndpoint & {
   portSide?: CanvasConnectionPortSide
+  dataPort?: PortDefinition
 }) | {
   kind: 'selection'
   id: string
@@ -28,7 +30,9 @@ export interface CanvasCreateNodeMenuState {
 }
 
 export function connectionEndpointKey(endpoint: CanvasConnectionEndpoint): string {
-  if (endpoint.kind !== 'selection') return `${endpoint.kind}:${endpoint.id}`
+  if (endpoint.kind !== 'selection') {
+    return `${endpoint.kind}:${endpoint.id}:${endpoint.dataPort?.direction ?? ''}:${endpoint.dataPort?.key ?? ''}`
+  }
   return `selection:${endpoint.members
     .map((member) => `${member.kind}:${member.id}`)
     .sort()
@@ -46,7 +50,10 @@ export function connectionEndpointLabel(
   if (endpoint.kind === 'task') {
     return `任务“${document.tasks.find((entry) => entry.id === endpoint.id)?.title ?? endpoint.id}”`
   }
-  return `节点“${document.nodes.find((entry) => entry.id === endpoint.id)?.title ?? endpoint.id}”`
+  const title = document.nodes.find((entry) => entry.id === endpoint.id)?.title ?? endpoint.id
+  return endpoint.dataPort
+    ? `节点“${title}”的 ${endpoint.dataPort.key} 端口`
+    : `节点“${title}”`
 }
 
 export function connectionEndpointTitle(

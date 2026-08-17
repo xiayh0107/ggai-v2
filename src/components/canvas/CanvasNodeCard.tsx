@@ -74,13 +74,14 @@ export interface CanvasNodeCardProps {
   onDragStart: (event: PointerEvent<HTMLElement>, node: CanvasNode) => void
   onResizeStart: (event: PointerEvent<HTMLButtonElement>, node: CanvasNode) => void
   onMenuAction?: (node: CanvasNode, action: string) => void
+  onOpenIsolation?: (node: CanvasNode) => void
   registerFocusable: (element: HTMLButtonElement | null) => void
 }
 
 export default function CanvasNodeCard({
   node,
   pluginOverride,
-  frame = canvasNodeFrame(node),
+  frame: frameOverride,
   projectDir,
   selected,
   compoundSelected = false,
@@ -95,8 +96,10 @@ export default function CanvasNodeCard({
   onDragStart,
   onResizeStart,
   onMenuAction,
+  onOpenIsolation,
   registerFocusable,
 }: CanvasNodeCardProps) {
+  const frame = frameOverride ?? canvasNodeFrame(node)
   const plugin = pluginOverride ?? getPlugin(node.typeRef.id)
   const Icon = nodeTypeIcon(plugin)
   const label = `${plugin.label}节点：${node.title || plugin.label}`
@@ -174,8 +177,14 @@ export default function CanvasNodeCard({
       data-node-id={node.id}
       data-selected={selected ? 'true' : 'false'}
       data-compound-selected={compoundSelected ? 'true' : 'false'}
+      onDoubleClick={onOpenIsolation ? (event) => {
+        event.stopPropagation()
+        onOpenIsolation(node)
+      } : undefined}
       frame={frame}
-      zIndex={canvasNodeFrame(node).z + 10}
+      zIndex={(frameOverride && 'z' in frameOverride && typeof frameOverride.z === 'number'
+        ? frameOverride.z
+        : canvasNodeFrame(node).z * 1_000_000) + 10}
       pointerEvents="auto"
       selected={selected}
       compoundSelected={compoundSelected}

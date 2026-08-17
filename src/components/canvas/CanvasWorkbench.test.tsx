@@ -17,12 +17,14 @@ import type {
   ProjectArtifactResource,
 } from '@/resources/artifactCatalogClient'
 import type { SkillAssetApi, SkillAssetCatalogPayload } from '@/skills/client'
+import { registerBuiltinPlugins } from '@/plugins/builtins'
 import CanvasWorkbench from './CanvasWorkbench'
 
 let root: Root | null = null
 let container: HTMLDivElement | null = null
 
 beforeAll(() => {
+  registerBuiltinPlugins()
   ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
     .IS_REACT_ACT_ENVIRONMENT = true
 })
@@ -60,6 +62,16 @@ class FakeStore {
         origin: { kind: 'user' },
       }],
       nodes: [{
+        id: 'node-group',
+        typeRef: { id: 'group', revision: 1, digest: '0'.repeat(64) },
+        parentId: null,
+        orderKey: '000000000001',
+        bounds: { w: 480, h: 360 },
+        transform: { matrix: [1, 0, 0, 1, 80, 80] },
+        title: '内容组合',
+        artifactRefs: [],
+        origin: { kind: 'user' },
+      }, {
         id: 'node-image',
         typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
         parentId: null,
@@ -156,6 +168,26 @@ describe('CanvasWorkbench', () => {
       .toBe('重新命名的说明')
     expect(container?.textContent).not.toContain('payload')
     expect(container?.querySelector('textarea')).toBeNull()
+  })
+
+  it('reparents a selected node through the hierarchy manager', async () => {
+    const store = new FakeStore()
+    store.setSelection([{ kind: 'node', id: 'node-notes' }])
+    renderWorkbench(store)
+    await click(button('节点管理'))
+    const parent = required<HTMLSelectElement>('select')
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLSelectElement.prototype,
+        'value',
+      )?.set
+      setter?.call(parent, 'node-group')
+      parent.dispatchEvent(new Event('change', { bubbles: true }))
+      await Promise.resolve()
+    })
+    expect(store.state.document.nodes.find((node) => node.id === 'node-notes')?.parentId)
+      .toBe('node-group')
+    expect(container?.textContent).toContain('层级 1')
   })
 
   it('reads trusted project resources in the current branch and links to the full library', async () => {

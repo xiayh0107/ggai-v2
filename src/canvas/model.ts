@@ -270,6 +270,82 @@ export function canvasNodeFrame(node: CanvasNode): CanvasFrame {
   }
 }
 
+export function canvasNodeWorldTransform(
+  document: Pick<CanvasDocument, 'nodes'>,
+  node: CanvasNode,
+): CanvasNodeTransform['matrix'] {
+  const nodesById = new Map(document.nodes.map((entry) => [entry.id, entry]))
+  const chain: CanvasNode[] = []
+  const seen = new Set<string>()
+  let current: CanvasNode | undefined = node
+  while (current) {
+    if (seen.has(current.id)) throw new CanvasValidationError([{
+      path: `nodes.${node.id}.parentId`,
+      message: 'forms a containment cycle',
+    }])
+    seen.add(current.id)
+    chain.push(current)
+    current = current.parentId ? nodesById.get(current.parentId) : undefined
+    if (chain.length > 32) throw new CanvasValidationError([{
+      path: `nodes.${node.id}.parentId`,
+      message: 'exceeds maximum containment depth 32',
+    }])
+  }
+  return chain.reverse().reduce<CanvasNodeTransform['matrix']>(
+    (matrix, entry) => multiplyAffine(matrix, entry.transform.matrix),
+    [1, 0, 0, 1, 0, 0],
+  )
+}
+
+export function canvasNodeWorldFrame(
+  document: Pick<CanvasDocument, 'nodes'>,
+  node: CanvasNode,
+): CanvasFrame {
+  const matrix = canvasNodeWorldTransform(document, node)
+  const corners = [
+    transformPoint(matrix, 0, 0),
+    transformPoint(matrix, node.bounds.w, 0),
+    transformPoint(matrix, 0, node.bounds.h),
+    transformPoint(matrix, node.bounds.w, node.bounds.h),
+  ]
+  const xs = corners.map((point) => point.x)
+  const ys = corners.map((point) => point.y)
+  const root = canvasRootNode(document, node)
+  let depth = 0
+  let current: CanvasNode | undefined = node
+  const byId = new Map(document.nodes.map((entry) => [entry.id, entry]))
+  while (current?.parentId) {
+    depth += 1
+    current = byId.get(current.parentId)
+  }
+  return {
+    x: Math.min(...xs),
+    y: Math.min(...ys),
+    w: Math.max(...xs) - Math.min(...xs),
+    h: Math.max(...ys) - Math.min(...ys),
+    z: canvasOrderNumber(root.orderKey) * 1_000_000
+      + depth * 10_000
+      + canvasOrderNumber(node.orderKey),
+  }
+}
+
+export function canvasRootNode(
+  document: Pick<CanvasDocument, 'nodes'>,
+  node: CanvasNode,
+): CanvasNode {
+  const nodesById = new Map(document.nodes.map((entry) => [entry.id, entry]))
+  let current = node
+  const seen = new Set<string>()
+  while (current.parentId) {
+    if (seen.has(current.id)) break
+    seen.add(current.id)
+    const parent = nodesById.get(current.parentId)
+    if (!parent) break
+    current = parent
+  }
+  return current
+}
+
 export function canvasNodeGeometry(frame: CanvasFrame): Pick<
   CanvasNode,
   'parentId' | 'orderKey' | 'bounds' | 'transform'
@@ -844,6 +920,31 @@ function validateTaskOriginCycles(
       current = parents.get(current)
     }
   }
+}
+
+function multiplyAffine(
+  left: CanvasNodeTransform['matrix'],
+  right: CanvasNodeTransform['matrix'],
+): CanvasNodeTransform['matrix'] {
+  const [a1, b1, c1, d1, e1, f1] = left
+  const [a2, b2, c2, d2, e2, f2] = right
+  return [
+    a1 * a2 + c1 * b2,
+    b1 * a2 + d1 * b2,
+    a1 * c2 + c1 * d2,
+    b1 * c2 + d1 * d2,
+    a1 * e2 + c1 * f2 + e1,
+    b1 * e2 + d1 * f2 + f1,
+  ]
+}
+
+function transformPoint(
+  matrix: CanvasNodeTransform['matrix'],
+  x: number,
+  y: number,
+): CanvasPoint {
+  const [a, b, c, d, e, f] = matrix
+  return { x: a * x + c * y + e, y: b * x + d * y + f }
 }
 
 function validateContainment(

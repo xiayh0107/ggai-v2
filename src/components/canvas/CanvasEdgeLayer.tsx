@@ -1,5 +1,5 @@
 import {
-  canvasNodeFrame,
+  canvasNodeWorldFrame,
   type CanvasCollection,
   type CanvasDocument,
   type CanvasEdgeContextRole,
@@ -178,7 +178,7 @@ export default function CanvasEdgeLayer({
     }
     const node = nodeById.get(ref.id)
     if (!node) return null
-    const frame = nodeFrames.get(node.id) ?? canvasNodeFrame(node)
+    const frame = nodeFrames.get(node.id) ?? canvasNodeWorldFrame(document, node)
     return translatedBounds(frame, nodeFrames.has(node.id) ? { dx: 0, dy: 0 } : offset)
   }
 

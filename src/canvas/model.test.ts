@@ -4,6 +4,8 @@ import {
   collectCanvasValidationIssues,
   emptyCanvasDocument,
   canvasNodeTypeRef,
+  canvasNodeWorldFrame,
+  canvasNodeWorldTransform,
   parseCanvasDocument,
   parseEntityKey,
   type CanvasNode,
@@ -73,6 +75,28 @@ describe('Canvas model', () => {
     expect(collectCanvasValidationIssues(input)).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: 'edges[0].contextRole' }),
     ]))
+  })
+
+  it('composes parent-local affine transforms into deterministic world geometry', () => {
+    const input = emptyCanvasDocument()
+    input.tasks.push(task('task-1'))
+    const parent = node('parent')
+    parent.transform.matrix = [2, 0, 0, 2, 100, 80]
+    const child: CanvasNode = {
+      ...node('child'),
+      parentId: parent.id,
+      transform: { matrix: [1, 0, 0, 1, 30, 20] },
+    }
+    delete child.homeTaskId
+    input.nodes.push(parent, child)
+
+    expect(canvasNodeWorldTransform(input, child)).toEqual([2, 0, 0, 2, 160, 120])
+    expect(canvasNodeWorldFrame(input, child)).toMatchObject({
+      x: 160,
+      y: 120,
+      w: 640,
+      h: 360,
+    })
   })
 
   it('parses the exact domain envelope without persisting run/session state', () => {

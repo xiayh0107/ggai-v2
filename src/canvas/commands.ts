@@ -916,8 +916,16 @@ function moveEntities(
   }
   for (const node of document.nodes) {
     if (!nodeIds.has(node.id)) continue
-    node.transform.matrix[4] += dx
-    node.transform.matrix[5] += dy
+    if (!node.parentId) {
+      node.transform.matrix[4] += dx
+      node.transform.matrix[5] += dy
+      continue
+    }
+    const nodesById = new Map(document.nodes.map((entry) => [entry.id, entry]))
+    const parent = requireNode(document, node.parentId)
+    const inverse = invertMatrix(worldTransform(parent, nodesById))
+    node.transform.matrix[4] += inverse[0] * dx + inverse[2] * dy
+    node.transform.matrix[5] += inverse[1] * dx + inverse[3] * dy
   }
 }
 
