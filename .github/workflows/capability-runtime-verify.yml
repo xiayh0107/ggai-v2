@@ -14,7 +14,10 @@ concurrency:
 jobs:
   verify:
     name: Capability Runtime verification
-    runs-on: ubuntu-latest
+    # Canvas v3 currently accepts only macOS. Host filesystem/container
+    # differences belong behind daemon providers, so the full release gate
+    # must exercise the supported host instead of weakening providers for CI.
+    runs-on: macos-15
     timeout-minutes: 35
 
     steps:

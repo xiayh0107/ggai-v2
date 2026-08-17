@@ -100,6 +100,63 @@ test('metadata schema 2 upgrades atomically with digest-bound compute approvals'
   await upgraded.close()
 })
 
+test('metadata schema 3 adds filesystem reconciliation identity without rebuilding data', async (t) => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-metadata-v3-')))
+  const first = new MetadataStore(root)
+  t.after(async () => {
+    await first.close()
+    await rm(root, { recursive: true, force: true })
+  })
+  await first.open()
+  await first.close()
+  const old = new DatabaseSync(first.databasePath)
+  old.exec(`
+    DROP TABLE sync_conflicts;
+    DROP TABLE node_bindings;
+    CREATE TABLE node_bindings (
+      binding_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      canvas_branch TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      root_id TEXT NOT NULL REFERENCES workspace_roots(root_id) ON DELETE RESTRICT,
+      relative_path TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('file', 'directory')),
+      mode TEXT NOT NULL CHECK (mode IN ('fs-authoritative', 'canvas-authoritative', 'bidirectional')),
+      base_digest TEXT,
+      canvas_digest TEXT,
+      disk_digest TEXT,
+      state TEXT NOT NULL CHECK (state IN ('clean', 'canvas-dirty', 'disk-dirty', 'conflict', 'missing')),
+      echo_token TEXT,
+      updated_at TEXT NOT NULL,
+      UNIQUE (project_id, canvas_branch, node_id),
+      UNIQUE (project_id, canvas_branch, root_id, relative_path)
+    );
+    CREATE TABLE sync_conflicts (
+      conflict_id TEXT PRIMARY KEY,
+      binding_id TEXT NOT NULL REFERENCES node_bindings(binding_id) ON DELETE CASCADE,
+      base_digest TEXT,
+      canvas_digest TEXT NOT NULL,
+      disk_digest TEXT NOT NULL,
+      state TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      resolved_at TEXT
+    );
+    CREATE INDEX sync_conflicts_open ON sync_conflicts(binding_id, created_at DESC)
+      WHERE state = 'open';
+    PRAGMA user_version = 3;
+  `)
+  old.close()
+  const upgraded = new MetadataStore(root)
+  await upgraded.open()
+  await upgraded.close()
+  const verified = new DatabaseSync(first.databasePath, { readOnly: true })
+  const columns = verified.prepare('PRAGMA table_info(node_bindings)').all()
+    .map((row) => String(row.name))
+  verified.close()
+  assert.ok(columns.includes('canvas_project_dir'))
+  assert.ok(columns.includes('file_identity'))
+})
+
 test('metadata authority rejects a symlinked runtime root', async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-metadata-symlink-')))
   const outside = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-metadata-outside-')))
