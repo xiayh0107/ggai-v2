@@ -23,6 +23,11 @@ import {
 } from './outcome.js'
 import { MAX_SUGGESTED_ACTIONS } from './suggestedActions.js'
 import {
+  MAX_GRAPH_PROPOSAL_EDGES,
+  MAX_GRAPH_PROPOSAL_NODES,
+} from './graphProposal.js'
+import { BUILTIN_NODE_TYPE_DEFINITIONS } from '../plugins/builtins/definitions.js'
+import {
   applyArtifactBudgetToNodeContext,
   projectNodeContext,
   type NodeContextProjectionReceipt,
@@ -303,6 +308,14 @@ export function renderTaskContextPrompt(pack: TaskContextPack): string {
     directInputs: pack.inputs,
     relatedGraph: pack.graph,
     truncated: pack.truncated,
+    constructibleNodeTypes: BUILTIN_NODE_TYPE_DEFINITIONS
+      .filter((type) => type.agent.constructible)
+      .map((type) => ({
+        id: type.id,
+        containment: type.containment,
+        ports: type.ports,
+        writableInitSchema: type.agent.writableInitSchema,
+      })),
   }
   const outcomeExample = {
     schemaVersion: 2,
@@ -334,6 +347,16 @@ export function renderTaskContextPrompt(pack: TaskContextPack): string {
       prompt: 'Add concise labels to the important points.',
       inputOutputKeys: ['preview'],
     }],
+    graphProposal: {
+      nodes: [
+        { key: 'source-node', typeId: 'text', title: 'Source', init: { content: 'Input' } },
+        { key: 'result-node', typeId: 'text', title: 'Result', init: {} },
+      ],
+      edges: [{
+        fromKey: 'source-node', fromPort: 'content',
+        toKey: 'result-node', toPort: 'content-in',
+      }],
+    },
   }
   return [
     '# Canvas Task',
@@ -347,7 +370,7 @@ export function renderTaskContextPrompt(pack: TaskContextPack): string {
     `- Submit the RunOutcome JSON sidecar at: ${JSON.stringify(pack.outputContract.runOutcomeSidecarPath)}.`,
     '- The sidecar is optional metadata: if it is missing or invalid, the run may still succeed and the daemon will project only verified artifact files.',
     `- Use 0–${MAX_SUGGESTED_ACTIONS} suggestedActions, at most ${MAX_RUN_OUTPUT_HINTS} outputs, and at most ${MAX_RUN_TASK_PROPOSALS} taskProposals.`,
-    '- The root object must contain exactly schemaVersion, suggestedActions, outputs, and taskProposals; use empty arrays when a section has no entries.',
+    '- The root object must contain schemaVersion, suggestedActions, outputs, and taskProposals; graphProposal is optional and no other root fields are allowed.',
     '- Each suggested action must contain exactly id, label, and prompt.',
     '- Each output must contain key, path, pluginId, and role; title and derivedFrom are optional, and no other fields are allowed.',
     '- Output role must be one of primary, supporting, or auxiliary. Paths are relative to the run files directory.',
@@ -355,6 +378,10 @@ export function renderTaskContextPrompt(pack: TaskContextPack): string {
     '- Multiple output keys may intentionally reference the same artifact path when distinct plugin views are useful.',
     '- Each task proposal must contain key, title, prompt, and inputOutputKeys; dependsOn is optional, and no other fields are allowed.',
     `- inputOutputKeys contains at most ${MAX_RUN_TASK_PROPOSAL_INPUTS} declared output keys. dependsOn contains at most ${MAX_RUN_TASK_PROPOSAL_DEPENDENCIES} proposal keys and the proposal graph must be acyclic.`,
+    `- graphProposal, when present, contains 1–${MAX_GRAPH_PROPOSAL_NODES} logical nodes and at most ${MAX_GRAPH_PROPOSAL_EDGES} port-to-port edges.`,
+    '- Graph nodes contain exactly key, typeId, title, init, and optional parentKey. Graph edges contain exactly fromKey, fromPort, toKey, and toPort.',
+    '- Use only constructibleNodeTypes and their exact writable init schemas, containment policies, port directions, cardinalities, and identical schema URIs.',
+    '- GraphProposal is preview-only: do not include Canvas IDs, coordinates, transforms, absolute paths, commands, images, secrets, environment fields, or auto-run requests.',
     '- Never declare or invent Canvas entity IDs, coordinates, payloads, arbitrary edges, Canvas commands, or automatic follow-up runs.',
     '- When a primary deliverable is intended for a target output slot, use that slot\'s declared Node type as the output pluginId.',
     '- A task proposal is a draft suggestion only. Do not start it or request an auto-run.',

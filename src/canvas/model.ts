@@ -154,10 +154,19 @@ export interface CanvasProposalAcceptanceReceipt {
   proposals: Array<{ proposalKey: string; taskId: string }>
 }
 
+export interface CanvasGraphMaterializationReceipt {
+  kind: 'graph-materialization'
+  planId: string
+  runId: string
+  taskId: string
+  nodes: Array<{ logicalKey: string; nodeId: string }>
+}
+
 export type CanvasReceipt =
   | CanvasMaterializationReceipt
   | CanvasPlanDismissalReceipt
   | CanvasProposalAcceptanceReceipt
+  | CanvasGraphMaterializationReceipt
 
 export interface CanvasDocument {
   schemaVersion: 3
@@ -622,6 +631,15 @@ function validateReceipt(value: unknown, path: string, issues: CanvasValidationI
     validateMappingArray(value.proposals, `${path}.proposals`, 'proposalKey', 'taskId', issues)
     return
   }
+  if (value.kind === 'graph-materialization') {
+    if (!hasOnlyKeys(value, ['kind', 'planId', 'runId', 'taskId', 'nodes'])) {
+      issue(issues, path, 'has unsupported fields')
+      return
+    }
+    validateReceiptIdentity(value, path, issues)
+    validateMappingArray(value.nodes, `${path}.nodes`, 'logicalKey', 'nodeId', issues)
+    return
+  }
   issue(issues, `${path}.kind`, 'is invalid')
 }
 
@@ -638,11 +656,11 @@ function validateReceiptIdentity(
 function validateMappingArray(
   value: unknown,
   path: string,
-  keyName: 'outputKey' | 'proposalKey',
+  keyName: 'outputKey' | 'proposalKey' | 'logicalKey',
   idName: 'nodeId' | 'taskId',
   issues: CanvasValidationIssue[],
 ): void {
-  if (!Array.isArray(value) || value.length > 64) {
+  if (!Array.isArray(value) || value.length > (keyName === 'logicalKey' ? 256 : 64)) {
     issue(issues, path, 'must be a bounded array')
     return
   }
@@ -799,13 +817,18 @@ function validateInvariants(
           `receipts[${index}].proposals[${proposalIndex}].proposalKey`,
         )
       }
-    } else {
+    } else if (receipt.kind === 'plan-dismissal') {
       validateUniqueStrings(receipt.proposalKeys, `receipts[${index}].proposalKeys`, issues)
       for (const [proposalIndex, proposalKey] of receipt.proposalKeys.entries()) {
         dismissedProposalPaths.set(
           `${receipt.planId}\0${proposalKey}`,
           `receipts[${index}].proposalKeys[${proposalIndex}]`,
         )
+      }
+    } else {
+      validateUniqueMappings(receipt.nodes, 'logicalKey', 'nodeId', `receipts[${index}].nodes`, issues)
+      for (const node of receipt.nodes) {
+        materializationByOutput.set(`${receipt.planId}\0${node.logicalKey}`, node.nodeId)
       }
     }
   }

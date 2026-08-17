@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { CanvasCommand, TrustedProjectionPlanInput } from './commands'
+import type {
+  CanvasCommand,
+  TrustedGraphMaterializationPlanInput,
+  TrustedProjectionPlanInput,
+} from './commands'
 import {
   CanvasDaemonClient,
   CanvasHttpError,
@@ -288,6 +292,14 @@ describe('Canvas daemon client', () => {
       plan: trustedPlan,
     })).toEqual({
       type: 'MaterializeProjectionPlan',
+      planId: trustedPlan.planId,
+    })
+    const graphPlan = { planId: trustedPlan.planId } as TrustedGraphMaterializationPlanInput
+    expect(serializeCanvasCommand({
+      type: 'MaterializeGraphPlan',
+      plan: graphPlan,
+    })).toEqual({
+      type: 'MaterializeGraphPlan',
       planId: trustedPlan.planId,
     })
     expect(serializeCanvasCommand({

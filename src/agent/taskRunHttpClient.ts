@@ -2,6 +2,7 @@ import type { CanvasAgentEvent } from './types'
 import type { PermissionDecision, PermissionResolution } from './permissions'
 import type {
   DaemonPendingProjection,
+  DaemonGraphMaterializationPlan,
   DaemonProjectionOutput,
   DaemonProjectionPlanQuery,
   DaemonProjectionPlan,
@@ -22,6 +23,7 @@ import { consumeSse } from './sse'
 export type { PermissionDecision, PermissionResolution } from './permissions'
 export type {
   DaemonPendingProjection,
+  DaemonGraphMaterializationPlan,
   DaemonProjectionArtifactRef,
   DaemonProjectionOutput,
   DaemonProjectionPlanQuery,
@@ -310,6 +312,7 @@ export function decodeProjectionPlan(
     'taskProposals',
     'warnings',
     'digest',
+    ...(isRecord(value) && value.graphPlan !== undefined ? ['graphPlan'] : []),
   ] as const
   if (!isRecord(value)
     || !hasExactKeys(value, rootKeys)
@@ -370,6 +373,9 @@ export function decodeProjectionPlan(
   if (!value.warnings.every((warning) => isDisplayString(warning, 1_000))) {
     throw new TaskRunProtocolError('ProjectionPlan had invalid warnings')
   }
+  const graphPlan = value.graphPlan === undefined
+    ? undefined
+    : decodeGraphMaterializationPlan(value.graphPlan, value.planId, value.runId, value.taskId)
 
   return {
     schemaVersion: 2,
@@ -380,9 +386,37 @@ export function decodeProjectionPlan(
     manifestDigest: value.manifestDigest,
     outputs,
     taskProposals,
+    ...(graphPlan ? { graphPlan } : {}),
     warnings: [...value.warnings] as string[],
     digest: value.digest,
   }
+}
+
+function decodeGraphMaterializationPlan(
+  value: unknown,
+  planId: string,
+  runId: string,
+  taskId: string,
+): DaemonGraphMaterializationPlan {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    'schemaVersion', 'planId', 'runId', 'taskId', 'nodes', 'edges', 'nodeTypes', 'digest',
+  ]) || value.schemaVersion !== 1 || value.planId !== planId
+    || value.runId !== runId || value.taskId !== taskId || !isSha256(value.digest)
+    || !Array.isArray(value.nodes) || value.nodes.length < 1 || value.nodes.length > 256
+    || !Array.isArray(value.edges) || value.edges.length > 512
+    || !Array.isArray(value.nodeTypes) || value.nodeTypes.length > 256) {
+    throw new TaskRunProtocolError('GraphMaterializationPlan was malformed')
+  }
+  for (const entry of value.nodes) {
+    if (!isRecord(entry) || !hasExactKeys(entry, ['logicalKey', 'node'])
+      || !isStableProjectionKey(entry.logicalKey) || !isRecord(entry.node)
+      || typeof entry.node.id !== 'string' || typeof entry.node.title !== 'string'
+      || !isRecord(entry.node.typeRef) || !isRecord(entry.node.bounds)
+      || !isRecord(entry.node.transform)) {
+      throw new TaskRunProtocolError('GraphMaterializationPlan node was malformed')
+    }
+  }
+  return structuredClone(value) as unknown as DaemonGraphMaterializationPlan
 }
 
 function decodeProjectionOutput(
@@ -1008,6 +1042,27 @@ export class TaskRunHttpClient {
     const response = await this.requestUrl(url, { method: 'GET' }, signal)
     return decodePendingProjection(
       await this.readJson(response, 'GET /projection-plans/:id response'),
+    )
+  }
+
+  async getGraphPlan(
+    planId: string,
+    query: DaemonProjectionPlanQuery = {},
+    signal?: AbortSignal,
+  ): Promise<DaemonGraphMaterializationPlan> {
+    if (!isProjectionPlanId(planId)) throw new TaskRunClientError('planId is invalid')
+    const url = new URL(this.endpoint(`/graph-plans/${encodeURIComponent(planId)}`))
+    if (query.projectDir !== undefined) url.searchParams.set('projectDir', query.projectDir)
+    if (query.branch !== undefined) url.searchParams.set('branch', query.branch)
+    const response = await this.requestUrl(url, { method: 'GET' }, signal)
+    const value = await this.readJson(response, 'GET /graph-plans/:id response')
+    if (!isRecord(value) || !hasExactKeys(value, ['schemaVersion', 'graphPlan', 'state'])
+      || value.schemaVersion !== 1 || value.state !== 'pending' || !isRecord(value.graphPlan)
+      || typeof value.graphPlan.runId !== 'string' || typeof value.graphPlan.taskId !== 'string') {
+      throw new TaskRunProtocolError('Graph plan response was malformed')
+    }
+    return decodeGraphMaterializationPlan(
+      value.graphPlan, planId, value.graphPlan.runId, value.graphPlan.taskId,
     )
   }
 

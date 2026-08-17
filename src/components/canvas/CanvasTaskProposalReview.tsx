@@ -49,6 +49,7 @@ function CanvasTaskProposalReviewContent({
   if (!review || review.plan.taskId !== task.id) return null
 
   const proposalKeys = review.plan.taskProposals.map((proposal) => proposal.key)
+  const graphPlan = review.plan.graphPlan
   const proposalReview = canvasState.envelope
     ? selectProposalReview(
         canvasState.envelope.document,
@@ -59,11 +60,18 @@ function CanvasTaskProposalReviewContent({
   const settledProposalKeys = proposalReview?.items
     .filter((item) => item.state !== 'pending')
     .map((item) => item.proposalKey) ?? []
-  if (proposalKeys.length === 0 || proposalReview?.pendingCount === 0) return null
+  const graphSettled = graphPlan
+    ? canvasState.envelope?.document.receipts.some((receipt) =>
+        receipt.planId === graphPlan.planId
+        && (receipt.kind === 'graph-materialization' || receipt.kind === 'plan-dismissal')) ?? false
+    : true
+  const proposalsSettled = proposalKeys.length === 0 || proposalReview?.pendingCount === 0
+  if (graphSettled && proposalsSettled) return null
 
   const persistSettlement = async (
     command: CanvasCommand,
-    receiptKind: 'proposal-acceptance' | 'plan-dismissal',
+    receiptKind: 'proposal-acceptance' | 'plan-dismissal' | 'graph-materialization',
+    clearReview = true,
   ) => {
     if (settlingRef.current) return
     settlingRef.current = true
@@ -82,7 +90,7 @@ function CanvasTaskProposalReviewContent({
       if (!receiptAcknowledged) {
         throw new Error(settlementSyncError(acknowledged.commandSync))
       }
-      lifecycle.clearSettledProjectionReview(review.planId)
+      if (clearReview) lifecycle.clearSettledProjectionReview(review.planId)
     } catch (settlementError) {
       setError(errorMessage(settlementError))
     } finally {
@@ -113,6 +121,15 @@ function CanvasTaskProposalReviewContent({
     )
   }
 
+  const acceptGraph = () => {
+    if (!graphPlan) return
+    void persistSettlement(
+      { type: 'MaterializeGraphPlan', plan: graphPlan },
+      'graph-materialization',
+      proposalKeys.length === 0,
+    )
+  }
+
   return (
     <div
       data-testid={`canvas-task-proposal-review-${task.id}`}
@@ -121,12 +138,38 @@ function CanvasTaskProposalReviewContent({
       className="pointer-events-auto"
       onPointerDown={(event) => event.stopPropagation()}
     >
-      <CanvasProposalReviewPanel
-        proposals={review.plan.taskProposals}
-        settledProposalKeys={settledProposalKeys}
-        onAccept={accept}
-        onReject={reject}
-      />
+      {graphPlan && !graphSettled && (
+        <section className="rounded-[12px] border border-gg-line bg-gg-node p-3" aria-label="Agent 构图预览">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-[11px] font-medium text-gg-ink">Agent 构图预览</p>
+              <p className="mt-0.5 text-[9.5px] text-gg-muted">
+                {graphPlan.nodes.length} 个节点 · {graphPlan.edges.length} 条数据边 · 接受后仍不会自动执行
+              </p>
+            </div>
+            <div className="flex gap-1.5">
+              <button type="button" disabled={settling} onClick={reject} className="rounded-[7px] border border-gg-line px-2 py-1 text-[9.5px] text-gg-muted disabled:opacity-50">拒绝整图</button>
+              <button type="button" disabled={settling} onClick={acceptGraph} className="rounded-[7px] bg-gg-primary px-2 py-1 text-[9.5px] text-white disabled:opacity-50">接受整图</button>
+            </div>
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-1.5">
+            {graphPlan.nodes.slice(0, 12).map((entry) => (
+              <div key={entry.logicalKey} className="rounded-[7px] bg-gg-subtle px-2 py-1.5 text-[9.5px] text-gg-ink">
+                <span className="font-medium">{entry.node.title}</span>
+                <span className="ml-1 text-gg-muted">{entry.node.typeRef.id}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+      {!proposalsSettled && (
+        <CanvasProposalReviewPanel
+          proposals={review.plan.taskProposals}
+          settledProposalKeys={settledProposalKeys}
+          onAccept={accept}
+          onReject={reject}
+        />
+      )}
       <div
         role={error ? 'alert' : 'status'}
         aria-live={error ? 'assertive' : 'polite'}

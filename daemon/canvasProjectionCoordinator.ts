@@ -11,7 +11,7 @@ import type { ProjectionPlan, ProjectionSettlement } from './projectionPlan.js'
 import type { ProjectionPlanLifecycle } from './projectionPlanStore.js'
 
 type TrustedPlanWireCommand = Extract<CanvasCommandWire, {
-  type: 'MaterializeProjectionPlan' | 'AcceptTaskProposals' | 'DismissPlan'
+  type: 'MaterializeProjectionPlan' | 'MaterializeGraphPlan' | 'AcceptTaskProposals' | 'DismissPlan'
 }>
 
 export interface ProjectionPlanRecordLookup extends ProjectionSettlement {
@@ -93,7 +93,8 @@ export async function commitProjectionPlanCommand(
 
   const current = await input.canvases.get(input.projectDir, input.branch)
   if (planCommandAlreadySatisfied(current.document, input.command, record.plan)) {
-    if (input.command.type !== 'MaterializeProjectionPlan' && record.state === 'pending') {
+    if (input.command.type !== 'MaterializeProjectionPlan'
+      && input.command.type !== 'MaterializeGraphPlan' && record.state === 'pending') {
       await input.plans.dismissProjectionPlan(
         input.command.planId,
         input.projectDir,
@@ -116,7 +117,8 @@ export async function commitProjectionPlanCommand(
   )
   // Canvas receipts are the first durable fact. If lifecycle settlement fails,
   // replay observes the receipt, repairs the registry, and creates no entities.
-  if (input.command.type !== 'MaterializeProjectionPlan') {
+  if (input.command.type !== 'MaterializeProjectionPlan'
+    && input.command.type !== 'MaterializeGraphPlan') {
     await input.plans.dismissProjectionPlan(
       input.command.planId,
       input.projectDir,
@@ -149,6 +151,10 @@ export function trustedCanvasCommandFromPlan(
   if (command.type === 'MaterializeProjectionPlan') {
     return { type: command.type, plan: trustedPlan }
   }
+  if (command.type === 'MaterializeGraphPlan') {
+    if (!plan.graphPlan) throw new ProjectionPlanUnavailableError(plan.planId, 'missing')
+    return { type: command.type, plan: structuredClone(plan.graphPlan) }
+  }
   if (command.type === 'DismissPlan') {
     return { type: command.type, plan: trustedPlan }
   }
@@ -172,6 +178,9 @@ function planCommandAlreadySatisfied(
   if (command.type === 'MaterializeProjectionPlan') {
     return receipts.some((receipt) =>
       receipt.kind === 'materialization' || receipt.kind === 'plan-dismissal')
+  }
+  if (command.type === 'MaterializeGraphPlan') {
+    return receipts.some((receipt) => receipt.kind === 'graph-materialization')
   }
   if (command.type === 'AcceptTaskProposals') {
     return receipts.some((receipt) =>

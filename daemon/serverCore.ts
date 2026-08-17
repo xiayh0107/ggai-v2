@@ -109,6 +109,7 @@ import { AssetAssemblyExecutor } from './assetRasterizer.js'
 import { ComputeExecutor } from './computeExecutor.js'
 import { FilesystemService, FilesystemServiceError } from './filesystemService.js'
 import { MAX_FILESYSTEM_TREE_PAGE } from '../src/filesystem/contracts.js'
+import { builtinNodeTypeSnapshots } from './nodeTypeSnapshots.js'
 import {
   createHttpRouter,
   type HttpRoute,
@@ -220,6 +221,16 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     registry,
     capabilityScopes: capabilityExecutionScopes,
     capabilityProfile: () => registry.runtimeDiagnostics().profile,
+    resolveNodeTypes: async () => [
+      ...builtinNodeTypeSnapshots(),
+      ...await nodeDefinitions.listSnapshots(),
+    ],
+    resolveGraphResourceHandles: async (projectDir) => metadata.listWorkspaceRoots(
+      operationalProjectId(projectDir),
+    ).then(
+      (roots) => roots.map((root) => root.rootId),
+      () => [],
+    ),
     acquireProjectLease: (projectDir) => canvas.acquireProjectLease(projectDir),
     resolveSourceProjectDir: async ({ projectDir, canvasBranch, taskOwned, studioOwned }) => {
       if (!taskOwned && !studioOwned) return null
@@ -279,6 +290,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
       executions,
       compute,
       filesystem,
+      metadata,
     }, domainRouter)
       .catch((error: unknown) => writeError(response, error))
   })
@@ -338,6 +350,7 @@ interface RouteContext extends HttpRouteContext {
   executions: NodeExecutionService
   compute: ComputeExecutor
   filesystem: FilesystemService
+  metadata: MetadataStore
 }
 
 async function route(
@@ -534,6 +547,23 @@ async function route(
     return
   }
 
+  const graphPlanMatch = pathname.match(/^\/graph-plans\/([^/]+)$/u)
+  if (graphPlanMatch && request.method === 'GET') {
+    const planId = decodeURIComponent(graphPlanMatch[1]!)
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
+    const record = await context.runs.getProjectionPlanRecord(planId, projectDir, branch)
+    if (!record?.plan.graphPlan) {
+      throw new ProjectionPlanUnavailableError(planId, 'missing')
+    }
+    writeJson(response, 200, {
+      schemaVersion: 1,
+      graphPlan: record.plan.graphPlan,
+      state: record.state,
+    })
+    return
+  }
+
   if (request.method === 'GET' && pathname === '/projects') {
     // First read bootstraps projects.json, so it participates in the same
     // cross-process writer fence as later catalog mutations.
@@ -551,6 +581,16 @@ async function route(
       schemaVersion: 1,
       definitions: await context.nodeDefinitions.list(),
     })
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/canvas/node-types') {
+    await context.canvas.acquireProjectLease('.')
+    const nodeTypes = [
+      ...builtinNodeTypeSnapshots(),
+      ...await context.nodeDefinitions.listSnapshots(),
+    ].sort((left, right) => left.id.localeCompare(right.id) || left.revision - right.revision)
+    writeJson(response, 200, { schemaVersion: 1, nodeTypes })
     return
   }
 
@@ -913,7 +953,7 @@ async function route(
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
     const parsed = parseCanvasCommandRequest(await readJson(request))
     if (isTrustedPlanWireCommand(parsed.command)) {
-      writeJson(response, 200, await commitProjectionPlanCommand({
+      const committed = await commitProjectionPlanCommand({
         canvases: context.projectionCanvases,
         plans: context.runs,
         projectDir,
@@ -921,7 +961,29 @@ async function route(
         baseRevision: parsed.baseRevision,
         mutationId: parsed.mutationId,
         command: parsed.command,
-      }))
+      })
+      if (parsed.command.type === 'MaterializeGraphPlan') {
+        const graphPlanId = parsed.command.planId
+        const receipt = committed.document.receipts.find((candidate) =>
+          candidate.kind === 'graph-materialization'
+          && candidate.planId === graphPlanId)
+        if (receipt?.kind === 'graph-materialization') {
+          await context.metadata.appendProvenance([{
+            projectId: operationalProjectId(projectDir),
+            relationKind: 'had-plan',
+            subjectId: `task:${receipt.taskId}`,
+            objectId: `plan:${receipt.planId}`,
+            attributes: { kind: 'graph-materialization' },
+          }, ...receipt.nodes.map((node) => ({
+            projectId: operationalProjectId(projectDir),
+            relationKind: 'was-generated-by' as const,
+            subjectId: `node:${node.nodeId}`,
+            objectId: `plan:${receipt.planId}`,
+            attributes: { logicalKey: node.logicalKey },
+          }))])
+        }
+      }
+      writeJson(response, 200, committed)
       return
     }
     const command = parsed.command as OrdinaryCanvasCommand
@@ -993,7 +1055,8 @@ async function route(
         mutationId: mutation.mutationId,
         command: trustedCanvasCommandFromPlan(record.plan, mutation.command),
       })
-      if (mutation.command.type !== 'MaterializeProjectionPlan') {
+      if (mutation.command.type !== 'MaterializeProjectionPlan'
+        && mutation.command.type !== 'MaterializeGraphPlan') {
         settledPlanIds.add(mutation.command.planId)
       }
     }
@@ -2501,9 +2564,10 @@ function isAllowedOrigin(origin: string | undefined, configured: Set<string>): b
 function isTrustedPlanWireCommand(
   command: CanvasCommandWire,
 ): command is Extract<CanvasCommandWire, {
-  type: 'MaterializeProjectionPlan' | 'AcceptTaskProposals' | 'DismissPlan'
+  type: 'MaterializeProjectionPlan' | 'MaterializeGraphPlan' | 'AcceptTaskProposals' | 'DismissPlan'
 }> {
   return command.type === 'MaterializeProjectionPlan'
+    || command.type === 'MaterializeGraphPlan'
     || command.type === 'AcceptTaskProposals'
     || command.type === 'DismissPlan'
 }

@@ -5,6 +5,10 @@ import {
   MAX_SUGGESTED_ACTIONS,
   type SuggestedAction,
 } from './suggestedActions.js'
+import {
+  inspectGraphProposal,
+  type GraphProposal,
+} from './graphProposal.js'
 
 export type { SuggestedAction } from './suggestedActions.js'
 
@@ -65,6 +69,7 @@ export interface RunOutcome {
   suggestedActions: SuggestedAction[]
   outputs: RunOutputHint[]
   taskProposals: RunTaskProposal[]
+  graphProposal?: GraphProposal
 }
 
 export type RunOutcomeInspection =
@@ -105,6 +110,7 @@ export function inspectRunOutcome(value: unknown): RunOutcomeInspection {
     'suggestedActions',
     'outputs',
     'taskProposals',
+    ...(value.graphProposal === undefined ? [] : ['graphProposal']),
   ])) return invalid('outcome has unsupported properties')
 
   const suggestedActions = inspectSuggestedActions(value.suggestedActions)
@@ -156,6 +162,11 @@ export function inspectRunOutcome(value: unknown): RunOutcomeInspection {
   )
   if (proposalGraphError) return invalid(proposalGraphError)
 
+  const graphInspection = value.graphProposal === undefined
+    ? null
+    : inspectGraphProposal(value.graphProposal)
+  if (graphInspection?.status === 'invalid') return invalid(graphInspection.reason)
+
   return {
     status: 'valid',
     outcome: {
@@ -163,6 +174,9 @@ export function inspectRunOutcome(value: unknown): RunOutcomeInspection {
       suggestedActions,
       outputs,
       taskProposals,
+      ...(graphInspection?.status === 'valid'
+        ? { graphProposal: graphInspection.proposal }
+        : {}),
     },
   }
 }
