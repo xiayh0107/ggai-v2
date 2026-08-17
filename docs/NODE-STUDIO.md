@@ -13,10 +13,15 @@
 revision；Canvas Node 使用 `@local/package@revision` 作为运行时类型，避免新版本改变历史
 节点。已安装版本不能物理删除。
 
-Studio 的预览直接使用真实 `CanvasNodeCard`；普通内容通过 `NodePlugin.ui` 选择平台白名单
+Studio 的预览直接使用真实 `CanvasNodeCard`，并按空节点、生成中、已完成、失败展示平台拥有的
+生命周期。每个状态明确列出控制归属、节点只表达的内容和下一层披露位置；普通内容通过 `NodePlugin.ui` 选择平台白名单
 模板，由 `NodeTemplateView` 统一渲染。定义不能携带 React 组件、CSS class、节点外壳、空态或
 运行态。端口、选择、生成动画、活动条与 Composer 始终由 Canvas 平台负责，因此预览与真实
 画布不会再维护两套视觉实现。
+
+工作台不允许把所有后端能力变成节点配置项。节点定义只控制内容模板、默认宽度、内容示例、
+提示词占位与最多 6 个快捷指令；空白内容面、运行、权限、重试、Skills 绑定与过程 / 日志侧栏
+属于平台。Studio 会展示这些边界，但不会让自定义节点覆盖它们。
 
 ## Agent 边界
 

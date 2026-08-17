@@ -6,6 +6,7 @@ on:
       - 'src/**'
       - 'ui-render/**'
       - 'scripts/capture-ui-render.mjs'
+      - 'scripts/ui-render-catalog.mjs'
       - 'package.json'
       - '.github/workflows/ui-render-supervision.yml'
   workflow_dispatch:
@@ -27,7 +28,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Install Chromium for deterministic renders
-        run: npx --yes playwright@1.55.0 install --with-deps chromium
+        run: npx playwright install --with-deps chromium
       - name: Capture production-component scenarios
         run: npm run ui:render:capture -- --output artifacts/ui-render
       - name: Upload UI render gallery
@@ -41,7 +42,7 @@ jobs:
         run: |
           echo '## UI Render Supervision' >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"
-          echo '真实生产组件已按确定性场景渲染。下载本次 workflow 的 `ui-render-*` artifact，打开 `index.html` 逐图审查。' >> "$GITHUB_STEP_SUMMARY"
+          echo '真实生产组件已按确定性状态旅程渲染，并通过场景设计契约。下载本次 workflow 的 `ui-render-*` artifact，打开 `index.html` 逐步审查。' >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"
           node -e "const c=require('./ui-render/scenarios.json'); for (const s of c.scenarios) console.log('- ' + s.title + ' (`' + s.id + '`)')" >> "$GITHUB_STEP_SUMMARY"
       - name: Link renders from the pull request
