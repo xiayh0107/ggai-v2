@@ -5,7 +5,7 @@ import {
   type CanvasEdgeContextRole,
   type CanvasEdgeRelation,
   type CanvasEntityRef,
-  type CanvasFrame,
+  type CanvasWorldRect,
 } from '@/canvas/model'
 import type { CanvasBounds, CanvasTaskView } from '@/canvas/selectors'
 import {
@@ -30,7 +30,7 @@ export type CanvasEdgePreview =
       dx: number
       dy: number
     }
-  | { kind: 'resize'; id: string; frame: CanvasFrame }
+  | { kind: 'resize'; id: string; frame: CanvasWorldRect }
   | null
 
 export interface CanvasEdgeCollectionView {

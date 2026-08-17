@@ -4,7 +4,7 @@ import { COLLECTION_CHROME_LAYOUT } from '@/canvas/layout'
 import {
   type CanvasDocument,
   type CanvasEntityRef,
-  type CanvasFrame,
+  type CanvasWorldRect,
   type CanvasPoint,
 } from '@/canvas/model'
 import type { CanvasSelectionTarget } from '@/canvas/persistence'
@@ -134,7 +134,7 @@ export function portCreatedNodeFrame(
   source: CanvasBounds,
   side: CanvasConnectionPortSide,
   width: number,
-): CanvasFrame {
+): CanvasWorldRect {
   const gap = 56
   const height = 256
   const centerX = Math.round(source.x + source.w / 2 - width / 2)

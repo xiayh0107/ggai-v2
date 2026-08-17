@@ -12,7 +12,7 @@ export interface CanvasPoint {
   y: number
 }
 
-export interface CanvasFrame extends CanvasPoint {
+export interface CanvasWorldRect extends CanvasPoint {
   w: number
   h: number
   z: number
@@ -279,7 +279,7 @@ export function canvasNodeTypeRef(id: string, revision = 1): CanvasNodeTypeRef {
   return { id, revision, digest }
 }
 
-export function canvasNodeFrame(node: CanvasNode): CanvasFrame {
+export function canvasNodeWorldRect(node: CanvasNode): CanvasWorldRect {
   return {
     x: node.transform.matrix[4],
     y: node.transform.matrix[5],
@@ -319,7 +319,7 @@ export function canvasNodeWorldTransform(
 export function canvasNodeWorldFrame(
   document: Pick<CanvasDocument, 'nodes'>,
   node: CanvasNode,
-): CanvasFrame {
+): CanvasWorldRect {
   const matrix = canvasNodeWorldTransform(document, node)
   const corners = [
     transformPoint(matrix, 0, 0),
@@ -365,7 +365,7 @@ export function canvasRootNode(
   return current
 }
 
-export function canvasNodeGeometry(frame: CanvasFrame): Pick<
+export function canvasNodeGeometry(frame: CanvasWorldRect): Pick<
   CanvasNode,
   'parentId' | 'orderKey' | 'bounds' | 'transform'
 > {

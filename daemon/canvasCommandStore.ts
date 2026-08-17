@@ -422,7 +422,7 @@ function emptyEnvelope(branch: string): StoredCanvasEnvelope {
 
 function parseStoredEnvelope(source: string, expectedBranch: string): StoredCanvasEnvelope {
   const value: unknown = JSON.parse(source)
-  const legacyKeys = [
+  const requiredKeys = [
     'branch',
     'revision',
     'updatedAt',
@@ -430,8 +430,8 @@ function parseStoredEnvelope(source: string, expectedBranch: string): StoredCanv
     'lastCheckpoint',
     'document',
   ]
-  const currentKeys = [...legacyKeys, 'mutationReceipts']
-  if (!isExactRecord(value, legacyKeys) && !isExactRecord(value, currentKeys)) {
+  const currentKeys = [...requiredKeys, 'mutationReceipts']
+  if (!isExactRecord(value, currentKeys)) {
     throw new TypeError('Canvas snapshot has an invalid envelope')
   }
   const branch = parseCanvasBranch(value.branch)
@@ -442,9 +442,7 @@ function parseStoredEnvelope(source: string, expectedBranch: string): StoredCanv
   }
   if (value.lastMutationId !== null) validateMutationId(value.lastMutationId)
   if (value.lastCheckpoint !== null) validateCheckpoint(value.lastCheckpoint)
-  const mutationReceipts = Object.prototype.hasOwnProperty.call(value, 'mutationReceipts')
-    ? parseMutationReceipts(value.mutationReceipts, value.revision)
-    : []
+  const mutationReceipts = parseMutationReceipts(value.mutationReceipts, value.revision)
   return {
     branch,
     revision: value.revision,

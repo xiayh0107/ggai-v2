@@ -3,7 +3,7 @@ import type { ArtifactManifest } from './artifactManifest.js'
 import {
   BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
   projectionPluginContracts,
-  type RecoverableProjectionPluginCapabilitySnapshot,
+  type ProjectionPluginCapabilitySnapshot,
 } from './pluginCapabilities.js'
 import type { ProjectionPluginContract } from './projectionPlan.js'
 import type { ProjectionPlanRecord } from './projectionPlanStore.js'
@@ -39,7 +39,7 @@ export interface RecoverInterruptedTaskRunsOptions {
   /** Resolves the registry digest persisted in summary.json. */
   pluginCapabilities?(
     digest: string | undefined,
-  ): Promise<RecoverableProjectionPluginCapabilitySnapshot>
+  ): Promise<ProjectionPluginCapabilitySnapshot>
   /** Verifies the immutable receipt fixed in the summary before settlement recovery. */
   capabilityReceipt?(runId: string, digest: string | undefined): Promise<void>
   /** Runs only after the reconstructed close is durable. */
@@ -104,7 +104,7 @@ export async function recoverInterruptedTaskRuns(
           let record: ProjectionPlanRecord | undefined
           try {
             record = await options
-              .projectionPlanStore(summary.canvasBranch ?? 'main')
+              .projectionPlanStore(summary.canvasBranch)
               .get(existingClose.projectionPlan.planId)
             if (!record) throw new TypeError('durable close projection plan is not registered')
             assertMatchingDurablePlan(record, existingClose)
@@ -117,11 +117,11 @@ export async function recoverInterruptedTaskRuns(
               await options.onProjectionPlanReady({
                 plan: record.plan,
                 projectDir: options.projectDir,
-                canvasBranch: summary.canvasBranch ?? 'main',
+                canvasBranch: summary.canvasBranch,
               })
               if (record.plan.taskProposals.length === 0) {
                 await options
-                  .projectionPlanStore(summary.canvasBranch ?? 'main')
+                  .projectionPlanStore(summary.canvasBranch)
                   .dismiss(record.plan.planId)
               }
             } catch (error) {
@@ -144,7 +144,7 @@ export async function recoverInterruptedTaskRuns(
     } | undefined
 
     try {
-      const artifactStore = options.artifactStore(summary.canvasBranch ?? 'main')
+      const artifactStore = options.artifactStore(summary.canvasBranch)
       const existing = await artifactStore.manifest(summary.runId)
       const closed = existing
         ? { location: artifactStore.location(summary.runId), manifest: existing }
@@ -159,7 +159,7 @@ export async function recoverInterruptedTaskRuns(
     }
 
     if (manifest) {
-      let pluginCapabilities: RecoverableProjectionPluginCapabilitySnapshot = structuredClone(
+      let pluginCapabilities: ProjectionPluginCapabilitySnapshot | null = structuredClone(
         BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
       )
       if (options.pluginCapabilities) {
@@ -167,11 +167,13 @@ export async function recoverInterruptedTaskRuns(
           pluginCapabilities = await options.pluginCapabilities(summary.pluginCapabilityDigest)
         } catch (error) {
           report.failures.push(failure(summary.runId, 'plugin-capabilities', error))
+          pluginCapabilities = null
         }
       }
       try {
+        if (!pluginCapabilities) throw new Error('pinned plugin capabilities are unavailable')
         const recovered = await options
-          .projectionPlanStore(summary.canvasBranch ?? 'main')
+          .projectionPlanStore(summary.canvasBranch)
           .recoverInterrupted({
             taskId: summary.taskId,
             runId: summary.runId,
@@ -209,11 +211,11 @@ export async function recoverInterruptedTaskRuns(
             await options.onProjectionPlanReady({
               plan: projection.plan,
               projectDir: options.projectDir,
-              canvasBranch: summary.canvasBranch ?? 'main',
+              canvasBranch: summary.canvasBranch,
             })
             if (projection.plan.taskProposals.length === 0) {
               await options
-                .projectionPlanStore(summary.canvasBranch ?? 'main')
+                .projectionPlanStore(summary.canvasBranch)
                 .dismiss(projection.plan.planId)
             }
           } catch (error) {

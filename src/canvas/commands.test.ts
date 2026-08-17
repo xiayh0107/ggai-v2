@@ -7,7 +7,7 @@ import {
   type TrustedProjectionPlanInput,
 } from './commands'
 import {
-  canvasNodeFrame,
+  canvasNodeWorldRect,
   canvasNodeGeometry,
   canvasNodeTypeRef,
   emptyCanvasDocument,
@@ -214,11 +214,11 @@ describe('Canvas commands', () => {
       collectionId: 'collection-1',
     })
     expect(moved.collections[0].anchor).toEqual({ x: 85, y: 70 })
-    expect(canvasNodeFrame(moved.nodes.find((entry) => entry.id === 'task-node')!)).toMatchObject({
+    expect(canvasNodeWorldRect(moved.nodes.find((entry) => entry.id === 'task-node')!)).toMatchObject({
       x: 165,
       y: 230,
     })
-    expect(canvasNodeFrame(moved.nodes.find((entry) => entry.id === 'top-node')!)).toMatchObject({
+    expect(canvasNodeWorldRect(moved.nodes.find((entry) => entry.id === 'top-node')!)).toMatchObject({
       x: 525,
       y: 190,
     })
@@ -1043,7 +1043,7 @@ describe('Canvas commands', () => {
         skills: [{ skillId: '@workspace/concise-writing', revision: 1 }],
       },
     })
-    expect(canvasNodeFrame(current.nodes[1]!)).toMatchObject({ x: 68, y: 104, w: 420, h: 260 })
+    expect(canvasNodeWorldRect(current.nodes[1]!)).toMatchObject({ x: 68, y: 104, w: 420, h: 260 })
 
     const forged = {
       type: 'CreateNode',

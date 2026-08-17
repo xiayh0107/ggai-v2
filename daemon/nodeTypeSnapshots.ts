@@ -16,7 +16,7 @@ import { defineNodeUi, type NodeContentTemplate } from '../src/plugins/uiContrac
 import {
   customNodeRuntimeId,
   type CustomNodeContentKind,
-  type CustomNodeManifest,
+  type NodeStudioDefinition,
 } from '../src/node-studio/model.js'
 import { BUILTIN_NODE_TYPE_DEFINITIONS } from '../src/plugins/builtins/definitions.js'
 
@@ -24,7 +24,7 @@ export function builtinNodeTypeSnapshots(): NodeTypeSnapshot[] {
   return BUILTIN_NODE_TYPE_DEFINITIONS.map(snapshotNodeTypeDefinition)
 }
 
-export function snapshotCustomNodeType(manifest: CustomNodeManifest): NodeTypeSnapshot {
+export function snapshotCustomNodeType(manifest: NodeStudioDefinition): NodeTypeSnapshot {
   const definition: NodeTypeDefinition = {
     schemaVersion: NODE_TYPE_DEFINITION_SCHEMA_VERSION,
     id: customNodeRuntimeId(manifest),

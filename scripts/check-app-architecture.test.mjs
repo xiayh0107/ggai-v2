@@ -8,7 +8,7 @@ test('current application modules respect the declared architecture boundaries',
     encoding: 'utf8',
   })
   assert.equal(result.status, 0, result.stderr || result.stdout)
-  assert.match(result.stdout, /Application architecture boundaries: 9 roots clean/)
+  assert.match(result.stdout, /Application architecture boundaries: 15 roots clean/)
   assert.match(result.stdout, /4 composition budgets clean/)
   assert.match(result.stdout, /7 capability runtime budgets clean/)
   assert.match(result.stdout, /6 capability runtime boundaries clean/)

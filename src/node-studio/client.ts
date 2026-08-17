@@ -1,7 +1,7 @@
 import {
-  isCustomNodeManifest,
-  validateCustomNodeManifest,
-  type CustomNodeManifest,
+  isNodeStudioDefinition,
+  validateNodeStudioDefinition,
+  type NodeStudioDefinition,
 } from './model'
 
 export class NodeDefinitionRequestError extends Error {
@@ -17,10 +17,10 @@ export class NodeDefinitionRequestError extends Error {
 }
 
 export interface NodeDefinitionApi {
-  list(signal?: AbortSignal): Promise<CustomNodeManifest[]>
-  save(manifest: CustomNodeManifest, signal?: AbortSignal): Promise<CustomNodeManifest>
+  list(signal?: AbortSignal): Promise<NodeStudioDefinition[]>
+  save(manifest: NodeStudioDefinition, signal?: AbortSignal): Promise<NodeStudioDefinition>
   delete(id: string, signal?: AbortSignal): Promise<void>
-  startAgent(requirement: string, definition: CustomNodeManifest, signal?: AbortSignal): Promise<string>
+  startAgent(requirement: string, definition: NodeStudioDefinition, signal?: AbortSignal): Promise<string>
   getAgentRun(runId: string, signal?: AbortSignal): Promise<NodeStudioAgentRun>
   cancelAgentRun(runId: string, signal?: AbortSignal): Promise<void>
 }
@@ -30,7 +30,7 @@ export interface NodeStudioAgentRun {
   status: 'preparing' | 'running' | 'awaiting-permission' | 'done' | 'error' | 'cancelled' | 'interrupted'
   progress?: string
   error?: string
-  definition?: CustomNodeManifest
+  definition?: NodeStudioDefinition
 }
 
 export class NodeDefinitionClient implements NodeDefinitionApi {
@@ -40,7 +40,7 @@ export class NodeDefinitionClient implements NodeDefinitionApi {
     this.baseUrl = baseUrl.replace(/\/$/u, '')
   }
 
-  async list(signal?: AbortSignal): Promise<CustomNodeManifest[]> {
+  async list(signal?: AbortSignal): Promise<NodeStudioDefinition[]> {
     const payload = await this.request('/node-definitions', { signal })
     if (!isRecord(payload)
       || !hasExactKeys(payload, ['schemaVersion', 'definitions'])
@@ -48,14 +48,14 @@ export class NodeDefinitionClient implements NodeDefinitionApi {
       || !Array.isArray(payload.definitions)) {
       throw new TypeError('节点定义列表响应格式无效')
     }
-    if (!payload.definitions.every(isValidCustomNodeManifest)) {
+    if (!payload.definitions.every(isValidNodeStudioDefinition)) {
       throw new TypeError('节点定义列表包含无效项目')
     }
     return structuredClone(payload.definitions)
   }
 
-  async save(manifest: CustomNodeManifest, signal?: AbortSignal): Promise<CustomNodeManifest> {
-    if (!isValidCustomNodeManifest(manifest)) throw new TypeError('节点定义保存请求无效')
+  async save(manifest: NodeStudioDefinition, signal?: AbortSignal): Promise<NodeStudioDefinition> {
+    if (!isValidNodeStudioDefinition(manifest)) throw new TypeError('节点定义保存请求无效')
     const payload = await this.request(`/node-definitions/${encodeURIComponent(manifest.id)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -65,7 +65,7 @@ export class NodeDefinitionClient implements NodeDefinitionApi {
     if (!isRecord(payload)
       || !hasExactKeys(payload, ['schemaVersion', 'definition'])
       || payload.schemaVersion !== 1
-      || !isValidCustomNodeManifest(payload.definition)) {
+      || !isValidNodeStudioDefinition(payload.definition)) {
       throw new TypeError('节点定义保存响应格式无效')
     }
     if (payload.definition.id !== manifest.id) throw new TypeError('节点定义保存响应 ID 不一致')
@@ -91,10 +91,10 @@ export class NodeDefinitionClient implements NodeDefinitionApi {
 
   async startAgent(
     requirement: string,
-    definition: CustomNodeManifest,
+    definition: NodeStudioDefinition,
     signal?: AbortSignal,
   ): Promise<string> {
-    if (!requirement.trim() || !isValidCustomNodeManifest(definition)) {
+    if (!requirement.trim() || !isValidNodeStudioDefinition(definition)) {
       throw new TypeError('节点设计 Agent 请求无效')
     }
     const payload = await this.request('/node-studio/runs', {
@@ -131,7 +131,7 @@ export class NodeDefinitionClient implements NodeDefinitionApi {
       || (payload.error !== undefined && typeof payload.error !== 'string')) {
       throw new TypeError('节点设计 Agent 状态响应格式无效')
     }
-    if (payload.definition !== undefined && !isValidCustomNodeManifest(payload.definition)) {
+    if (payload.definition !== undefined && !isValidNodeStudioDefinition(payload.definition)) {
       throw new TypeError('节点设计 Agent 返回了无效定义')
     }
     if ((payload.status === 'done') !== (payload.definition !== undefined)) {
@@ -191,8 +191,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function isValidCustomNodeManifest(value: unknown): value is CustomNodeManifest {
-  return isCustomNodeManifest(value) && validateCustomNodeManifest(value).length === 0
+function isValidNodeStudioDefinition(value: unknown): value is NodeStudioDefinition {
+  return isNodeStudioDefinition(value) && validateNodeStudioDefinition(value).length === 0
 }
 
 function isLocalNodeId(value: string): boolean {

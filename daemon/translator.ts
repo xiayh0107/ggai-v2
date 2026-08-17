@@ -273,8 +273,8 @@ function permissionEvent(root: JsonRecord): CanvasAgentEvent {
   const params = asRecord(root.params) ?? root
   const subject = asRecord(params.subject)
   const subjectTool = asRecord(subject?.toolCall) ?? asRecord(subject?.tool_call)
-  const legacyTool = asRecord(params.toolCall) ?? asRecord(params.tool_call)
-  const tool = subjectTool ?? legacyTool
+  const fallbackTool = asRecord(params.toolCall) ?? asRecord(params.tool_call)
+  const tool = subjectTool ?? fallbackTool
   const id = firstString(
     root.id,
     params.permissionId,

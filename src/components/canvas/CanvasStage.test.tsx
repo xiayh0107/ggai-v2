@@ -5,12 +5,12 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { applyCanvasCommand } from '@/canvas/commands'
 import { TASK_OUTPUT_LAYOUT, taskOutputFrame } from '@/canvas/layout'
 import {
-  canvasNodeFrame,
+  canvasNodeWorldRect,
   canvasNodeGeometry,
   canvasNodeTypeRef,
   emptyCanvasDocument,
   type CanvasDocument,
-  type CanvasFrame,
+  type CanvasWorldRect,
 } from '@/canvas/model'
 import {
   CanvasPersistence,
@@ -32,7 +32,7 @@ const scope = { projectDir: '/workspace/project', branch: 'main' }
 const planId = `plan_${'a'.repeat(64)}`
 const artifactId = `artifact_${'b'.repeat(64)}`
 
-function nodeShape(type: string, frame: CanvasFrame) {
+function nodeShape(type: string, frame: CanvasWorldRect) {
   return { typeRef: canvasNodeTypeRef(type), ...canvasNodeGeometry(frame) }
 }
 
@@ -649,7 +649,7 @@ describe('Canvas interactive stage', () => {
     const bottom = top + Number.parseFloat(hull.style.height)
     const right = Number.parseFloat(hull.style.left) + Number.parseFloat(hull.style.width)
     for (const id of ['node-image', 'node-code']) {
-      const frame = canvasNodeFrame(canvasDocument.nodes.find((node) => node.id === id)!)
+      const frame = canvasNodeWorldRect(canvasDocument.nodes.find((node) => node.id === id)!)
       expect(bottom).toBeGreaterThanOrEqual(frame.y + frame.h + 14)
       expect(right).toBeGreaterThanOrEqual(frame.x + frame.w + 14)
     }
@@ -1211,8 +1211,8 @@ describe('Canvas interactive stage', () => {
     expect(group.querySelector('[data-focus-key="task:task-slot"]')).toBeNull()
     const slotDocNode = canvasDocument.nodes.find((node) => node.id === 'node-slot')!
     const slotNode = required<HTMLElement>(group, '[data-node-id="node-slot"]')
-    expect(slotNode.style.left).toBe(`${canvasNodeFrame(slotDocNode).x}px`)
-    expect(slotNode.style.top).toBe(`${canvasNodeFrame(slotDocNode).y}px`)
+    expect(slotNode.style.left).toBe(`${canvasNodeWorldRect(slotDocNode).x}px`)
+    expect(slotNode.style.top).toBe(`${canvasNodeWorldRect(slotDocNode).y}px`)
     const fullBadge = [...group.querySelectorAll('[data-task-status]')]
       .find((element) => element.className.includes('rounded-full'))
     expect(fullBadge).toBeUndefined()
@@ -2057,7 +2057,7 @@ describe('Canvas interactive stage', () => {
     expect(created.typeRef.id).toBe('text')
     const source = store.getSnapshot().document.nodes
       .find((node) => node.id === 'node-single')!
-    expect(canvasNodeFrame(created).x).toBe(canvasNodeFrame(source).x + canvasNodeFrame(source).w + 56)
+    expect(canvasNodeWorldRect(created).x).toBe(canvasNodeWorldRect(source).x + canvasNodeWorldRect(source).w + 56)
     expect(store.getSnapshot().document.edges.at(-1)).toMatchObject({
       from: { kind: 'node', id: 'node-single' },
       to: { kind: 'node', id: created.id },
@@ -2126,8 +2126,8 @@ describe('Canvas interactive stage', () => {
     })
     const { store, host } = await createSubject(undefined, canvasDocument)
     const target = canvasDocument.nodes.find((node) => node.id === 'node-single')!
-    const expectedX = canvasNodeFrame(target).x + canvasNodeFrame(target).w
-    const expectedY = canvasNodeFrame(target).y + canvasNodeFrame(target).h / 2
+    const expectedX = canvasNodeWorldRect(target).x + canvasNodeWorldRect(target).w
+    const expectedY = canvasNodeWorldRect(target).y + canvasNodeWorldRect(target).h / 2
     const bundle = [...host.querySelectorAll<SVGGElement>('[data-edge-bundle-count]')]
       .find((entry) => entry.getAttribute('aria-label')?.startsWith('引用连接'))
     expect(bundle).not.toBeNull()
@@ -2170,7 +2170,7 @@ describe('Canvas interactive stage', () => {
     })
     const created = store.getSnapshot().document.nodes.at(-1)!
     // 落点（世界坐标 650,380）：新节点居中落在落点，而不是固定挂在某一侧
-    expect(canvasNodeFrame(created)).toMatchObject({ x: 490, y: 340, w: 320, h: 256 })
+    expect(canvasNodeWorldRect(created)).toMatchObject({ x: 490, y: 340, w: 320, h: 256 })
     await vi.waitFor(() => {
       expect(store.getSnapshot().document.edges.some((edge) =>
         edge.from.kind === 'node' && edge.from.id === 'node-single'

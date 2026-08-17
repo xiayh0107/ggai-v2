@@ -4,7 +4,6 @@ import { link, lstat, mkdir, open, readdir, rename, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { inspectRunOutcome } from '../src/agent/outcome.js'
-import { inspectLegacyRunOutcome } from './legacyOutcome.js'
 import { inspectArtifactManifest } from './artifactManifest.js'
 import { canonicalizePotentialPath, isPathWithin } from './permissions.js'
 import { inspectProjectionPlan } from './projectionPlan.js'
@@ -616,12 +615,7 @@ function decodeTerminalClose(value: unknown, expectedRunId: string): RunClosePay
       && artifactManifest.manifest.runId !== expectedRunId)) {
     throw new Error('run log contains an invalid terminal artifact manifest')
   }
-  const outcome = value.outcome === undefined
-    ? undefined
-    : inspectLegacyRunOutcome(value.outcome)
-  if (outcome?.status !== undefined && outcome.status !== 'valid') {
-    throw new Error('run log contains an invalid terminal outcome')
-  }
+  if (value.outcome !== undefined) throw new Error('run log contains a retired outcome field')
   const projectionPlan = value.projectionPlan === undefined
     ? undefined
     : inspectProjectionPlan(value.projectionPlan)
@@ -657,7 +651,6 @@ function decodeTerminalClose(value: unknown, expectedRunId: string): RunClosePay
     ...(artifactManifest?.status === 'valid'
       ? { artifactManifest: artifactManifest.manifest }
       : {}),
-    ...(outcome?.status === 'valid' ? { outcome: outcome.outcome } : {}),
     ...(projectionPlan?.status === 'valid'
       ? { projectionPlan: projectionPlan.plan }
       : {}),
@@ -829,7 +822,7 @@ function decodeSummary(source: string, expectedRunId: string): RunSummary {
   }
   let canvasBranch: string
   try {
-    canvasBranch = parseCanvasBranch(record.canvasBranch ?? 'main')
+    canvasBranch = parseCanvasBranch(record.canvasBranch)
   } catch (error) {
     throw new RunSummaryCorruptionError(expectedRunId, 'invalid canvas branch', error)
   }

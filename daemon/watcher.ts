@@ -2,7 +2,6 @@ import path from 'node:path'
 import chokidar, { type FSWatcher } from 'chokidar'
 import type { CanvasAgentEvent } from '../src/agent/types.js'
 import {
-  artifactRunRelativeDir,
   isArtifactControlPath,
   isSafeArtifactReference,
 } from './artifactPaths.js'
@@ -16,8 +15,8 @@ export interface WatchArtifactsOptions {
   nodeId: string
   canvasBranch: string
   runId: string
-  /** Daemon-authored Task files root. Compatibility callers use the node-owned root. */
-  projectRelativeRoot?: string
+  /** Daemon-authored immutable Run files root. */
+  projectRelativeRoot: string
   onEvent: (event: Extract<CanvasAgentEvent, { type: 'file-write' }>) => void
   onError?: (error: Error) => void
 }
@@ -28,11 +27,7 @@ function posixPath(value: string): string {
 
 /** Start before spawning the Agent so even very fast writes are observed. */
 export async function watchArtifacts(options: WatchArtifactsOptions): Promise<ArtifactWatcher> {
-  const relativeRoot = options.projectRelativeRoot ?? artifactRunRelativeDir(
-    options.canvasBranch,
-    options.runId,
-    options.nodeId,
-  )
+  const relativeRoot = options.projectRelativeRoot
   if (!isSafeArtifactReference(relativeRoot)) {
     throw new TypeError('artifact watcher root is not a safe project artifact path')
   }

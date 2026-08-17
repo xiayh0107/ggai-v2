@@ -2,10 +2,10 @@ import { constants } from 'node:fs'
 import { lstat, mkdir, open, realpath, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import {
-  CUSTOM_NODE_MANIFEST_SCHEMA_VERSION,
-  isCustomNodeManifest,
-  validateCustomNodeManifest,
-  type CustomNodeManifest,
+  NODE_STUDIO_DEFINITION_SCHEMA_VERSION,
+  isNodeStudioDefinition,
+  validateNodeStudioDefinition,
+  type NodeStudioDefinition,
 } from '../src/node-studio/model.js'
 import { EMPTY_NODE_PAYLOAD_SCHEMA } from '../src/plugins/nodeTypeContracts.js'
 import { atomicWriteText, isNodeError, readExactFileBytes } from './atomic-file.js'
@@ -22,7 +22,7 @@ PAYLOAD_SCHEMAS.add(EMPTY_NODE_PAYLOAD_SCHEMA)
 
 interface NodeDefinitionDocument {
   schemaVersion: 2
-  definitions: CustomNodeManifest[]
+  definitions: NodeStudioDefinition[]
 }
 
 export class NodeDefinitionCatalog {
@@ -37,7 +37,7 @@ export class NodeDefinitionCatalog {
     this.filePath = path.join(this.workspaceDir, 'node-definitions.json')
   }
 
-  list(): Promise<CustomNodeManifest[]> {
+  list(): Promise<NodeStudioDefinition[]> {
     return this.#exclusive(async () => structuredClone((await this.#read()).definitions))
   }
 
@@ -46,7 +46,7 @@ export class NodeDefinitionCatalog {
       .map(snapshotCustomNodeType))
   }
 
-  upsert(input: unknown): Promise<CustomNodeManifest> {
+  upsert(input: unknown): Promise<NodeStudioDefinition> {
     return this.#exclusive(async () => {
       const manifest = parseManifest(input)
       const document = await this.#read()
@@ -178,13 +178,13 @@ async function unlinkCurrentCatalog(filePath: string): Promise<void> {
   await unlink(filePath)
 }
 
-function parseManifest(input: unknown): CustomNodeManifest {
-  if (!isCustomNodeManifest(input)) throw new TypeError('node definition manifest is malformed')
+function parseManifest(input: unknown): NodeStudioDefinition {
+  if (!isNodeStudioDefinition(input)) throw new TypeError('node definition manifest is malformed')
   const manifest = structuredClone(input)
-  if (manifest.schemaVersion !== CUSTOM_NODE_MANIFEST_SCHEMA_VERSION) {
+  if (manifest.schemaVersion !== NODE_STUDIO_DEFINITION_SCHEMA_VERSION) {
     throw new TypeError('node definition schema version is unsupported')
   }
-  const errors = validateCustomNodeManifest(manifest)
+  const errors = validateNodeStudioDefinition(manifest)
   if (errors.length > 0) throw new TypeError(errors.join('; '))
   const payload = PAYLOAD_SCHEMAS.validate(manifest.initialPayloadSchema, manifest.initialPayload)
   if (!payload.valid) {

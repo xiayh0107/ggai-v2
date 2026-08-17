@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { MemoryRouter } from 'react-router'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { NodeDefinitionApi } from '@/node-studio/client'
-import { createBlankCustomNodeManifest } from '@/node-studio/model'
+import { createBlankNodeStudioDefinition } from '@/node-studio/model'
 import NodeStudio from './NodeStudio'
 
 let root: Root | null = null
@@ -42,7 +42,7 @@ describe('NodeStudio', () => {
 
   it('applies a real Agent result as an uninstalled candidate without saving it', async () => {
     const candidate = {
-      ...createBlankCustomNodeManifest(new Date('2026-01-02T00:00:00.000Z')),
+      ...createBlankNodeStudioDefinition(new Date('2026-01-02T00:00:00.000Z')),
       id: '@local/research-table',
       label: '研究对照表',
       contentKind: 'table' as const,

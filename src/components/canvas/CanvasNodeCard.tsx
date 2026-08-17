@@ -15,7 +15,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerE
 import { runArtifactUrl } from '@/agent/config'
 import { loadArtifactProjection } from '@/agent/artifactProjection'
 import { nodeHasVisibleContent } from '@/canvas/contextComposer'
-import { canvasNodeFrame, type CanvasNode } from '@/canvas/model'
+import { canvasNodeWorldRect, type CanvasNode } from '@/canvas/model'
 import type { CanvasBounds, CanvasTaskStatus } from '@/canvas/selectors'
 import {
   artifactViewerKindForMediaType,
@@ -108,7 +108,7 @@ export default function CanvasNodeCard({
   onSelectExecution,
   registerFocusable,
 }: CanvasNodeCardProps) {
-  const frame = frameOverride ?? canvasNodeFrame(node)
+  const frame = frameOverride ?? canvasNodeWorldRect(node)
   const plugin = pluginOverride ?? getPlugin(node.typeRef.id)
   const Icon = nodeTypeIcon(plugin)
   const label = `${plugin.label}节点：${node.title || plugin.label}`
@@ -193,7 +193,7 @@ export default function CanvasNodeCard({
       frame={frame}
       zIndex={(frameOverride && 'z' in frameOverride && typeof frameOverride.z === 'number'
         ? frameOverride.z
-        : canvasNodeFrame(node).z * 1_000_000) + 10}
+        : canvasNodeWorldRect(node).z * 1_000_000) + 10}
       pointerEvents="auto"
       selected={selected}
       compoundSelected={compoundSelected}

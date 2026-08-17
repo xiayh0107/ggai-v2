@@ -66,7 +66,7 @@ export interface ArtifactCatalogRunSource {
  *
  * Canvas nodes are only references to these identities, so deleting the last
  * node that points at an artifact does not remove it from this catalog. The
- * catalog deliberately ignores legacy path-only output. Safe entries from a
+ * catalog deliberately ignores retired path-only output. Safe entries from a
  * partial manifest remain discoverable, while each returned identity is first
  * resolved through the verified artifact store and can only be read through
  * `/runs/:runId/artifacts/:artifactId` route, which still fails closed if the
@@ -162,7 +162,7 @@ export async function listArtifactCatalog(
         partial = true
         continue
       }
-      const canvasBranch = summary.canvasBranch ?? 'main'
+      const canvasBranch = summary.canvasBranch
       if (!verified
         || verified.runId !== summary.runId
         || verified.artifactId !== artifact.artifactId

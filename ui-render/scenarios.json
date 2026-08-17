@@ -42,6 +42,11 @@
       "id": "run-setup",
       "label": "生成前准备",
       "description": "检查预检、可信附件与能力摘要只在需要时出现。"
+    },
+    {
+      "id": "v3-convergence",
+      "label": "Canvas v3 最终回归",
+      "description": "覆盖层级、Compute、文件冲突、整图审核、PDF 页面条和 PPTX 导出。"
     }
   ],
   "scenarios": [
@@ -329,6 +334,102 @@
         { "kind": "text-present", "text": "Skills 2", "label": "摘要数量与有效绑定一致" },
         { "kind": "text-absent", "text": "revision", "label": "不显示内部 revision" },
         { "kind": "text-absent", "text": "digest", "label": "不显示内部 digest" }
+      ]
+    },
+    {
+      "id": "convergence-hierarchy",
+      "title": "v3 · 层级与隔离编辑",
+      "description": "确认局部坐标、子节点数量和隔离入口使用统一卡片语言。",
+      "journeyId": "v3-convergence",
+      "step": 1,
+      "viewport": { "width": 960, "height": 640 },
+      "readySelector": "[data-ui-render-ready='convergence-hierarchy']",
+      "state": { "phase": "层级完成", "selection": "父节点", "controlOwner": "Layer Tree", "disclosure": "隔离编辑" },
+      "principleIds": ["content-first", "shared-language"],
+      "checkpoints": ["层级摘要不泄露内部 ID。", "隔离编辑是显式动作。"],
+      "checks": [
+        { "kind": "text-present", "text": "局部坐标 · 3 个子节点", "label": "局部坐标摘要可见" },
+        { "kind": "text-present", "text": "进入隔离编辑", "label": "隔离编辑入口可见" }
+      ]
+    },
+    {
+      "id": "convergence-compute-approval",
+      "title": "v3 · Compute digest 审批",
+      "description": "确认容器策略、等待审批状态和显式批准动作。",
+      "journeyId": "v3-convergence",
+      "step": 2,
+      "viewport": { "width": 960, "height": 640 },
+      "readySelector": "[data-ui-render-ready='convergence-compute-approval']",
+      "state": { "phase": "等待审批", "selection": "Compute", "controlOwner": "daemon", "disclosure": "代码与环境" },
+      "principleIds": ["task-owns-generation", "progressive-disclosure"],
+      "checkpoints": ["不回退宿主进程。", "审批绑定代码和环境。"],
+      "checks": [
+        { "kind": "text-present", "text": "network none", "label": "容器网络隔离可见" },
+        { "kind": "text-present", "text": "批准此代码与环境", "label": "显式审批动作可见" }
+      ]
+    },
+    {
+      "id": "convergence-filesystem-conflict",
+      "title": "v3 · 文件 CAS 冲突",
+      "description": "确认 A→B/A→C 不使用时间戳覆盖。",
+      "journeyId": "v3-convergence",
+      "step": 3,
+      "viewport": { "width": 960, "height": 640 },
+      "readySelector": "[data-ui-render-ready='convergence-filesystem-conflict']",
+      "state": { "phase": "冲突", "selection": "绑定文件", "controlOwner": "用户", "disclosure": "显式版本选择" },
+      "principleIds": ["content-first", "progressive-disclosure"],
+      "checkpoints": ["Canvas 和磁盘并发修改清晰可见。", "没有 timestamp LWW 文案。"],
+      "checks": [
+        { "kind": "text-present", "text": "Canvas 与磁盘均已修改", "label": "冲突原因可见" },
+        { "kind": "text-present", "text": "需要显式选择版本", "label": "恢复动作清晰" }
+      ]
+    },
+    {
+      "id": "convergence-graph-review",
+      "title": "v3 · GraphPlan 整图审核",
+      "description": "确认整图接受不会自动执行。",
+      "journeyId": "v3-convergence",
+      "step": 4,
+      "viewport": { "width": 960, "height": 640 },
+      "readySelector": "[data-ui-render-ready='convergence-graph-review']",
+      "state": { "phase": "待审核", "selection": "整图", "controlOwner": "用户", "disclosure": "节点与数据边" },
+      "principleIds": ["task-owns-generation", "shared-language"],
+      "checkpoints": ["整图规模可见。", "接受和执行保持分离。"],
+      "checks": [
+        { "kind": "text-present", "text": "接受后仍不会自动执行", "label": "无自动执行保证可见" },
+        { "kind": "text-present", "text": "接受整图", "label": "原子接受动作可见" }
+      ]
+    },
+    {
+      "id": "convergence-pdf-strip",
+      "title": "v3 · PDF 懒页面条",
+      "description": "确认大文档初始只物化 Document，并按需预览页面。",
+      "journeyId": "v3-convergence",
+      "step": 5,
+      "viewport": { "width": 960, "height": 640 },
+      "readySelector": "[data-ui-render-ready='convergence-pdf-strip']",
+      "state": { "phase": "页面预览", "selection": "PDF Document", "controlOwner": "PDF.js", "disclosure": "单页" },
+      "principleIds": ["content-first", "progressive-disclosure"],
+      "checkpoints": ["300 页不造成节点爆炸。", "预览明确按需生成。"],
+      "checks": [
+        { "kind": "text-present", "text": "初始 1 个 Document node", "label": "单根物化可见" },
+        { "kind": "text-present", "text": "按需生成页面预览", "label": "懒加载策略可见" }
+      ]
+    },
+    {
+      "id": "convergence-pptx-export",
+      "title": "v3 · PowerPoint 导出",
+      "description": "确认 hybrid 原生对象、fallback 和诊断一体交付。",
+      "journeyId": "v3-convergence",
+      "step": 6,
+      "viewport": { "width": 960, "height": 640 },
+      "readySelector": "[data-ui-render-ready='convergence-pptx-export']",
+      "state": { "phase": "导出完成", "selection": "Presentation", "controlOwner": "daemon exporter", "disclosure": "诊断与下载" },
+      "principleIds": ["content-first", "shared-language"],
+      "checkpoints": ["原生对象与 fallback 策略可见。", "下载伴随诊断计数。"],
+      "checks": [
+        { "kind": "text-present", "text": "原生对象 + fallback", "label": "混合导出策略可见" },
+        { "kind": "text-present", "text": "下载 PPTX", "label": "导出结果可下载" }
       ]
     }
   ]

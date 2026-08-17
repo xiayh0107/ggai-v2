@@ -4,18 +4,11 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, test } from 'node:test'
 import {
-  BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
   ProjectionPluginCapabilityStore,
-  inspectLegacyProjectionPluginCapabilitySnapshot,
   inspectProjectionPluginCapabilitySnapshot,
-  legacyProjectionPluginCapabilityDigest,
   resolveProjectionPluginCapabilitySnapshot,
 } from '../pluginCapabilities.js'
 import { createProjectionContributionSnapshot } from '../projectionContributions.js'
-import {
-  BUILTIN_ARTIFACT_CLAIM_REGISTRY,
-  canonicalArtifactClaimRegistrations,
-} from '../../src/plugins/artifactContracts.js'
 
 const temporaryDirectories: string[] = []
 
@@ -128,27 +121,6 @@ test('runtime and browser claims with the same plugin id fail closed', () => {
   }])), /claim conflicts/u)
 })
 
-test('keeps immutable pre-context-policy snapshots readable with compatibility semantics', () => {
-  const legacyPlugins = canonicalArtifactClaimRegistrations([
-    ...BUILTIN_ARTIFACT_CLAIM_REGISTRY,
-    { id: '@community/legacy', artifactClaims: [{ extensions: ['.legacy'] }] },
-  ]).map((registration) => ({
-    id: registration.id,
-    artifactRules: registration.artifactClaims,
-    ...(registration.acceptsUnknown ? { acceptsUnknown: true } : {}),
-  }))
-  const legacy = {
-    schemaVersion: 2 as const,
-    digest: legacyProjectionPluginCapabilityDigest(legacyPlugins),
-    plugins: legacyPlugins,
-  }
-
-  assert.deepEqual(inspectLegacyProjectionPluginCapabilitySnapshot(legacy), {
-    status: 'valid',
-    snapshot: legacy,
-  })
-})
-
 test('persists immutable content-addressed snapshots and detects tampering', async () => {
   const projectDir = await temporaryProject()
   const store = new ProjectionPluginCapabilityStore(projectDir)
@@ -173,28 +145,10 @@ test('persists immutable content-addressed snapshots and detects tampering', asy
   persisted.digest = 'f'.repeat(64)
   await writeFile(snapshotPath, `${JSON.stringify(persisted)}\n`, 'utf8')
   await assert.rejects(store.get(snapshot.digest), /digest|belongs/u)
-  assert.deepEqual(await store.recover(snapshot.digest), BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT)
+  await assert.rejects(store.recover(snapshot.digest), /digest|belongs/u)
 })
 
-test('recovery ignores retired versioned capability directories', async () => {
-  const projectDir = await temporaryProject()
-  const store = new ProjectionPluginCapabilityStore(projectDir)
-  const retiredRoot = path.join(projectDir, '.gg', 'runtime', 'plugin-capabilities-v2')
-  await mkdir(retiredRoot, { recursive: true })
-  await writeFile(
-    path.join(retiredRoot, `${'a'.repeat(64)}.json`),
-    '{}\n',
-    'utf8',
-  )
-
-  assert.equal(await store.get('a'.repeat(64)), null)
-  assert.deepEqual(
-    await store.recover('a'.repeat(64)),
-    BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
-  )
-})
-
-test('strict lookup rejects unsafe roots while recovery degrades to built-ins', async () => {
+test('strict lookup and recovery both fail closed for unsafe roots', async () => {
   const projectDir = await temporaryProject()
   const outside = await temporaryProject()
   await mkdir(path.join(projectDir, '.gg', 'runtime'), { recursive: true })
@@ -202,8 +156,5 @@ test('strict lookup rejects unsafe roots while recovery degrades to built-ins', 
   const store = new ProjectionPluginCapabilityStore(projectDir)
 
   await assert.rejects(store.register({ schemaVersion: 2, plugins: [] }), /unsafe/u)
-  assert.deepEqual(
-    await store.recover('a'.repeat(64)),
-    BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
-  )
+  await assert.rejects(store.recover('a'.repeat(64)), /unsafe/u)
 })

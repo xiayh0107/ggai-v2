@@ -111,7 +111,7 @@ export interface TaskRunArtifactManifest {
 
 export interface TaskRunStreamOptions {
   onEvent: (event: CanvasAgentEvent) => void
-  /** Exact daemon event identity, unlike the legacy split event/id callbacks. */
+  /** Exact daemon event identity, unlike retired split event/id callbacks. */
   onEventEnvelope?: (entry: { id: number | null; data: CanvasAgentEvent }) => void
   signal?: AbortSignal
   projectDir?: string
@@ -138,7 +138,7 @@ export interface TaskRunSummaryPayload {
   prompt?: string
   nodeId: string
   agentId: string
-  /** Legacy summaries without this field are normalized to `main` at decode time. */
+  /** Required logical Canvas branch. */
   canvasBranch: string
   status: DaemonRunStatus
   startedAt: number
@@ -888,7 +888,7 @@ function decodeRunSummary(value: unknown, requireTaskId = false): TaskRunSummary
   if (value.finishedAt !== undefined && !isFiniteNumber(value.finishedAt)) {
     throw new TaskRunProtocolError('GET /runs/:id response had an invalid finishedAt')
   }
-  if (value.canvasBranch !== undefined && !isNonEmptyString(value.canvasBranch)) {
+  if (!isNonEmptyString(value.canvasBranch)) {
     throw new TaskRunProtocolError('GET /runs/:id response had an invalid canvasBranch')
   }
   if ((requireTaskId && !isDaemonIdentifier(value.taskId))
@@ -925,7 +925,7 @@ function decodeRunSummary(value: unknown, requireTaskId = false): TaskRunSummary
     ...(typeof value.prompt === 'string' ? { prompt: value.prompt } : {}),
     nodeId: value.nodeId,
     agentId: value.agentId,
-    canvasBranch: typeof value.canvasBranch === 'string' ? value.canvasBranch : 'main',
+    canvasBranch: value.canvasBranch,
     status: value.status,
     startedAt: value.startedAt,
     sessionId: value.sessionId,

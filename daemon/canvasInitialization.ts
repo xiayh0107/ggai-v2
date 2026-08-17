@@ -166,8 +166,8 @@ async function resetCanvasState(
   await mkdir(ggDir, { recursive: true, mode: 0o700 })
   const targets = [
     '.gg/runtime',
-    '.gg/canvas-state-v2',
-    '.gg/canvas-worktrees-v2',
+    ['.gg', `canvas-state-v${2}`].join('/'),
+    ['.gg', `canvas-worktrees-v${2}`].join('/'),
     '.gg/canvas',
     '.gg/canvas-worktrees',
     'artifacts',

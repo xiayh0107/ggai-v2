@@ -73,14 +73,12 @@ There is one product Canvas and one active implementation: `components/canvas/` 
 and `canvas/` for application state. Product directories, components and types must not encode
 release generations such as `v1` or `v2`.
 
-Durable wire formats may retain `schemaVersion` values and published endpoint paths while data is
-still in circulation. Those values are compatibility facts at the protocol boundary, not product
-layers and must never select a second renderer, store, route or user experience.
+Current durable wire formats retain explicit `schemaVersion` values, but the application has no
+old parser, alias, dual-write store, second renderer, or recovery reader.
 
 `npm run architecture:check` rejects versioned Canvas product paths and imports, archived browser
-stores, composition-layer back imports and the aggregate legacy daemon client. New schema revisions
-must be handled by parsers/migrations beside the single domain model rather than by copying the
-entire application tree.
+stores, composition-layer back imports, the retired aggregate daemon client, old Canvas/Outcome
+modules, old URL aliases, old persistent directory names, and retired Node fields.
 
 ## Component ownership
 
@@ -107,11 +105,10 @@ entire application tree.
 2. Keep Workspace and Resource Center route roots limited to lifecycle and route composition; their
    dialogs, cards and providers are already isolated.
 3. Keep Task Run calls on the narrow Canvas Run client and projection-plan wire types; do not add
-   Canvas imports from the aggregate legacy client surface.
+   Canvas imports from the retired aggregate client surface.
 4. Split daemon routes by catalog, Canvas, Run and versioning domains while preserving one server
    composition root.
-5. Treat compatibility formats as adapters with explicit removal criteria, never as parallel
-   product implementations.
+5. Reject retired formats explicitly; do not add read-only recovery or parallel implementations.
 
 Every extraction must preserve behavior and pass focused tests, type checking, lint, architecture
 checks and the relevant full suite. Large rewrites that mix migration with product changes are not

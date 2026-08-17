@@ -41,7 +41,7 @@ export interface CanvasTaskRunSummary {
   canvasBranch: string
   /** Optional only for task-run records created before intent metadata became durable. */
   baseRevision?: number
-  /** Exact accepted prompt; optional only for legacy task-run records. */
+  /** Exact accepted prompt for current Task-owned records. */
   prompt?: string
   status: CanvasTaskRunStatus
   startedAt: number

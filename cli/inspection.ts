@@ -1,4 +1,4 @@
-import { canvasNodeFrame, type CanvasDocument, type CanvasEntityRef } from '../src/canvas/model.js'
+import { canvasNodeWorldRect, type CanvasDocument, type CanvasEntityRef } from '../src/canvas/model.js'
 import type { WorkspaceProjectClient } from '../src/workspace/projectClient.js'
 import type { HeadlessCanvasClient } from './canvasClient.js'
 import { CliCommandError } from './output.js'
@@ -74,7 +74,7 @@ export async function inspectNode(
           orderKey: node.orderKey,
           bounds: node.bounds,
           transform: node.transform,
-          rootFrame: node.parentId === null ? canvasNodeFrame(node) : null,
+          rootWorldBounds: node.parentId === null ? canvasNodeWorldRect(node) : null,
         },
       } : {}),
     },

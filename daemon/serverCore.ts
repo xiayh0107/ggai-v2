@@ -8,10 +8,10 @@ import { pipeline } from 'node:stream/promises'
 import { CanvasCommandError, type CanvasCommand } from '../src/canvas/commands.js'
 import type { CanvasDocument } from '../src/canvas/model.js'
 import {
-  CUSTOM_NODE_MANIFEST_SCHEMA_VERSION,
-  isCustomNodeManifest,
-  validateCustomNodeManifest,
-  type CustomNodeManifest,
+  NODE_STUDIO_DEFINITION_SCHEMA_VERSION,
+  isNodeStudioDefinition,
+  validateNodeStudioDefinition,
+  type NodeStudioDefinition,
 } from '../src/node-studio/model.js'
 import {
   SKILL_ASSET_SCHEMA_VERSION,
@@ -1016,11 +1016,11 @@ async function route(
     if (!requirement) {
       throw new ProtocolError('node requirement cannot be empty', 'invalid_node_studio_run', 400)
     }
-    if (!isCustomNodeManifest(body.definition)) {
+    if (!isNodeStudioDefinition(body.definition)) {
       throw new ProtocolError('current node definition is malformed', 'invalid_node_studio_run', 400)
     }
     const definition = structuredClone(body.definition)
-    const definitionErrors = validateCustomNodeManifest(definition)
+    const definitionErrors = validateNodeStudioDefinition(definition)
     if (definitionErrors.length > 0) {
       throw new ProtocolError(definitionErrors.join('; '), 'invalid_node_studio_run', 400)
     }
@@ -1037,31 +1037,6 @@ async function route(
       projectDir: '.',
       canvasBranch: 'node-studio',
       automationMode: 'confirm',
-      canvasSnapshot: {
-        nodes: [{
-          id: nodeId,
-          type: 'code',
-          x: 0,
-          y: 0,
-          w: 360,
-          h: 240,
-          title: `节点定义：${definition.label}`,
-          instruction: {
-            phase: 'idle',
-            prompt: requirement,
-            attachments: [],
-            sources: [],
-            open: false,
-          },
-          payload: {},
-        }],
-        edges: [],
-        plugins: [{
-          id: 'code',
-          label: '代码',
-          description: '结构化文本与代码产物',
-        }],
-      },
     }
     const run = await context.runs.create(studioRequest)
     writeJson(response, 202, { schemaVersion: 1, runId: run.runId, status: run.status })
@@ -2186,10 +2161,10 @@ function isNodeStudioRunSummary(value: RunSummary | null): value is RunSummary &
 
 function nodeStudioAgentPrompt(
   requirement: string,
-  current: CustomNodeManifest,
+  current: NodeStudioDefinition,
 ): string {
   const candidateExample = {
-    schemaVersion: CUSTOM_NODE_MANIFEST_SCHEMA_VERSION,
+    schemaVersion: NODE_STUDIO_DEFINITION_SCHEMA_VERSION,
     id: current.id,
     label: current.label,
     description: current.description,
@@ -2252,8 +2227,8 @@ async function readNodeStudioCandidate(
     baseDefinitionRevision: number
   },
   close: RunClosePayload | null,
-  definitions: CustomNodeManifest[],
-): Promise<CustomNodeManifest> {
+  definitions: NodeStudioDefinition[],
+): Promise<NodeStudioDefinition> {
   const runId = summary.runId
   if (!close
     || close.runId !== runId
@@ -2312,19 +2287,19 @@ async function readNodeStudioCandidate(
     && definitions.some((definition) => definition.id === candidate.id)) {
     throw new Error('Agent 候选不能改写另一个已有节点包')
   }
-  const manifest: CustomNodeManifest = {
+  const manifest: NodeStudioDefinition = {
     ...candidate,
     revision: summary.baseDefinitionRevision,
     installed: false,
     updatedAt: new Date().toISOString(),
   }
-  const errors = validateCustomNodeManifest(manifest)
+  const errors = validateNodeStudioDefinition(manifest)
   if (errors.length > 0) throw new Error(`Agent 返回的节点定义未通过校验：${errors.join('; ')}`)
   return manifest
 }
 
 function parseNodeStudioCandidate(value: unknown): Omit<
-  CustomNodeManifest,
+  NodeStudioDefinition,
   'revision' | 'installed' | 'updatedAt'
 > {
   const body = requestObject(value)
@@ -2335,7 +2310,7 @@ function parseNodeStudioCandidate(value: unknown): Omit<
     ...(body.execution === undefined ? [] : ['execution']),
   ] as const
   if (!hasExactBodyKeys(body, keys)) throw new Error('Agent 返回的节点定义包含未知字段')
-  if (body.schemaVersion !== CUSTOM_NODE_MANIFEST_SCHEMA_VERSION) {
+  if (body.schemaVersion !== NODE_STUDIO_DEFINITION_SCHEMA_VERSION) {
     throw new Error('Agent 返回了不支持的节点定义版本')
   }
   const contentKind = body.contentKind
@@ -2351,24 +2326,24 @@ function parseNodeStudioCandidate(value: unknown): Omit<
     throw new Error('Agent 返回的数组字段无效')
   }
   return {
-    schemaVersion: CUSTOM_NODE_MANIFEST_SCHEMA_VERSION,
+    schemaVersion: NODE_STUDIO_DEFINITION_SCHEMA_VERSION,
     id: requiredBodyString(body, 'id', 160),
     label: requiredBodyString(body, 'label', 80),
     description: requiredBodyString(body, 'description', 500),
-    contentKind: contentKind as CustomNodeManifest['contentKind'],
-    icon: icon as CustomNodeManifest['icon'],
+    contentKind: contentKind as NodeStudioDefinition['contentKind'],
+    icon: icon as NodeStudioDefinition['icon'],
     defaultWidth: requiredBodySafeInteger(body, 'defaultWidth', { min: 280, max: 640 }),
     initialPayloadSchema: requiredBodyString(body, 'initialPayloadSchema', 240),
     initialPayload: structuredClone(requestObject(body.initialPayload)),
     placeholder: requiredBodyString(body, 'placeholder', 500),
     actions: [...body.actions],
-    containment: structuredClone(requestObject(body.containment)) as unknown as CustomNodeManifest['containment'],
-    ports: structuredClone(body.ports) as CustomNodeManifest['ports'],
+    containment: structuredClone(requestObject(body.containment)) as unknown as NodeStudioDefinition['containment'],
+    ports: structuredClone(body.ports) as NodeStudioDefinition['ports'],
     ...(body.execution === undefined
       ? {}
-      : { execution: structuredClone(requestObject(body.execution)) as unknown as NonNullable<CustomNodeManifest['execution']> }),
+      : { execution: structuredClone(requestObject(body.execution)) as unknown as NonNullable<NodeStudioDefinition['execution']> }),
     exporters: [...body.exporters],
-    agent: structuredClone(requestObject(body.agent)) as unknown as CustomNodeManifest['agent'],
+    agent: structuredClone(requestObject(body.agent)) as unknown as NodeStudioDefinition['agent'],
     emptyTitle: requiredBodyString(body, 'emptyTitle', 120),
     emptyDescription: requiredBodyString(body, 'emptyDescription', 240),
     sampleTitle: requiredBodyString(body, 'sampleTitle', 120),
