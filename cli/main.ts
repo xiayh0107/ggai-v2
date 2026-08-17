@@ -39,7 +39,7 @@ import {
 const DEFAULT_DAEMON_URL = 'http://127.0.0.1:7380'
 
 export const CLI_HELP = [
-  'Usage: gg [--daemon-url URL] [--json] <command>',
+  'Usage: ggai [--daemon-url URL] [--json] <command>',
   '',
   'Commands:',
   '  doctor                  Check daemon health and Canvas capability',
@@ -56,6 +56,7 @@ export const CLI_HELP = [
   'Global options:',
   '  --daemon-url URL        Daemon base URL (default http://127.0.0.1:7380)',
   '  --json                  Emit a stable JSON envelope',
+  '  --no-start-daemon       Do not start a missing loopback daemon',
   '  -h, --help              Show help',
 ].join('\n')
 
@@ -63,6 +64,11 @@ export interface RunCliOptions {
   io: CliIo
   fetch?: typeof globalThis.fetch
   environment?: NodeJS.ProcessEnv
+  ensureDaemon?: (input: {
+    baseUrl: string
+    fetch: typeof globalThis.fetch
+    environment: NodeJS.ProcessEnv
+  }) => Promise<void>
 }
 
 interface ParsedCli {
@@ -70,6 +76,7 @@ interface ParsedCli {
   json: boolean
   args: string[]
   help: boolean
+  startDaemon: boolean
 }
 
 export async function runCli(argv: readonly string[], options: RunCliOptions): Promise<number> {
@@ -88,6 +95,13 @@ export async function runCli(argv: readonly string[], options: RunCliOptions): P
   }
   const fetchImplementation = options.fetch ?? globalThis.fetch.bind(globalThis)
   try {
+    if (parsed.startDaemon && options.ensureDaemon) {
+      await options.ensureDaemon({
+        baseUrl: parsed.daemonUrl,
+        fetch: fetchImplementation,
+        environment: options.environment ?? process.env,
+      })
+    }
     if (parsed.args[0] === 'doctor') {
       exactArgs(parsed.args, 1, 'doctor does not accept positional arguments')
       const health = await daemonHealth(parsed.daemonUrl, fetchImplementation)
@@ -254,12 +268,14 @@ function parseCli(argv: readonly string[], environment: NodeJS.ProcessEnv): Pars
   let daemonUrl = environment.GGAI_DAEMON_URL ?? DEFAULT_DAEMON_URL
   let json = false
   let help = false
+  let startDaemon = environment.GGAI_AUTO_START_DAEMON !== '0'
   const args: string[] = []
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]!
     if (argument === '--json') json = true
     else if (argument === '--daemon-url') daemonUrl = argv[++index] ?? ''
     else if (argument === '--help' || argument === '-h') help = true
+    else if (argument === '--no-start-daemon') startDaemon = false
     else args.push(argument)
   }
   if (!daemonUrl.trim()) throw new CliUsageError('--daemon-url requires a value')
@@ -272,7 +288,13 @@ function parseCli(argv: readonly string[], environment: NodeJS.ProcessEnv): Pars
   if (normalized.protocol !== 'http:' && normalized.protocol !== 'https:') {
     throw new CliUsageError('--daemon-url must use http or https')
   }
-  return { daemonUrl: normalized.toString().replace(/\/$/u, ''), json, args, help }
+  return {
+    daemonUrl: normalized.toString().replace(/\/$/u, ''),
+    json,
+    args,
+    help,
+    startDaemon,
+  }
 }
 
 async function daemonHealth(

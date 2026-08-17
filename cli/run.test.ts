@@ -4,7 +4,7 @@ import { emptyCanvasDocument } from '../src/canvas/model'
 import { CliCommandError } from './output'
 import { executeHeadlessRun, type HeadlessRunDependencies } from './run'
 
-describe('gg run vertical slice', () => {
+describe('ggai run vertical slice', () => {
   it('creates a Task, preflights, starts, waits, denies permission, and returns artifacts', async () => {
     const events: CanvasAgentEvent[] = []
     const { dependencies, calls } = fixtureDependencies(events)
