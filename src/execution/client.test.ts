@@ -39,4 +39,18 @@ describe('NodeExecutionClient', () => {
     await expect(client.list({ projectDir: '.', branch: 'main', nodeId: 'node-smart' }))
       .resolves.toEqual([execution])
   })
+
+  it('approves only an execution identity with an exact approval body', async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toContain('/executions/execution-test/approval')
+      expect(JSON.parse(String(init?.body))).toEqual({ approve: true })
+      return Response.json({
+        schemaVersion: 1,
+        execution: { ...execution, status: 'awaiting-approval', outputs: {} },
+      })
+    })
+    const client = new NodeExecutionClient('http://127.0.0.1:7380', fetchImpl)
+    await client.approve({ projectDir: '.', branch: 'main', executionId: 'execution-test' })
+    expect(fetchImpl).toHaveBeenCalledOnce()
+  })
 })

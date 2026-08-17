@@ -21,6 +21,8 @@ export interface NodeExecutorInput {
 export interface NodeExecutor {
   id: string
   environmentDigest: string
+  requiresApproval?: boolean
+  environmentDigestFor?(node: CanvasNode): string
   supports(nodeTypeId: string): boolean
   execute(input: NodeExecutorInput): Promise<Record<string, ValueRef[]>>
 }
@@ -89,6 +91,10 @@ export class NodeExecutionService {
         409,
       )
     }
+    const environmentDigest = executor.environmentDigestFor?.(node) ?? executor.environmentDigest
+    if (!/^[0-9a-f]{64}$/u.test(environmentDigest)) {
+      throw new NodeExecutionError('invalid_executor_environment', 'Executor environment digest is invalid')
+    }
     const { inputs, inputsDigest } = await this.#resolveInputs(
       input.projectId,
       input.canvasBranch,
@@ -101,7 +107,7 @@ export class NodeExecutionService {
     const cacheKey = createHash('sha256').update(JSON.stringify({
       nodeTypeRef: node.typeRef,
       executorId: executor.id,
-      environmentDigest: executor.environmentDigest,
+      environmentDigest,
       inputsDigest,
       codeDigest,
     })).digest('hex')
@@ -126,13 +132,19 @@ export class NodeExecutionService {
       artifactRunId: `execution-artifacts-${executionId}`,
       inputsDigest,
       codeDigest,
-      environmentDigest: executor.environmentDigest,
+      environmentDigest,
       cacheKey,
-      status: 'running',
+      status: executor.requiresApproval && !await this.#metadata.hasComputeApproval({
+        projectId: input.projectId,
+        nodeId: node.id,
+        codeDigest,
+        environmentDigest,
+      }) ? 'awaiting-approval' : 'running',
       outputs: {},
       startedAt: new Date().toISOString(),
     }
     const created = await this.#metadata.createExecution(execution)
+    if (created.status === 'awaiting-approval') return created
     const controller = new AbortController()
     this.#active.set(executionId, controller)
     void this.#run(
@@ -145,6 +157,60 @@ export class NodeExecutionService {
       input.projectDir,
     )
     return created
+  }
+
+  async approve(input: {
+    executionId: string
+    projectId: string
+    projectDir: string
+    canvasBranch: string
+    document: CanvasDocument
+  }): Promise<NodeExecution> {
+    const execution = await this.#metadata.getExecution(input.executionId)
+    if (!execution) throw new NodeExecutionError('execution_not_found', 'Execution does not exist', 404)
+    if (execution.projectId !== input.projectId || execution.canvasBranch !== input.canvasBranch) {
+      throw new NodeExecutionError('execution_scope_mismatch', 'Execution belongs to another scope', 403)
+    }
+    if (execution.status !== 'awaiting-approval') return execution
+    const node = input.document.nodes.find((candidate) => candidate.id === execution.nodeId)
+    if (!node) throw new NodeExecutionError('node_not_found', 'Compute node no longer exists', 404)
+    const executor = this.#executors.resolve(node.typeRef.id)
+    if (!executor || executor.id !== execution.executorId || !executor.requiresApproval) {
+      throw new NodeExecutionError('executor_changed', 'Compute executor no longer matches approval request')
+    }
+    const environmentDigest = executor.environmentDigestFor?.(node) ?? executor.environmentDigest
+    const { inputs, inputsDigest } = await this.#resolveInputs(
+      input.projectId, input.canvasBranch, input.document, node,
+    )
+    const codeDigest = createHash('sha256')
+      .update(JSON.stringify(executionNodeSnapshot(input.document, node.id)))
+      .digest('hex')
+    if (execution.codeDigest !== codeDigest
+      || execution.inputsDigest !== inputsDigest
+      || execution.environmentDigest !== environmentDigest
+      || JSON.stringify(execution.nodeTypeRef) !== JSON.stringify(node.typeRef)) {
+      throw new NodeExecutionError('approval_stale', 'Compute code, inputs, or environment changed')
+    }
+    await this.#metadata.grantComputeApproval({
+      projectId: input.projectId,
+      nodeId: node.id,
+      codeDigest,
+      environmentDigest,
+      approvedAt: new Date().toISOString(),
+    })
+    const running = await this.#metadata.markExecutionRunning(execution.executionId)
+    const controller = new AbortController()
+    this.#active.set(execution.executionId, controller)
+    void this.#run(
+      running,
+      executor,
+      structuredClone(input.document),
+      structuredClone(node),
+      inputs,
+      controller,
+      input.projectDir,
+    )
+    return running
   }
 
   list(projectId: string, canvasBranch: string, nodeId: string): Promise<NodeExecution[]> {
@@ -248,13 +314,14 @@ export class NodeExecutionService {
           attributes: {},
         })))])
     } catch (error) {
+      const timedOut = error instanceof Error && 'code' in error && error.code === 'timed-out'
       await this.#metadata.completeExecution({
         executionId: execution.executionId,
-        status: controller.signal.aborted ? 'cancelled' : 'failed',
+        status: controller.signal.aborted ? 'cancelled' : timedOut ? 'timed-out' : 'failed',
         outputs: {},
         finishedAt: new Date().toISOString(),
         error: {
-          code: controller.signal.aborted ? 'cancelled' : 'executor_failed',
+          code: controller.signal.aborted ? 'cancelled' : timedOut ? 'timed-out' : 'executor_failed',
           message: error instanceof Error ? error.message : String(error),
         },
       }).catch(() => undefined)

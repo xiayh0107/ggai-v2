@@ -79,6 +79,13 @@ async function execute(request: MetadataWorkerRequest): Promise<MetadataWorkerRe
       return findCachedExecution(requireDatabase(), request)
     case 'execution-complete':
       return completeExecution(requireDatabase(), request)
+    case 'execution-mark-running':
+      return markExecutionRunning(requireDatabase(), request.executionId)
+    case 'compute-approval-check':
+      return hasComputeApproval(requireDatabase(), request)
+    case 'compute-approval-grant':
+      grantComputeApproval(requireDatabase(), request)
+      return true
     case 'provenance-append':
       appendProvenance(requireDatabase(), request.records)
       return request.records.map((record) => structuredClone(record))
@@ -93,6 +100,44 @@ async function execute(request: MetadataWorkerRequest): Promise<MetadataWorkerRe
       request satisfies never
       throw new Error('Unsupported metadata worker operation')
   }
+}
+
+function markExecutionRunning(subject: DatabaseSync, executionId: string): NodeExecution {
+  const result = subject.prepare(`
+    UPDATE node_executions SET status = 'running'
+    WHERE execution_id = ? AND status = 'awaiting-approval'
+  `).run(executionId)
+  if (result.changes !== 1) throw new Error('execution is missing or not awaiting approval')
+  const execution = readExecution(subject, executionId)
+  if (!execution) throw new Error('approved execution disappeared')
+  return execution
+}
+
+function hasComputeApproval(
+  subject: DatabaseSync,
+  request: Extract<MetadataWorkerRequest, { operation: 'compute-approval-check' }>,
+): boolean {
+  return Boolean(subject.prepare(`
+    SELECT 1 FROM compute_approvals
+    WHERE project_id = ? AND node_id = ? AND code_digest = ? AND environment_digest = ?
+  `).get(request.projectId, request.nodeId, request.codeDigest, request.environmentDigest))
+}
+
+function grantComputeApproval(
+  subject: DatabaseSync,
+  request: Extract<MetadataWorkerRequest, { operation: 'compute-approval-grant' }>,
+): void {
+  subject.prepare(`
+    INSERT OR IGNORE INTO compute_approvals (
+      project_id, node_id, code_digest, environment_digest, approved_at
+    ) VALUES (?, ?, ?, ?, ?)
+  `).run(
+    request.projectId,
+    request.nodeId,
+    request.codeDigest,
+    request.environmentDigest,
+    request.approvedAt,
+  )
 }
 
 function createExecution(subject: DatabaseSync, execution: NodeExecution): void {
@@ -333,14 +378,24 @@ function migrate(subject: DatabaseSync): void {
   }
   if (version === METADATA_SCHEMA_VERSION) return
 
-  if (version === 1) {
+  if (version === 1 || version === 2) {
     subject.exec('BEGIN IMMEDIATE')
     try {
       subject.exec(`
-        DROP INDEX IF EXISTS node_executions_cache_success;
-        CREATE INDEX node_executions_cache_success
-          ON node_executions(project_id, canvas_branch, node_id, cache_key, finished_at DESC)
-          WHERE status = 'succeeded';
+        ${version === 1 ? `
+          DROP INDEX IF EXISTS node_executions_cache_success;
+          CREATE INDEX node_executions_cache_success
+            ON node_executions(project_id, canvas_branch, node_id, cache_key, finished_at DESC)
+            WHERE status = 'succeeded';
+        ` : ''}
+        CREATE TABLE compute_approvals (
+          project_id TEXT NOT NULL,
+          node_id TEXT NOT NULL,
+          code_digest TEXT NOT NULL,
+          environment_digest TEXT NOT NULL,
+          approved_at TEXT NOT NULL,
+          PRIMARY KEY (project_id, node_id, code_digest, environment_digest)
+        );
         PRAGMA user_version = ${METADATA_SCHEMA_VERSION};
       `)
       subject.exec('COMMIT')
@@ -486,6 +541,15 @@ function migrate(subject: DatabaseSync): void {
         ON provenance_relations(project_id, subject_id, relation_kind);
       CREATE INDEX provenance_relations_object
         ON provenance_relations(project_id, object_id, relation_kind);
+
+      CREATE TABLE compute_approvals (
+        project_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        code_digest TEXT NOT NULL,
+        environment_digest TEXT NOT NULL,
+        approved_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, node_id, code_digest, environment_digest)
+      );
 
       PRAGMA user_version = ${METADATA_SCHEMA_VERSION};
     `)

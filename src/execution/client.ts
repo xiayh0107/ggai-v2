@@ -37,6 +37,22 @@ export class NodeExecutionClient {
     return value.executions.map(parseExecution)
   }
 
+  async approve(input: {
+    projectDir: string
+    branch: string
+    executionId: string
+  }): Promise<NodeExecution> {
+    const url = new URL(`/executions/${encodeURIComponent(input.executionId)}/approval`, `${this.#baseUrl}/`)
+    url.searchParams.set('projectDir', input.projectDir)
+    url.searchParams.set('branch', input.branch)
+    const response = await this.#fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ approve: true }),
+    })
+    return decodeExecutionResponse(response)
+  }
+
   #nodeUrl(input: { projectDir: string; branch: string; nodeId: string }): string {
     const url = new URL(`/nodes/${encodeURIComponent(input.nodeId)}/executions`, `${this.#baseUrl}/`)
     url.searchParams.set('projectDir', input.projectDir)

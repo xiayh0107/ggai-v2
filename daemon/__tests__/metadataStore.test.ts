@@ -26,6 +26,7 @@ test('metadata authority initializes the exact WAL schema in its worker', async 
   try {
     assert.equal(scalarNumber(database, 'PRAGMA user_version'), METADATA_SCHEMA_VERSION)
     assert.deepEqual(tableNames(database), [
+      'compute_approvals',
       'execution_outputs',
       'node_bindings',
       'node_executions',
@@ -68,6 +69,35 @@ test('metadata backups are serialized by the worker and remain readable', async 
   } finally {
     backup.close()
   }
+})
+
+test('metadata schema 2 upgrades atomically with digest-bound compute approvals', async (t) => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ggai-metadata-v2-')))
+  const first = new MetadataStore(root)
+  t.after(async () => {
+    await first.close()
+    await rm(root, { recursive: true, force: true })
+  })
+  await first.open()
+  await first.close()
+  const old = new DatabaseSync(first.databasePath)
+  old.exec('DROP TABLE compute_approvals; PRAGMA user_version = 2;')
+  old.close()
+
+  const upgraded = new MetadataStore(root)
+  await upgraded.open()
+  assert.equal((await upgraded.diagnostics()).schemaVersion, METADATA_SCHEMA_VERSION)
+  assert.equal(await upgraded.hasComputeApproval({
+    projectId: 'project', nodeId: 'node', codeDigest: 'a'.repeat(64), environmentDigest: 'b'.repeat(64),
+  }), false)
+  await upgraded.grantComputeApproval({
+    projectId: 'project', nodeId: 'node', codeDigest: 'a'.repeat(64), environmentDigest: 'b'.repeat(64),
+    approvedAt: '2026-08-17T00:00:00.000Z',
+  })
+  assert.equal(await upgraded.hasComputeApproval({
+    projectId: 'project', nodeId: 'node', codeDigest: 'a'.repeat(64), environmentDigest: 'b'.repeat(64),
+  }), true)
+  await upgraded.close()
 })
 
 test('metadata authority rejects a symlinked runtime root', async (t) => {

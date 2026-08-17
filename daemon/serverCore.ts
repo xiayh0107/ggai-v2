@@ -106,6 +106,7 @@ import { TaskRunPreflightService } from './taskRunPreflight.js'
 import { MetadataStore } from './metadataStore.js'
 import { NodeExecutionError, NodeExecutionService } from './nodeExecutions.js'
 import { AssetAssemblyExecutor } from './assetRasterizer.js'
+import { ComputeExecutor } from './computeExecutor.js'
 import {
   createHttpRouter,
   type HttpRoute,
@@ -141,6 +142,7 @@ export interface DaemonServerOptions {
   capabilityExecutionScopes?: CapabilityExecutionScopes
   metadataStore?: MetadataStore
   nodeExecutionService?: NodeExecutionService
+  computeExecutor?: ComputeExecutor
 }
 
 export interface DaemonServer {
@@ -154,6 +156,7 @@ export interface DaemonServer {
   skillAssets: SkillAssetCatalog
   workspaceCapabilities: ServiceReader
   executions: NodeExecutionService
+  compute: ComputeExecutor
   close(): Promise<void>
 }
 
@@ -165,7 +168,13 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   const metadata = options.metadataStore ?? new MetadataStore(options.projectRoot)
   const ownsMetadata = options.metadataStore === undefined
   const executions = options.nodeExecutionService ?? new NodeExecutionService(metadata)
-  if (!options.nodeExecutionService) executions.executors.register(new AssetAssemblyExecutor())
+  const compute = options.computeExecutor ?? new ComputeExecutor()
+  if (!options.nodeExecutionService) {
+    executions.executors.register(new AssetAssemblyExecutor())
+    executions.executors.register(compute)
+  } else if (options.computeExecutor) {
+    executions.executors.register(compute)
+  }
   if (projects.projectRoot !== path.resolve(options.projectRoot)) {
     throw new TypeError('projectCatalog and daemon server must share a project root')
   }
@@ -264,6 +273,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
       lifecycle,
       taskRunPreflight,
       executions,
+      compute,
     }, domainRouter)
       .catch((error: unknown) => writeError(response, error))
   })
@@ -283,6 +293,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     skillAssets,
     workspaceCapabilities,
     executions,
+    compute,
     close() {
       closePromise ??= closeDaemonServer(
         server,
@@ -319,6 +330,7 @@ interface RouteContext extends HttpRouteContext {
   allowedOrigins: Set<string>
   lifecycle: { closing: boolean }
   executions: NodeExecutionService
+  compute: ComputeExecutor
 }
 
 async function route(
@@ -365,6 +377,15 @@ async function route(
         initializationRequired: false,
       },
       projectRoot: context.projectRoot,
+    })
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/runtime/compute') {
+    writeJson(response, 200, {
+      schemaVersion: 1,
+      ...await context.compute.diagnostics(),
+      presets: ['python-3.13', 'node-24'],
     })
     return
   }
@@ -1032,7 +1053,7 @@ async function route(
       nodeId,
       force: body.force,
     })
-    writeJson(response, execution.status === 'running' ? 202 : 200, {
+    writeJson(response, ['queued', 'awaiting-approval', 'running'].includes(execution.status) ? 202 : 200, {
       schemaVersion: 1,
       execution,
     })
@@ -1055,6 +1076,28 @@ async function route(
     const outputs = await context.executions.outputs(executionId)
     if (!outputs) throw new NodeExecutionError('execution_not_found', 'Execution does not exist', 404)
     writeJson(response, 200, { schemaVersion: 1, executionId, outputs })
+    return
+  }
+
+  const executionApprovalMatch = pathname.match(/^\/executions\/([^/]+)\/approval$/u)
+  if (executionApprovalMatch && request.method === 'POST') {
+    const executionId = parseTaskId(decodeURIComponent(executionApprovalMatch[1]!))
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
+    const body = requestObject(await readJson(request))
+    if (!hasExactBodyKeys(body, ['approve']) || body.approve !== true) {
+      throw new ProtocolError('approval body must contain approve: true', 'invalid_execution_approval', 400)
+    }
+    const canvas = (await context.versions.getCanvas(projectDir, branch)).canvas
+    const leasedProjectDir = await context.canvas.acquireProjectLease(projectDir)
+    const execution = await context.executions.approve({
+      executionId,
+      projectId: operationalProjectId(projectDir),
+      projectDir: leasedProjectDir,
+      canvasBranch: branch,
+      document: canvas.document,
+    })
+    writeJson(response, 202, { schemaVersion: 1, execution })
     return
   }
 
