@@ -6,25 +6,13 @@ import type { Socket } from 'node:net'
 import path from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { CanvasCommandError, type CanvasCommand } from '../src/canvas/commands.js'
-import type {
-  CanvasDocument,
-  CanvasNode,
-} from '../src/canvas/model.js'
+import type { CanvasDocument } from '../src/canvas/model.js'
 import {
   CUSTOM_NODE_MANIFEST_SCHEMA_VERSION,
   isCustomNodeManifest,
   validateCustomNodeManifest,
   type CustomNodeManifest,
 } from '../src/node-studio/model.js'
-import {
-  compileTaskContext,
-  taskContextArtifactRefs,
-} from '../src/agent/taskContext.js'
-import {
-  projectNodeContext,
-  type NodeContextProjectionReceipt,
-} from '../src/agent/nodeContextProjection.js'
-import type { NodeContextPolicy } from '../src/plugins/contextContracts.js'
 import {
   SKILL_ASSET_SCHEMA_VERSION,
   canonicalSkillAssetRefs,
@@ -57,7 +45,6 @@ import { PermissionPolicyError } from './permissions.js'
 import {
   ProjectionPluginCapabilityStore,
   browserCommunityProjectionClaims,
-  projectionPluginContracts,
   resolveProjectionPluginCapabilitySnapshot,
   type ProjectionPluginCapabilitySnapshot,
 } from './pluginCapabilities.js'
@@ -99,15 +86,10 @@ import {
   type RunIntent,
 } from './taskRunProtocol.js'
 import {
-  MAX_RESOLVED_NODE_ATTACHMENT_ARTIFACT_REFS,
-  MAX_RESOLVED_NODE_ATTACHMENT_CONTENT_BYTES,
-  MAX_RESOLVED_NODE_ATTACHMENT_PAYLOAD_BYTES,
-  MAX_RESOLVED_NODE_ATTACHMENT_TEXT_BYTES,
-  type ResolvedArtifactAttachment,
   type NodeStudioRunRequest,
-  type ResolvedNodeAttachment,
 } from './taskRunTypes.js'
 import { resolveRunIntentSkills } from './taskRunSkills.js'
+import { resolveRunIntentAttachments } from './taskRunAttachments.js'
 import { installWorkspaceCapabilityProviders } from './workspaceRuntime.js'
 import { TaskSessionsCorruptionError } from './taskSessions.js'
 import {
@@ -120,6 +102,16 @@ import {
   listArtifactCatalog,
   MAX_ARTIFACT_CATALOG_LIMIT,
 } from './artifactCatalog.js'
+import { TaskRunPreflightService } from './taskRunPreflight.js'
+import {
+  createHttpRouter,
+  type HttpRoute,
+  type HttpRouteContext,
+} from './http/router.js'
+import { createHealthRoute } from './http/routes/health.js'
+import { createRuntimeRoute } from './http/routes/runtime.js'
+import { createTaskRunPreflightRoute } from './http/routes/taskRunPreflight.js'
+import { createTaskRunReproducibilityRoute } from './http/routes/taskRunReproducibility.js'
 
 const MAX_JSON_BODY_BYTES = 8 * 1024 * 1024
 const SSE_HEARTBEAT_MS = 15_000
@@ -207,13 +199,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     capabilityProfile: () => registry.runtimeDiagnostics().profile,
     acquireProjectLease: (projectDir) => canvas.acquireProjectLease(projectDir),
     resolveSourceProjectDir: async ({ projectDir, canvasBranch, taskOwned, studioOwned }) => {
-      if (!taskOwned && !studioOwned) {
-        throw new ProtocolError(
-          'legacy snapshot Runs are not supported by the Canvas daemon',
-          'legacy_api_removed',
-          410,
-        )
-      }
+      if (!taskOwned && !studioOwned) return null
       if (taskOwned) await versions.sourceExecutionProjectDir(projectDir, canvasBranch)
       return null
     },
@@ -228,6 +214,27 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   const allowedOrigins = new Set(options.allowedOrigins ?? [])
   const sockets = new Set<Socket>()
   const lifecycle = { closing: false }
+  const taskRunPreflight = new TaskRunPreflightService({
+    registry,
+    runs,
+    versions,
+    skillAssets,
+    skillResolver: () => {
+      const resolver = workspaceCapabilities.get(SKILL_RESOLVER_SERVICE)
+      const provider = workspaceCapabilities.ownerOf(SKILL_RESOLVER_SERVICE)
+      if (!resolver || !provider) throw new Error('Workspace Skill Resolver is unavailable')
+      return { resolver, provider }
+    },
+    projectionContributions: () => workspaceProjectionContributionSnapshot(
+      workspaceCapabilities,
+    ),
+  })
+  const domainRouter = createHttpRouter([
+    createHealthRoute(),
+    createRuntimeRoute(),
+    createTaskRunPreflightRoute(),
+    createTaskRunReproducibilityRoute(),
+  ])
   let closePromise: Promise<void> | null = null
 
   const server = createServer((request, response) => {
@@ -245,7 +252,8 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
       projectionCanvases,
       allowedOrigins,
       lifecycle,
-    })
+      taskRunPreflight,
+    }, domainRouter)
       .catch((error: unknown) => writeError(response, error))
   })
   server.on('connection', (socket) => {
@@ -282,7 +290,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   }
 }
 
-interface RouteContext {
+interface RouteContext extends HttpRouteContext {
   projectRoot: string
   registry: AgentRegistry
   runs: RunManager
@@ -302,7 +310,9 @@ async function route(
   request: IncomingMessage,
   response: ServerResponse,
   context: RouteContext,
+  domainRouter: HttpRoute,
 ): Promise<void> {
+  if (await domainRouter(request, response, context)) return
   setSecurityHeaders(response)
   assertServerOpen(context)
   const origin = request.headers.origin
@@ -704,7 +714,7 @@ async function route(
     return
   }
 
-  if (request.method === 'GET' && (pathname === '/canvas' || pathname === '/canvas/v2')) {
+  if (request.method === 'GET' && pathname === '/canvas') {
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
     const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
     const initial = (await context.versions.getCanvas(projectDir, branch)).canvas
@@ -956,10 +966,7 @@ async function route(
     return
   }
 
-  if (request.method === 'PUT' && (
-    pathname === '/plugin-capabilities'
-    || pathname === '/plugin-capabilities/v2'
-  )) {
+  if (request.method === 'PUT' && pathname === '/plugin-capabilities') {
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
     let snapshot: ProjectionPluginCapabilitySnapshot
     try {
@@ -993,13 +1000,6 @@ async function route(
 
   if (request.method === 'POST' && pathname === '/runs') {
     const raw = await readJson(request)
-    if (!isRunIntentCandidate(raw)) {
-      throw new ProtocolError(
-        'legacy snapshot Runs were removed; POST /runs requires RunIntent',
-        'legacy_api_removed',
-        410,
-      )
-    }
     const intent = parseRunIntentForServer(raw)
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
     const capabilityDigest = optionalPluginCapabilityDigest(url)
@@ -1109,9 +1109,9 @@ async function route(
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
     if (singleQueryParameter(url, 'nodeId') !== undefined) {
       throw new ProtocolError(
-        'node-scoped Run history was removed; use taskId',
-        'legacy_api_removed',
-        410,
+        'nodeId is not a supported Run history filter',
+        'invalid_run_history_filter',
+        400,
       )
     }
     const rawTaskId = singleQueryParameter(url, 'taskId')
@@ -1129,10 +1129,7 @@ async function route(
     return
   }
 
-  if (request.method === 'GET' && (
-    pathname === '/artifact-catalog'
-    || pathname === '/artifact-catalog/v2'
-  )) {
+  if (request.method === 'GET' && pathname === '/artifact-catalog') {
     const projectDir = singleQueryParameter(url, 'projectDir')
     if (projectDir === undefined) {
       throw new ProtocolError(
@@ -2078,13 +2075,6 @@ function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoExcepti
   return error instanceof Error && 'code' in error && error.code === code
 }
 
-function isRunIntentCandidate(value: unknown): boolean {
-  return typeof value === 'object'
-    && value !== null
-    && !Array.isArray(value)
-    && (value as Record<string, unknown>).schemaVersion === 2
-}
-
 function parseRunIntentForServer(value: unknown): RunIntent {
   try {
     return parseRunIntent(value)
@@ -2094,281 +2084,6 @@ function parseRunIntentForServer(value: unknown): RunIntent {
     }
     throw error
   }
-}
-
-export async function resolveRunIntentAttachments(
-  intent: RunIntent,
-  document: CanvasDocument,
-  runs: Pick<RunManager, 'lookupRunArtifact'>,
-  projectDir: string,
-  pluginCapabilities: ProjectionPluginCapabilitySnapshot,
-): Promise<{
-  artifacts: ResolvedArtifactAttachment[]
-  nodes: ResolvedNodeAttachment[]
-}> {
-  type ArtifactAuthority = 'intent' | 'node-attachment' | 'context-edge'
-  interface PendingArtifactReference {
-    runId: string
-    artifactId: string
-    authorities: Set<ArtifactAuthority>
-  }
-
-  const nodesById = new Map(document.nodes.map((node) => [node.id, node]))
-  const references = new Map<string, PendingArtifactReference>()
-  const artifacts: ResolvedArtifactAttachment[] = []
-  const nodes: ResolvedNodeAttachment[] = []
-  const contentBudget = { remaining: MAX_RESOLVED_NODE_ATTACHMENT_CONTENT_BYTES }
-  let nodeArtifactRefCount = 0
-  const projectionPlugins = projectionPluginContracts(pluginCapabilities)
-  const nodeContextPolicies = new Map<string, NodeContextPolicy>(
-    projectionPlugins.flatMap((plugin) =>
-      plugin.nodeContext ? [[plugin.id, plugin.nodeContext] as const] : []),
-  )
-
-  const appendReference = (
-    runId: string,
-    artifactId: string,
-    authority: ArtifactAuthority,
-  ) => {
-    const key = `${runId}\0${artifactId}`
-    const existing = references.get(key)
-    if (existing) {
-      existing.authorities.add(authority)
-      return
-    }
-    references.set(key, {
-      runId,
-      artifactId,
-      authorities: new Set([authority]),
-    })
-  }
-
-  for (const attachment of intent.attachments) {
-    if (attachment.kind === 'artifact') {
-      appendReference(attachment.runId, attachment.artifactId, 'intent')
-      continue
-    }
-
-    const node = nodesById.get(attachment.nodeId)
-    if (!node) {
-      throw new ProtocolError(
-        `attachment node does not exist at the requested revision: ${attachment.nodeId}`,
-        'attachment_not_found',
-        404,
-      )
-    }
-    const nodeSnapshot = snapshotExplicitNodeAttachment(
-      node,
-      contentBudget,
-      nodeContextPolicies.get(node.type),
-    )
-    nodeArtifactRefCount += nodeSnapshot.artifactRefs.length
-    if (nodeArtifactRefCount > MAX_RESOLVED_NODE_ATTACHMENT_ARTIFACT_REFS) {
-      throw new ProtocolError(
-        'explicit node attachments reference too many artifacts',
-        'node_attachment_too_large',
-        413,
-      )
-    }
-    nodes.push(nodeSnapshot)
-    for (const reference of nodeSnapshot.artifactRefs) {
-      appendReference(reference.runId, reference.artifactId, 'node-attachment')
-    }
-  }
-
-  // The browser cannot grant Canvas context by sending paths or a snapshot.
-  // Compile semantic inputs only from the exact document revision loaded above;
-  // summary/none edges contribute no artifact identities.
-  const contextPack = compileTaskContext({
-    document,
-    taskId: intent.taskId,
-    nodeContextPolicies: projectionPlugins.flatMap((plugin) =>
-      plugin.nodeContext ? [{ id: plugin.id, nodeContext: plugin.nodeContext }] : []),
-  })
-  for (const reference of taskContextArtifactRefs(contextPack)) {
-    appendReference(reference.runId, reference.artifactId, 'context-edge')
-  }
-
-  for (const reference of references.values()) {
-    let artifact: RunArtifactLookup | null
-    try {
-      artifact = await runs.lookupRunArtifact(
-        reference.runId,
-        reference.artifactId,
-        projectDir,
-      )
-    } catch {
-      if (reference.authorities.has('context-edge')) {
-        throw new ProtocolError(
-          `full context edge references an unavailable artifact: ${reference.artifactId}`,
-          'context_artifact_unavailable',
-          409,
-        )
-      }
-      if (reference.authorities.has('node-attachment')) {
-        throw new ProtocolError(
-          `explicit node attachment artifact failed integrity verification: ${reference.artifactId}`,
-          'node_attachment_artifact_unavailable',
-          409,
-        )
-      }
-      throw new ProtocolError(
-        `artifact failed its closed-manifest integrity check: ${reference.artifactId}`,
-        'artifact_integrity_error',
-        409,
-      )
-    }
-    if (!artifact) {
-      if (reference.authorities.has('context-edge')) {
-        throw new ProtocolError(
-          `full context edge references an unavailable artifact: ${reference.artifactId}`,
-          'context_artifact_unavailable',
-          409,
-        )
-      }
-      if (reference.authorities.has('node-attachment')) {
-        throw new ProtocolError(
-          `explicit node attachment references an unavailable artifact: ${reference.artifactId}`,
-          'node_attachment_artifact_unavailable',
-          409,
-        )
-      }
-      throw new ProtocolError(
-        `attachment artifact does not exist or failed verification: ${reference.artifactId}`,
-        'attachment_not_found',
-        404,
-      )
-    }
-    artifacts.push({
-      runId: artifact.runId,
-      artifactId: artifact.artifactId,
-      projectRelativePath: artifact.projectRelativePath,
-      mediaType: artifact.mediaType,
-      size: artifact.size,
-      contentDigest: artifact.contentDigest,
-    })
-  }
-  return { artifacts, nodes }
-}
-
-function snapshotExplicitNodeAttachment(
-  node: CanvasNode,
-  contentBudget: { remaining: number },
-  policy?: NodeContextPolicy,
-): ResolvedNodeAttachment {
-  const projected = projectNodeContext({
-    node,
-    contextRole: 'full',
-    policy,
-  })
-  const text = projected.text === null
-    ? undefined
-    : boundedNodeAttachmentText(projected.text, Math.min(
-        contentBudget.remaining,
-        MAX_RESOLVED_NODE_ATTACHMENT_TEXT_BYTES,
-      ))
-  if (text) contentBudget.remaining -= text.bytes
-
-  const payload = projected.payload === null
-    ? undefined
-    : boundedNodeAttachmentPayload(projected.payload, Math.min(
-        contentBudget.remaining,
-        MAX_RESOLVED_NODE_ATTACHMENT_PAYLOAD_BYTES,
-      ))
-  if (payload) contentBudget.remaining -= payload.bytes
-
-  const contextProjection = explicitAttachmentProjectionReceipt(
-    projected.receipt,
-    text?.value,
-    payload?.value,
-  )
-
-  return {
-    id: node.id,
-    title: node.title,
-    type: node.type,
-    ...(text?.value === undefined ? {} : { text: text.value }),
-    ...(payload?.value === undefined ? {} : { payload: payload.value }),
-    artifactRefs: projected.artifactRefs,
-    contextProjection,
-    truncation: {
-      text: text?.truncated ?? false,
-      payload: payload?.truncated ?? false,
-    },
-  }
-}
-
-function explicitAttachmentProjectionReceipt(
-  receipt: NodeContextProjectionReceipt,
-  text: string | undefined,
-  payload: Record<string, unknown> | undefined,
-): NodeContextProjectionReceipt {
-  const includedFields = Object.keys(payload ?? {}).sort((left, right) =>
-    left.localeCompare(right))
-  const includedChars = text ? [...text].length : 0
-  return {
-    ...receipt,
-    text: {
-      ...receipt.text,
-      includedChars,
-      truncated: receipt.text.truncated || includedChars < receipt.text.includedChars,
-    },
-    payload: {
-      ...receipt.payload,
-      includedFields,
-      omittedFields: Math.max(0, receipt.payload.sourceFields - includedFields.length),
-    },
-  }
-}
-
-function boundedNodeAttachmentText(
-  value: string,
-  maxBytes: number,
-): { value?: string; bytes: number; truncated: boolean } {
-  if (maxBytes < 2) return { bytes: 0, truncated: true }
-  const serialized = JSON.stringify(value)
-  const serializedBytes = Buffer.byteLength(serialized)
-  if (serializedBytes <= maxBytes) {
-    return { value, bytes: serializedBytes, truncated: false }
-  }
-
-  const chunks: string[] = []
-  let bytes = 2
-  for (const character of value) {
-    const encoded = JSON.stringify(character).slice(1, -1)
-    const characterBytes = Buffer.byteLength(encoded)
-    if (bytes + characterBytes > maxBytes) break
-    chunks.push(character)
-    bytes += characterBytes
-  }
-  return { value: chunks.join(''), bytes, truncated: true }
-}
-
-function boundedNodeAttachmentPayload(
-  value: Record<string, unknown>,
-  maxBytes: number,
-): { value?: Record<string, unknown>; bytes: number; truncated: boolean } {
-  if (maxBytes < 2) return { bytes: 0, truncated: true }
-  const serialized = JSON.stringify(value)
-  const serializedBytes = Buffer.byteLength(serialized)
-  if (serializedBytes <= maxBytes) {
-    return { value: structuredClone(value), bytes: serializedBytes, truncated: false }
-  }
-
-  const selected: Record<string, unknown> = {}
-  let bytes = 2
-  let selectedCount = 0
-  for (const key of Object.keys(value).sort((left, right) => left.localeCompare(right))) {
-    const propertyBytes = Buffer.byteLength(JSON.stringify(key))
-      + 1
-      + Buffer.byteLength(JSON.stringify(value[key]))
-      + (selectedCount > 0 ? 1 : 0)
-    if (bytes + propertyBytes > maxBytes) continue
-    selected[key] = structuredClone(value[key])
-    bytes += propertyBytes
-    selectedCount += 1
-  }
-  return { value: selected, bytes, truncated: true }
 }
 
 function writeError(response: ServerResponse, error: unknown): void {

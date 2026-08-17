@@ -9,7 +9,7 @@ import type {
 } from './runs.js'
 import {
   resolveRunIntentAttachments,
-} from './serverLegacy.js'
+} from './taskRunAttachments.js'
 import { resolveRunIntentSkills } from './taskRunSkills.js'
 import type { SkillResolver } from './skills/contracts.js'
 import type { SkillAssetCatalog } from './skillAssets.js'

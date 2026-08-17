@@ -19,7 +19,7 @@ const TRUSTED_KERNEL_MODULES = new Set([
   'daemon/runLogs',
   'daemon/runs',
   'daemon/server',
-  'daemon/serverLegacy',
+  'daemon/serverCore',
   'daemon/skillAssets',
   'daemon/taskSessions',
   'daemon/workspaceVersioning',

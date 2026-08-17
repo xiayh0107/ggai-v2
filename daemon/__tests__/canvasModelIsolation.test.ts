@@ -81,6 +81,9 @@ test('retired write, artifact path, source, preference, and session routes stay 
       }],
       ['/artifacts?path=artifacts/a.txt', undefined],
       ['/sessions?nodeId=node-legacy', undefined],
+      ['/canvas/v2', undefined],
+      ['/plugin-capabilities/v2', { method: 'PUT', body: '{}' }],
+      ['/artifact-catalog/v2?projectDir=.', undefined],
     ]
     for (const [route, init] of requests) {
       const response = await fetch(`${baseUrl}${route}`, init)
@@ -93,7 +96,7 @@ test('retired write, artifact path, source, preference, and session routes stay 
   })
 })
 
-test('legacy snapshot Runs and node-scoped Run history are explicitly gone', async () => {
+test('Run endpoints accept only the current Task-owned protocol', async () => {
   await withDaemon(async (baseUrl) => {
     const legacyRun = await fetch(`${baseUrl}/runs`, {
       method: 'POST',
@@ -105,17 +108,17 @@ test('legacy snapshot Runs and node-scoped Run history are explicitly gone', asy
         canvasSnapshot: { nodes: [], edges: [], plugins: [] },
       }),
     })
-    assert.equal(legacyRun.status, 410)
+    assert.equal(legacyRun.status, 400)
     assert.equal(
       (await legacyRun.json() as { error: { code: string } }).error.code,
-      'legacy_api_removed',
+      'invalid_run_intent',
     )
 
     const legacyFilteredHistory = await fetch(`${baseUrl}/runs?nodeId=node-legacy`)
-    assert.equal(legacyFilteredHistory.status, 410)
+    assert.equal(legacyFilteredHistory.status, 400)
     assert.equal(
       (await legacyFilteredHistory.json() as { error: { code: string } }).error.code,
-      'legacy_api_removed',
+      'invalid_run_history_filter',
     )
 
     const runLogDeletion = await fetch(`${baseUrl}/runs/old-run/log`, { method: 'DELETE' })
