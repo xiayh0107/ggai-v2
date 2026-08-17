@@ -36,6 +36,7 @@ import CanvasNodeActivityStrip from './CanvasNodeActivity'
 import CanvasNodeShell from './CanvasNodeShell'
 import CanvasNodeExecutionTray from './CanvasNodeExecutionTray'
 import CanvasFilesystemBindingStatus from './CanvasFilesystemBindingStatus'
+import CanvasPdfPageStrip from './CanvasPdfPageStrip'
 
 /** 节点右上角水平图标条的动作图标：与旧版 ⋯ 菜单同一套动作 id。 */
 const NODE_ACTION_ICONS: Record<string, LucideIcon> = {
@@ -243,6 +244,15 @@ export default function CanvasNodeCard({
           projectDir={projectDir}
           branch={canvasBranch}
         />
+      )}
+      {selected && node.typeRef.id === 'pdf-document'
+        && typeof node.payload?.importId === 'string'
+        && typeof node.payload.pageCount === 'number' && (
+          <CanvasPdfPageStrip
+            importId={node.payload.importId}
+            pageCount={node.payload.pageCount}
+            projectDir={projectDir}
+          />
       )}
     </CanvasNodeShell>
   )

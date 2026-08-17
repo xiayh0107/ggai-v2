@@ -56,6 +56,7 @@ export type CanvasTaskProposalEditsWire = TaskProposalEdits
 type CanvasTrustedCommandWire =
   | { type: 'MaterializeProjectionPlan'; planId: string }
   | { type: 'MaterializeGraphPlan'; planId: string }
+  | { type: 'MaterializeDecompositionPlan'; planId: string }
   | {
       type: 'AcceptTaskProposals'
       planId: string
@@ -66,7 +67,7 @@ type CanvasTrustedCommandWire =
 
 export type CanvasCommandWire =
   | Exclude<CanvasCommand, {
-      type: 'MaterializeProjectionPlan' | 'MaterializeGraphPlan' | 'AcceptTaskProposals' | 'DismissPlan'
+      type: 'MaterializeProjectionPlan' | 'MaterializeGraphPlan' | 'MaterializeDecompositionPlan' | 'AcceptTaskProposals' | 'DismissPlan'
     }>
   | CanvasTrustedCommandWire
 
@@ -377,6 +378,7 @@ export function serializeCanvasCommand(command: CanvasCommand): CanvasCommandWir
   switch (command.type) {
     case 'MaterializeProjectionPlan':
     case 'MaterializeGraphPlan':
+    case 'MaterializeDecompositionPlan':
       return { type: command.type, planId: command.plan.planId }
     case 'AcceptTaskProposals': {
       return {

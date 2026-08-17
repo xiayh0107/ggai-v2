@@ -17,7 +17,7 @@ describe('manifest-backed artifact claim registry', () => {
     expect(BUILTIN_ARTIFACT_CLAIM_REGISTRY.map(({ id }) => id)).toEqual([
       'code',
       'image',
-      'pdf',
+      'pdf-document',
       'table',
       'text',
       'file',

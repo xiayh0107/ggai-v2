@@ -90,7 +90,7 @@ matcher 各最多 64 个；`priority` 必须是 `-1000..1000` 的安全整数。
 仍由 `code` 插件接收。重复 id 会被拒绝；需要热替换的模块应在 HMR dispose 阶段先调用
 `unregisterPlugin(id)`，内置插件已处理这个生命周期。
 
-内置 `code` / `image` / `pdf` / `table` / `text` / `file` 只在这个 data-only registry 中
+内置 `code` / `image` / `pdf-document` / `table` / `text` / `file` 只在这个 data-only registry 中
 维护一次。typed claim 按 `priority` 排序，同优先级再比较匹配具体度与稳定 id；`file` 是未知
 格式的最低优先级兜底，不需要成为创建菜单中的独立 UI 插件。daemon 只导入这个 `.ts` 数据
 模块，绝不导入 `types.tsx`、`builtins/`、React、Lucide 或任何 renderer。

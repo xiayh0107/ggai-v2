@@ -11,7 +11,7 @@ const [rootManifest, rootLockfile] = await Promise.all([
   readFile(path.join(appRoot, 'package-lock.json'), 'utf8').then(JSON.parse),
 ])
 
-const runtimeDependencyNames = ['ajv', 'chokidar', 'sharp']
+const runtimeDependencyNames = ['@napi-rs/canvas', 'ajv', 'chokidar', 'pdfjs-dist', 'sharp']
 const runtimeDependencies = Object.fromEntries(runtimeDependencyNames.map((name) => {
   const version = rootLockfile.packages?.[`node_modules/${name}`]?.version
   if (typeof version !== 'string') throw new Error(`The root lockfile does not contain ${name}`)
