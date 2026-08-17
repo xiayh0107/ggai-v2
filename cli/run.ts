@@ -16,6 +16,11 @@ export interface HeadlessRunRequest {
   branch: string
   agentId: string
   wait: boolean
+  permissionDecision: 'allow' | 'deny'
+}
+
+export interface HeadlessContinueRequest extends HeadlessRunRequest {
+  taskId: string
 }
 
 export interface HeadlessRunArtifact {
@@ -53,7 +58,7 @@ export async function executeHeadlessRun(
   request: HeadlessRunRequest,
   dependencies: HeadlessRunDependencies,
 ): Promise<HeadlessRunResult> {
-  const project = await resolveProject(request.project, dependencies.projects)
+  const project = await resolveHeadlessProject(request.project, dependencies.projects)
   const opened = await dependencies.projects.open(project.id)
   if (opened.state !== 'ready') {
     throw new CliCommandError('project_unavailable', `project ${opened.title} is unavailable`, 5)
@@ -78,12 +83,41 @@ export async function executeHeadlessRun(
     command,
     createdAt: dependencies.now(),
   })
+  return startAcceptedTask(request, opened, taskId, accepted.revision, dependencies)
+}
+
+export async function executeHeadlessContinue(
+  request: HeadlessContinueRequest,
+  dependencies: HeadlessRunDependencies,
+): Promise<HeadlessRunResult> {
+  const project = await resolveHeadlessProject(request.project, dependencies.projects)
+  const opened = await dependencies.projects.open(project.id)
+  if (opened.state !== 'ready') {
+    throw new CliCommandError('project_unavailable', `project ${opened.title} is unavailable`, 5)
+  }
+  const canvas = await dependencies.canvas.getCanvas({
+    projectDir: opened.projectDir,
+    branch: request.branch,
+  })
+  if (!canvas.document.tasks.some((task) => task.id === request.taskId)) {
+    throw new CliCommandError('task_not_found', `task not found: ${request.taskId}`, 5)
+  }
+  return startAcceptedTask(request, opened, request.taskId, canvas.revision, dependencies)
+}
+
+async function startAcceptedTask(
+  request: HeadlessRunRequest,
+  opened: WorkspaceProject,
+  taskId: string,
+  baseRevision: number,
+  dependencies: HeadlessRunDependencies,
+): Promise<HeadlessRunResult> {
   const preflight = await dependencies.preflight.check({
     projectDir: opened.projectDir,
     taskId,
     agentId: request.agentId,
     canvasBranch: request.branch,
-    baseRevision: accepted.revision,
+    baseRevision,
     attachments: [],
   })
   if (preflight.status === 'blocked') {
@@ -104,7 +138,7 @@ export async function executeHeadlessRun(
     taskId,
     agentId: request.agentId,
     canvasBranch: request.branch,
-    baseRevision: accepted.revision,
+    baseRevision,
     prompt: request.prompt,
     attachments: [],
     materializationPolicy: 'auto',
@@ -120,8 +154,8 @@ export async function executeHeadlessRun(
       dependencies.onEvent(runId, event)
       if (event.type === 'permission-request') {
         permissionResolutions.push(dependencies.runs.resolvePermission(event.id, {
-          decision: 'deny',
-          reason: 'gg run denies permissions until an explicit CLI policy is selected',
+          decision: request.permissionDecision,
+          reason: `gg CLI explicit permission policy: ${request.permissionDecision}`,
         }))
       }
     },
@@ -134,7 +168,7 @@ export async function executeHeadlessRun(
   }
 }
 
-async function resolveProject(
+export async function resolveHeadlessProject(
   selector: string,
   projects: Pick<WorkspaceProjectClient, 'list'>,
 ): Promise<WorkspaceProject> {

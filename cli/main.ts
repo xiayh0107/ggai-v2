@@ -9,10 +9,16 @@ import { TaskRunHttpClient } from '../src/agent/taskRunHttpClient.js'
 import type { CanvasAgentEvent } from '../src/agent/types.js'
 import {
   executeHeadlessRun,
+  executeHeadlessContinue,
+  type HeadlessContinueRequest,
   type HeadlessRunRequest,
   type HeadlessRunResult,
 } from './run.js'
 import { HeadlessCanvasClient } from './canvasClient.js'
+import {
+  listHeadlessRunArtifacts,
+  readHeadlessRunHistory,
+} from './history.js'
 import {
   CliCommandError,
   CliUsageError,
@@ -31,6 +37,9 @@ export const CLI_HELP = [
   '  project list            List daemon-managed Workspace projects',
   '  project create <title>  Create a daemon-managed Workspace project',
   '  run <prompt> --project P [--wait]  Create a Task and start a Run',
+  '  continue <task-id> <prompt> --project P [--wait]',
+  '  log <run-id> --project P             Read the durable Run log',
+  '  artifact list <run-id> --project P   List verified Run artifacts',
   '',
   'Global options:',
   '  --daemon-url URL        Daemon base URL (default http://127.0.0.1:7380)',
@@ -107,6 +116,39 @@ export async function runCli(argv: readonly string[], options: RunCliOptions): P
       })
       writeResult(options.io, parsed.json, 'run', result, runResultText(result))
       return result.status === 'error' || result.status === 'interrupted' ? 6 : 0
+    }
+    if (parsed.args[0] === 'continue') {
+      const request = parseContinueRequest(parsed.args, options.environment ?? process.env)
+      const result = await executeHeadlessContinue(request, createRunDependencies(
+        parsed.daemonUrl,
+        fetchImplementation,
+        options.io,
+        parsed.json,
+      ))
+      writeResult(options.io, parsed.json, 'continue', result, runResultText(result))
+      return result.status === 'error' || result.status === 'interrupted' ? 6 : 0
+    }
+    if (parsed.args[0] === 'log' || parsed.args[0] === 'artifact') {
+      const artifact = parsed.args[0] === 'artifact'
+      const request = parseHistoryRequest(parsed.args, artifact)
+      const dependencies = {
+        projects: new WorkspaceProjectClient({
+          baseUrl: parsed.daemonUrl,
+          fetch: fetchImplementation,
+        }),
+        runs: new TaskRunHttpClient({
+          baseUrl: parsed.daemonUrl,
+          fetch: fetchImplementation,
+        }),
+      }
+      if (artifact) {
+        const result = await listHeadlessRunArtifacts(request, dependencies)
+        writeResult(options.io, parsed.json, 'artifact.list', result, artifactResultText(result.artifacts))
+      } else {
+        const result = await readHeadlessRunHistory(request, dependencies)
+        writeResult(options.io, parsed.json, 'log', result, logResultText(result.entries))
+      }
+      return 0
     }
     throw new CliUsageError(`unknown command: ${parsed.args[0]}`)
   } catch (error) {
@@ -260,6 +302,7 @@ export function parseRunRequest(
   let branch = 'main'
   let agentId = environment.GGAI_AGENT_ID?.trim() || 'codex'
   let wait = false
+  let permissionDecision: 'allow' | 'deny' = 'deny'
   const prompt: string[] = []
   for (let index = 1; index < args.length; index += 1) {
     const argument = args[index]!
@@ -267,6 +310,13 @@ export function parseRunRequest(
     else if (argument === '--branch') branch = args[++index] ?? ''
     else if (argument === '--agent') agentId = args[++index] ?? ''
     else if (argument === '--wait') wait = true
+    else if (argument === '--permission') {
+      const decision = args[++index]
+      if (decision !== 'allow' && decision !== 'deny') {
+        throw new CliUsageError('--permission must be allow or deny')
+      }
+      permissionDecision = decision
+    }
     else if (argument.startsWith('--')) throw new CliUsageError(`unknown run option: ${argument}`)
     else prompt.push(argument)
   }
@@ -279,7 +329,55 @@ export function parseRunRequest(
   if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,159}$/u.test(agentId) || agentId.includes('..')) {
     throw new CliUsageError('--agent is invalid')
   }
-  return { project: project.trim(), prompt: normalizedPrompt, branch, agentId, wait }
+  return {
+    project: project.trim(),
+    prompt: normalizedPrompt,
+    branch,
+    agentId,
+    wait,
+    permissionDecision,
+  }
+}
+
+function parseContinueRequest(
+  args: readonly string[],
+  environment: NodeJS.ProcessEnv,
+): HeadlessContinueRequest {
+  const taskId = args[1]
+  if (!taskId) throw new CliUsageError('continue requires a task id')
+  const request = parseRunRequest(['run', ...args.slice(2)], environment)
+  return { ...request, taskId }
+}
+
+function parseHistoryRequest(args: readonly string[], artifact: boolean) {
+  const runIndex = artifact ? 2 : 1
+  if (artifact && args[1] !== 'list') throw new CliUsageError('artifact requires list')
+  const runId = args[runIndex]
+  let project = ''
+  for (let index = runIndex + 1; index < args.length; index += 1) {
+    if (args[index] === '--project') project = args[++index] ?? ''
+    else throw new CliUsageError(`unknown option: ${args[index]}`)
+  }
+  if (!runId) throw new CliUsageError(`${artifact ? 'artifact list' : 'log'} requires a run id`)
+  if (!project.trim()) throw new CliUsageError(`${artifact ? 'artifact list' : 'log'} requires --project`)
+  return { runId, project: project.trim() }
+}
+
+function createRunDependencies(
+  daemonUrl: string,
+  fetchImplementation: typeof globalThis.fetch,
+  io: CliIo,
+  json: boolean,
+) {
+  return {
+    projects: new WorkspaceProjectClient({ baseUrl: daemonUrl, fetch: fetchImplementation }),
+    canvas: new HeadlessCanvasClient({ baseUrl: daemonUrl, fetch: fetchImplementation }),
+    preflight: new TaskRunPreflightClient({ baseUrl: daemonUrl, fetch: fetchImplementation }),
+    runs: new TaskRunHttpClient({ baseUrl: daemonUrl, fetch: fetchImplementation }),
+    uuid: () => globalThis.crypto.randomUUID(),
+    now: () => Date.now(),
+    onEvent: (runId: string, event: CanvasAgentEvent) => writeRunEvent(io, json, runId, event),
+  }
 }
 
 function writeRunEvent(io: CliIo, json: boolean, runId: string, event: CanvasAgentEvent): void {
@@ -318,6 +416,17 @@ function runResultText(result: HeadlessRunResult): string {
     }
   }
   return lines.join('\n')
+}
+
+function artifactResultText(artifacts: readonly { artifactId: string; mediaType: string; relativePath: string }[]) {
+  if (artifacts.length === 0) return 'No artifacts'
+  return artifacts.map((artifact) =>
+    `${artifact.artifactId}\t${artifact.mediaType}\t${artifact.relativePath}`).join('\n')
+}
+
+function logResultText(entries: readonly { id: number; event: string; data: unknown }[]) {
+  if (entries.length === 0) return 'No log entries'
+  return entries.map((entry) => `${entry.id}\t${entry.event}\t${JSON.stringify(entry.data)}`).join('\n')
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
