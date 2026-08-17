@@ -15,6 +15,7 @@ describe('gg run vertical slice', () => {
       branch: 'main',
       agentId: 'codex',
       wait: true,
+      permissionDecision: 'deny',
     }, dependencies)
 
     expect(calls.command).toMatchObject({
@@ -64,6 +65,7 @@ describe('gg run vertical slice', () => {
       branch: 'main',
       agentId: 'codex',
       wait: true,
+      permissionDecision: 'deny',
     }, dependencies)).rejects.toMatchObject({
       code: 'preflight_blocked',
     } satisfies Partial<CliCommandError>)

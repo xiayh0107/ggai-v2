@@ -13,6 +13,9 @@ node dist-cli/gg.js doctor
 node dist-cli/gg.js project list
 node dist-cli/gg.js project create demo
 node dist-cli/gg.js run "Create a scatter plot" --project demo --wait
+node dist-cli/gg.js continue task-id "Refine the title" --project demo --wait
+node dist-cli/gg.js log run-id --project demo
+node dist-cli/gg.js artifact list run-id --project demo
 ```
 
 Use `--daemon-url` or `GGAI_DAEMON_URL` to select a daemon. The default is
@@ -63,5 +66,6 @@ of the workflow.
 runs advisory preflight, registers an empty headless community capability set
 (the daemon still contributes protected builtins), and starts the canonical
 RunIntent. `--wait` consumes the durable SSE close and prints verified manifest
-entries. Until an explicit interactive policy lands, permission requests are
-denied by default.
+entries. Permission requests are denied by default; `--permission allow` is an
+explicit opt-in suitable only for a trusted interactive invocation. Durable log
+and artifact commands read daemon APIs rather than `.gg/` or artifact paths.
