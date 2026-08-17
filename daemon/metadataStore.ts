@@ -9,8 +9,10 @@ import {
   type MetadataWorkerRequest,
   type MetadataWorkerResponse,
   type MetadataWorkerResult,
+  type ProvenanceRecord,
 } from './metadataProtocol.js'
 import { canonicalizePotentialPath, isPathWithin } from './permissions.js'
+import type { NodeExecution, ValueRef } from '../src/execution/contracts.js'
 
 export class MetadataStoreError extends Error {
   constructor(message: string, cause?: unknown) {
@@ -70,6 +72,72 @@ export class MetadataStore {
     }
     await chmod(destination, 0o600)
     return destination
+  }
+
+  async createExecution(execution: NodeExecution): Promise<NodeExecution> {
+    await this.open()
+    const result = await this.#request({ operation: 'execution-create', execution })
+    return requireExecution(result)
+  }
+
+  async getExecution(executionId: string): Promise<NodeExecution | null> {
+    await this.open()
+    const result = await this.#request({ operation: 'execution-get', executionId })
+    return result === null ? null : requireExecution(result)
+  }
+
+  async listExecutions(input: {
+    projectId: string
+    canvasBranch: string
+    nodeId: string
+    limit?: number
+  }): Promise<NodeExecution[]> {
+    await this.open()
+    const limit = input.limit ?? 100
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+      throw new TypeError('execution list limit is invalid')
+    }
+    const result = await this.#request({ operation: 'execution-list', ...input, limit })
+    if (!Array.isArray(result)) throw new MetadataStoreError('Metadata worker returned invalid executions')
+    return result.map((value) => requireExecution(value as MetadataWorkerResult))
+  }
+
+  async findCachedExecution(input: {
+    projectId: string
+    canvasBranch: string
+    nodeId: string
+    cacheKey: string
+  }): Promise<NodeExecution | null> {
+    await this.open()
+    const result = await this.#request({ operation: 'execution-find-cache', ...input })
+    return result === null ? null : requireExecution(result)
+  }
+
+  async completeExecution(input: {
+    executionId: string
+    status: 'succeeded' | 'failed' | 'cancelled' | 'timed-out'
+    outputs: Record<string, ValueRef[]>
+    finishedAt: string
+    error?: { code: string; message: string }
+  }): Promise<NodeExecution> {
+    await this.open()
+    return requireExecution(await this.#request({ operation: 'execution-complete', ...input }))
+  }
+
+  async appendProvenance(records: ProvenanceRecord[]): Promise<void> {
+    await this.open()
+    await this.#request({ operation: 'provenance-append', records })
+  }
+
+  async queryProvenance(
+    projectId: string,
+    identity: string,
+    limit = 200,
+  ): Promise<ProvenanceRecord[]> {
+    await this.open()
+    const result = await this.#request({ operation: 'provenance-query', projectId, identity, limit })
+    if (!Array.isArray(result)) throw new MetadataStoreError('Metadata worker returned invalid provenance')
+    return result as ProvenanceRecord[]
   }
 
   close(): Promise<void> {
@@ -207,4 +275,11 @@ function isBackupResult(
 
 function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error && error.code === code
+}
+
+function requireExecution(value: MetadataWorkerResult): NodeExecution {
+  if (!value || Array.isArray(value) || typeof value !== 'object' || !('executionId' in value)) {
+    throw new MetadataStoreError('Metadata worker returned an invalid execution')
+  }
+  return structuredClone(value) as NodeExecution
 }

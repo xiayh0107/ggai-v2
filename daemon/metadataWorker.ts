@@ -7,7 +7,13 @@ import {
   type MetadataWorkerRequest,
   type MetadataWorkerResponse,
   type MetadataWorkerResult,
+  type ProvenanceRecord,
 } from './metadataProtocol.js'
+import {
+  validateExecutionOutputs,
+  type NodeExecution,
+  type ValueRef,
+} from '../src/execution/contracts.js'
 
 interface MetadataWorkerData {
   databasePath: string
@@ -62,6 +68,22 @@ async function execute(request: MetadataWorkerRequest): Promise<MetadataWorkerRe
       const pages = await backup(subject, request.destination, { rate: 100 })
       return { destination: request.destination, pages }
     }
+    case 'execution-create':
+      createExecution(requireDatabase(), request.execution)
+      return structuredClone(request.execution)
+    case 'execution-get':
+      return readExecution(requireDatabase(), request.executionId)
+    case 'execution-list':
+      return listExecutions(requireDatabase(), request)
+    case 'execution-find-cache':
+      return findCachedExecution(requireDatabase(), request)
+    case 'execution-complete':
+      return completeExecution(requireDatabase(), request)
+    case 'provenance-append':
+      appendProvenance(requireDatabase(), request.records)
+      return request.records.map((record) => structuredClone(record))
+    case 'provenance-query':
+      return queryProvenance(requireDatabase(), request.projectId, request.identity, request.limit)
     case 'close':
       database?.close()
       database = null
@@ -71,6 +93,196 @@ async function execute(request: MetadataWorkerRequest): Promise<MetadataWorkerRe
       request satisfies never
       throw new Error('Unsupported metadata worker operation')
   }
+}
+
+function createExecution(subject: DatabaseSync, execution: NodeExecution): void {
+  if (Object.keys(execution.outputs).length > 0) {
+    throw new TypeError('new execution cannot contain outputs')
+  }
+  subject.prepare(`
+    INSERT INTO node_executions (
+      execution_id, project_id, canvas_branch, node_id, node_type_id,
+      node_type_revision, node_type_digest, executor_id, artifact_run_id,
+      inputs_digest, code_digest, environment_digest, cache_key, status,
+      started_at, finished_at, error_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+  `).run(
+    execution.executionId,
+    execution.projectId,
+    execution.canvasBranch,
+    execution.nodeId,
+    execution.nodeTypeRef.id,
+    execution.nodeTypeRef.revision,
+    execution.nodeTypeRef.digest,
+    execution.executorId,
+    execution.artifactRunId,
+    execution.inputsDigest,
+    execution.codeDigest ?? null,
+    execution.environmentDigest,
+    execution.cacheKey,
+    execution.status,
+    execution.startedAt,
+  )
+}
+
+function completeExecution(
+  subject: DatabaseSync,
+  request: Extract<MetadataWorkerRequest, { operation: 'execution-complete' }>,
+): NodeExecution {
+  const items = validateExecutionOutputs(request.outputs)
+  subject.exec('BEGIN IMMEDIATE')
+  try {
+    const result = subject.prepare(`
+      UPDATE node_executions
+      SET status = ?, finished_at = ?, error_json = ?
+      WHERE execution_id = ? AND status IN ('queued', 'awaiting-approval', 'running')
+    `).run(
+      request.status,
+      request.finishedAt,
+      request.error ? JSON.stringify(request.error) : null,
+      request.executionId,
+    )
+    if (result.changes !== 1) throw new Error('execution is missing or already terminal')
+    const insert = subject.prepare(`
+      INSERT INTO execution_outputs (
+        execution_id, port_key, item_key, item_order, value_kind, value_json,
+        artifact_run_id, artifact_id, source_execution_id, source_port_key, source_item_key
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    for (const item of items) {
+      const artifact = item.value.kind === 'artifact' ? item.value : null
+      const source = item.value.kind === 'execution-output' ? item.value : null
+      insert.run(
+        request.executionId,
+        item.portKey,
+        item.itemKey,
+        item.itemOrder,
+        item.value.kind,
+        JSON.stringify(item.value),
+        artifact?.runId ?? null,
+        artifact?.artifactId ?? null,
+        source?.executionId ?? null,
+        source?.port ?? null,
+        source?.itemKey ?? null,
+      )
+    }
+    subject.exec('COMMIT')
+  } catch (error) {
+    subject.exec('ROLLBACK')
+    throw error
+  }
+  const execution = readExecution(subject, request.executionId)
+  if (!execution) throw new Error('terminal execution disappeared')
+  return execution
+}
+
+function readExecution(subject: DatabaseSync, executionId: string): NodeExecution | null {
+  const row = subject.prepare('SELECT * FROM node_executions WHERE execution_id = ?').get(executionId)
+  if (!row) return null
+  const outputs: Record<string, ValueRef[]> = {}
+  for (const output of subject.prepare(`
+    SELECT port_key, value_json FROM execution_outputs
+    WHERE execution_id = ? ORDER BY port_key, item_order
+  `).all(executionId)) {
+    const port = String(output.port_key)
+    const value = JSON.parse(String(output.value_json)) as ValueRef
+    ;(outputs[port] ??= []).push(value)
+  }
+  const error = row.error_json === null
+    ? undefined
+    : JSON.parse(String(row.error_json)) as { code: string; message: string }
+  return {
+    executionId: String(row.execution_id),
+    projectId: String(row.project_id),
+    canvasBranch: String(row.canvas_branch),
+    nodeId: String(row.node_id),
+    nodeTypeRef: {
+      id: String(row.node_type_id),
+      revision: Number(row.node_type_revision),
+      digest: String(row.node_type_digest),
+    },
+    executorId: String(row.executor_id),
+    artifactRunId: String(row.artifact_run_id),
+    inputsDigest: String(row.inputs_digest),
+    ...(row.code_digest === null ? {} : { codeDigest: String(row.code_digest) }),
+    environmentDigest: String(row.environment_digest),
+    cacheKey: String(row.cache_key),
+    status: String(row.status) as NodeExecution['status'],
+    outputs,
+    startedAt: String(row.started_at),
+    ...(row.finished_at === null ? {} : { finishedAt: String(row.finished_at) }),
+    ...(error ? { error } : {}),
+  }
+}
+
+function listExecutions(
+  subject: DatabaseSync,
+  request: Extract<MetadataWorkerRequest, { operation: 'execution-list' }>,
+): NodeExecution[] {
+  return subject.prepare(`
+    SELECT execution_id FROM node_executions
+    WHERE project_id = ? AND canvas_branch = ? AND node_id = ?
+    ORDER BY started_at DESC, execution_id DESC LIMIT ?
+  `).all(request.projectId, request.canvasBranch, request.nodeId, request.limit)
+    .map((row) => readExecution(subject, String(row.execution_id))!)
+}
+
+function findCachedExecution(
+  subject: DatabaseSync,
+  request: Extract<MetadataWorkerRequest, { operation: 'execution-find-cache' }>,
+): NodeExecution | null {
+  const row = subject.prepare(`
+    SELECT execution_id FROM node_executions
+    WHERE project_id = ? AND canvas_branch = ? AND node_id = ?
+      AND cache_key = ? AND status = 'succeeded'
+    ORDER BY finished_at DESC LIMIT 1
+  `).get(request.projectId, request.canvasBranch, request.nodeId, request.cacheKey)
+  return row ? readExecution(subject, String(row.execution_id)) : null
+}
+
+function appendProvenance(subject: DatabaseSync, records: ProvenanceRecord[]): void {
+  if (records.length > 1_024) throw new TypeError('too many provenance records')
+  const insert = subject.prepare(`
+    INSERT OR IGNORE INTO provenance_relations (
+      project_id, relation_kind, subject_id, object_id, attributes_json
+    ) VALUES (?, ?, ?, ?, ?)
+  `)
+  subject.exec('BEGIN IMMEDIATE')
+  try {
+    for (const record of records) {
+      insert.run(
+        record.projectId,
+        record.relationKind,
+        record.subjectId,
+        record.objectId,
+        JSON.stringify(record.attributes),
+      )
+    }
+    subject.exec('COMMIT')
+  } catch (error) {
+    subject.exec('ROLLBACK')
+    throw error
+  }
+}
+
+function queryProvenance(
+  subject: DatabaseSync,
+  projectId: string,
+  identity: string,
+  limit: number,
+): ProvenanceRecord[] {
+  return subject.prepare(`
+    SELECT project_id, relation_kind, subject_id, object_id, attributes_json
+    FROM provenance_relations
+    WHERE project_id = ? AND (subject_id = ? OR object_id = ?)
+    ORDER BY relation_id DESC LIMIT ?
+  `).all(projectId, identity, identity, limit).map((row) => ({
+    projectId: String(row.project_id),
+    relationKind: String(row.relation_kind) as ProvenanceRecord['relationKind'],
+    subjectId: String(row.subject_id),
+    objectId: String(row.object_id),
+    attributes: JSON.parse(String(row.attributes_json)) as Record<string, unknown>,
+  }))
 }
 
 function initialize(): MetadataDiagnostics {
@@ -121,6 +333,24 @@ function migrate(subject: DatabaseSync): void {
   }
   if (version === METADATA_SCHEMA_VERSION) return
 
+  if (version === 1) {
+    subject.exec('BEGIN IMMEDIATE')
+    try {
+      subject.exec(`
+        DROP INDEX IF EXISTS node_executions_cache_success;
+        CREATE INDEX node_executions_cache_success
+          ON node_executions(project_id, canvas_branch, node_id, cache_key, finished_at DESC)
+          WHERE status = 'succeeded';
+        PRAGMA user_version = ${METADATA_SCHEMA_VERSION};
+      `)
+      subject.exec('COMMIT')
+      return
+    } catch (error) {
+      subject.exec('ROLLBACK')
+      throw error
+    }
+  }
+
   subject.exec('BEGIN IMMEDIATE')
   try {
     subject.exec(`
@@ -146,8 +376,8 @@ function migrate(subject: DatabaseSync): void {
         error_json TEXT
       );
 
-      CREATE UNIQUE INDEX node_executions_cache_success
-        ON node_executions(project_id, canvas_branch, node_id, cache_key)
+      CREATE INDEX node_executions_cache_success
+        ON node_executions(project_id, canvas_branch, node_id, cache_key, finished_at DESC)
         WHERE status = 'succeeded';
 
       CREATE INDEX node_executions_node_history

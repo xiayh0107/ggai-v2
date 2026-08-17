@@ -34,6 +34,7 @@ import NodeTemplateView from '@/plugins/NodeTemplateView'
 import { type CanvasMenuItem } from './CanvasEntityMenu'
 import CanvasNodeActivityStrip from './CanvasNodeActivity'
 import CanvasNodeShell from './CanvasNodeShell'
+import CanvasNodeExecutionTray from './CanvasNodeExecutionTray'
 
 /** 节点右上角水平图标条的动作图标：与旧版 ⋯ 菜单同一套动作 id。 */
 const NODE_ACTION_ICONS: Record<string, LucideIcon> = {
@@ -52,6 +53,7 @@ export interface CanvasNodeCardProps {
   pluginOverride?: NodeTypeDefinition
   frame?: CanvasBounds
   projectDir: string
+  canvasBranch?: string
   selected: boolean
   compoundSelected?: boolean
   compact?: boolean
@@ -75,6 +77,7 @@ export interface CanvasNodeCardProps {
   onResizeStart: (event: PointerEvent<HTMLButtonElement>, node: CanvasNode) => void
   onMenuAction?: (node: CanvasNode, action: string) => void
   onOpenIsolation?: (node: CanvasNode) => void
+  onSelectExecution?: (nodeId: string, executionId: string | null) => void
   registerFocusable: (element: HTMLButtonElement | null) => void
 }
 
@@ -83,6 +86,7 @@ export default function CanvasNodeCard({
   pluginOverride,
   frame: frameOverride,
   projectDir,
+  canvasBranch = 'main',
   selected,
   compoundSelected = false,
   compact = false,
@@ -97,6 +101,7 @@ export default function CanvasNodeCard({
   onResizeStart,
   onMenuAction,
   onOpenIsolation,
+  onSelectExecution,
   registerFocusable,
 }: CanvasNodeCardProps) {
   const frame = frameOverride ?? canvasNodeFrame(node)
@@ -222,6 +227,15 @@ export default function CanvasNodeCard({
         compact={compact}
         taskStatus={taskStatus}
       />
+      {selected && (plugin.execution || node.selectedExecutionId) && (
+        <CanvasNodeExecutionTray
+          node={node}
+          projectDir={projectDir}
+          branch={canvasBranch}
+          executable={Boolean(plugin.execution)}
+          onSelect={(executionId) => onSelectExecution?.(node.id, executionId)}
+        />
+      )}
     </CanvasNodeShell>
   )
 }

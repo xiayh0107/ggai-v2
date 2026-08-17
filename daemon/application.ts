@@ -121,6 +121,7 @@ export class DaemonApplication {
       registry: this.registry,
       skillAssetCatalog: this.skillAssets,
       capabilityExecutionScopes: this.scopes,
+      metadataStore: this.metadata,
     })
     return this.#daemon
   }

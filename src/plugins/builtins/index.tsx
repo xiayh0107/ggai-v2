@@ -92,6 +92,11 @@ const builtinPlugins: readonly NodeTypeDefinition[] = [
     defaultWidth: 360,
     ui: defineNodeUi('card'),
     instruction: { placeholder: '描述要生成的产物…', actions: [], marks: [] },
+    execution: { capability: 'smart', policy: 'trusted-provider' },
+    ports: [{
+      key: 'result', direction: 'output', schema: 'ggai://value/json',
+      cardinality: 'many', materialization: 'tray',
+    }],
     nodeContext: nodeContextPolicyForBuiltin('smart'),
     artifactClaims: [],
   }),
@@ -130,6 +135,7 @@ function builtin(
     creatable?: boolean
     containment?: NodeTypeDefinition['containment']
     ports?: NodeTypeDefinition['ports']
+    execution?: NodeTypeDefinition['execution']
   },
 ): NodeTypeDefinition {
   const creatable = input.creatable ?? true

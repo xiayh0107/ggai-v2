@@ -103,6 +103,8 @@ import {
   MAX_ARTIFACT_CATALOG_LIMIT,
 } from './artifactCatalog.js'
 import { TaskRunPreflightService } from './taskRunPreflight.js'
+import { MetadataStore } from './metadataStore.js'
+import { NodeExecutionError, NodeExecutionService } from './nodeExecutions.js'
 import {
   createHttpRouter,
   type HttpRoute,
@@ -136,6 +138,8 @@ export interface DaemonServerOptions {
   nodeDefinitionCatalog?: NodeDefinitionCatalog
   skillAssetCatalog?: SkillAssetCatalog
   capabilityExecutionScopes?: CapabilityExecutionScopes
+  metadataStore?: MetadataStore
+  nodeExecutionService?: NodeExecutionService
 }
 
 export interface DaemonServer {
@@ -148,6 +152,7 @@ export interface DaemonServer {
   nodeDefinitions: NodeDefinitionCatalog
   skillAssets: SkillAssetCatalog
   workspaceCapabilities: ServiceReader
+  executions: NodeExecutionService
   close(): Promise<void>
 }
 
@@ -156,6 +161,9 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   const projects = options.projectCatalog ?? new ProjectCatalog(options.projectRoot)
   const nodeDefinitions = options.nodeDefinitionCatalog ?? new NodeDefinitionCatalog(options.projectRoot)
   const skillAssets = options.skillAssetCatalog ?? new SkillAssetCatalog(options.projectRoot)
+  const metadata = options.metadataStore ?? new MetadataStore(options.projectRoot)
+  const ownsMetadata = options.metadataStore === undefined
+  const executions = options.nodeExecutionService ?? new NodeExecutionService(metadata)
   if (projects.projectRoot !== path.resolve(options.projectRoot)) {
     throw new TypeError('projectCatalog and daemon server must share a project root')
   }
@@ -253,6 +261,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
       allowedOrigins,
       lifecycle,
       taskRunPreflight,
+      executions,
     }, domainRouter)
       .catch((error: unknown) => writeError(response, error))
   })
@@ -271,6 +280,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     nodeDefinitions,
     skillAssets,
     workspaceCapabilities,
+    executions,
     close() {
       closePromise ??= closeDaemonServer(
         server,
@@ -284,6 +294,8 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
         lifecycle,
         capabilityExecutionScopes,
         ownsCapabilityExecutionScopes,
+        metadata,
+        ownsMetadata,
       )
       return closePromise
     },
@@ -304,6 +316,7 @@ interface RouteContext extends HttpRouteContext {
   projectionCanvases: CanvasProjectionCommitter
   allowedOrigins: Set<string>
   lifecycle: { closing: boolean }
+  executions: NodeExecutionService
 }
 
 async function route(
@@ -998,6 +1011,60 @@ async function route(
     return
   }
 
+  const nodeExecutionsMatch = pathname.match(/^\/nodes\/([^/]+)\/executions$/u)
+  if (nodeExecutionsMatch && request.method === 'POST') {
+    const nodeId = parseTaskId(decodeURIComponent(nodeExecutionsMatch[1]!))
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
+    const body = requestObject(await readJson(request))
+    if (!hasExactBodyKeys(body, ['force']) || typeof body.force !== 'boolean') {
+      throw new ProtocolError('execution body must contain only force', 'invalid_execution_request', 400)
+    }
+    const canvas = (await context.versions.getCanvas(projectDir, branch)).canvas
+    const execution = await context.executions.start({
+      projectId: operationalProjectId(projectDir),
+      canvasBranch: branch,
+      document: canvas.document,
+      nodeId,
+      force: body.force,
+    })
+    writeJson(response, execution.status === 'running' ? 202 : 200, {
+      schemaVersion: 1,
+      execution,
+    })
+    return
+  }
+  if (nodeExecutionsMatch && request.method === 'GET') {
+    const nodeId = parseTaskId(decodeURIComponent(nodeExecutionsMatch[1]!))
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
+    writeJson(response, 200, {
+      schemaVersion: 1,
+      executions: await context.executions.list(operationalProjectId(projectDir), branch, nodeId),
+    })
+    return
+  }
+
+  const executionOutputsMatch = pathname.match(/^\/executions\/([^/]+)\/outputs$/u)
+  if (executionOutputsMatch && request.method === 'GET') {
+    const executionId = parseTaskId(decodeURIComponent(executionOutputsMatch[1]!))
+    const outputs = await context.executions.outputs(executionId)
+    if (!outputs) throw new NodeExecutionError('execution_not_found', 'Execution does not exist', 404)
+    writeJson(response, 200, { schemaVersion: 1, executionId, outputs })
+    return
+  }
+
+  const nodeProvenanceMatch = pathname.match(/^\/nodes\/([^/]+)\/provenance$/u)
+  if (nodeProvenanceMatch && request.method === 'GET') {
+    const nodeId = parseTaskId(decodeURIComponent(nodeProvenanceMatch[1]!))
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    writeJson(response, 200, {
+      schemaVersion: 1,
+      records: await context.executions.provenance(operationalProjectId(projectDir), nodeId),
+    })
+    return
+  }
+
   if (request.method === 'POST' && pathname === '/runs') {
     const raw = await readJson(request)
     const intent = parseRunIntentForServer(raw)
@@ -1101,6 +1168,12 @@ async function route(
         }
       },
     })
+    await context.executions.recordTaskRun({
+      projectId: operationalProjectId(projectDir),
+      taskId: intent.taskId,
+      runId: run.runId,
+      agentId: intent.agentId,
+    }).catch(() => undefined)
     writeJson(response, 202, { runId: run.runId })
     return
   }
@@ -1840,6 +1913,8 @@ async function closeDaemonServer(
   lifecycle: { closing: boolean },
   capabilityExecutionScopes: CapabilityExecutionScopes,
   ownsCapabilityExecutionScopes: boolean,
+  metadata: MetadataStore,
+  ownsMetadata: boolean,
 ): Promise<void> {
   lifecycle.closing = true
   const serverClosed = new Promise<void>((resolve, reject) => {
@@ -1862,6 +1937,7 @@ async function closeDaemonServer(
   } finally {
     canvas.close()
     await projectLeases.close()
+    if (ownsMetadata) await metadata.close()
     // Runs have emitted their terminal close frames; do not let a stuck client
     // connection keep process shutdown alive indefinitely.
     for (const socket of sockets) socket.destroy()
@@ -2097,6 +2173,10 @@ function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoExcepti
   return error instanceof Error && 'code' in error && error.code === code
 }
 
+function operationalProjectId(projectDir: string): string {
+  return `project-scope-${createHash('sha256').update(path.resolve(projectDir)).digest('hex')}`
+}
+
 function parseRunIntentForServer(value: unknown): RunIntent {
   try {
     return parseRunIntent(value)
@@ -2115,6 +2195,12 @@ function writeError(response: ServerResponse, error: unknown): void {
   }
   if (error instanceof ProtocolError) {
     writeJson(response, error.status, { error: { code: error.code, message: error.message } })
+    return
+  }
+  if (error instanceof NodeExecutionError) {
+    writeJson(response, error.status, {
+      error: { code: error.code, message: error.message },
+    })
     return
   }
   if (error instanceof ProjectCatalogError) {

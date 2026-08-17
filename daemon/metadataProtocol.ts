@@ -1,4 +1,6 @@
-export const METADATA_SCHEMA_VERSION = 1 as const
+import type { NodeExecution, ValueRef } from '../src/execution/contracts.js'
+
+export const METADATA_SCHEMA_VERSION = 2 as const
 export const MINIMUM_SQLITE_VERSION = '3.51.3'
 
 export interface MetadataDiagnostics {
@@ -12,6 +14,26 @@ export type MetadataWorkerOperation =
   | { operation: 'initialize' }
   | { operation: 'diagnostics' }
   | { operation: 'backup'; destination: string }
+  | { operation: 'execution-create'; execution: NodeExecution }
+  | { operation: 'execution-get'; executionId: string }
+  | {
+      operation: 'execution-list'
+      projectId: string
+      canvasBranch: string
+      nodeId: string
+      limit: number
+    }
+  | { operation: 'execution-find-cache'; projectId: string; canvasBranch: string; nodeId: string; cacheKey: string }
+  | {
+      operation: 'execution-complete'
+      executionId: string
+      status: 'succeeded' | 'failed' | 'cancelled' | 'timed-out'
+      outputs: Record<string, ValueRef[]>
+      finishedAt: string
+      error?: { code: string; message: string }
+    }
+  | { operation: 'provenance-append'; records: ProvenanceRecord[] }
+  | { operation: 'provenance-query'; projectId: string; identity: string; limit: number }
   | { operation: 'close' }
 
 export type MetadataWorkerRequest = MetadataWorkerOperation & { id: number }
@@ -19,7 +41,18 @@ export type MetadataWorkerRequest = MetadataWorkerOperation & { id: number }
 export type MetadataWorkerResult =
   | MetadataDiagnostics
   | { destination: string; pages: number }
+  | NodeExecution
+  | NodeExecution[]
+  | ProvenanceRecord[]
   | null
+
+export interface ProvenanceRecord {
+  projectId: string
+  relationKind: 'used' | 'was-generated-by' | 'was-derived-from' | 'was-associated-with' | 'had-plan'
+  subjectId: string
+  objectId: string
+  attributes: Record<string, unknown>
+}
 
 export type MetadataWorkerResponse =
   | { id: number; ok: true; result: MetadataWorkerResult }
