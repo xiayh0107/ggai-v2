@@ -615,6 +615,7 @@ function inferMediaType(relativePath: string): string {
     case '.gif': return 'image/gif'
     case '.svg': return 'image/svg+xml'
     case '.pdf': return 'application/pdf'
+    case '.pptx': return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
     case '.json': return 'application/json'
     case '.csv': return 'text/csv'
     case '.md': return 'text/markdown'

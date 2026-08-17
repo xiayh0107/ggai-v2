@@ -37,6 +37,7 @@ import CanvasNodeShell from './CanvasNodeShell'
 import CanvasNodeExecutionTray from './CanvasNodeExecutionTray'
 import CanvasFilesystemBindingStatus from './CanvasFilesystemBindingStatus'
 import CanvasPdfPageStrip from './CanvasPdfPageStrip'
+import CanvasPresentationExport from './CanvasPresentationExport'
 
 /** 节点右上角水平图标条的动作图标：与旧版 ⋯ 菜单同一套动作 id。 */
 const NODE_ACTION_ICONS: Record<string, LucideIcon> = {
@@ -253,6 +254,16 @@ export default function CanvasNodeCard({
             pageCount={node.payload.pageCount}
             projectDir={projectDir}
           />
+      )}
+      {selected && node.typeRef.id === 'presentation' && (
+        <CanvasPresentationExport
+          nodeId={node.id}
+          projectDir={projectDir}
+          branch={canvasBranch}
+          defaultMode={node.payload?.mode === 'editable' || node.payload?.mode === 'fidelity'
+            ? node.payload.mode
+            : 'hybrid'}
+        />
       )}
     </CanvasNodeShell>
   )
