@@ -9,9 +9,10 @@ remain daemon-owned.
 
 ```bash
 npm run build:cli
-node dist-cli/cli/index.js doctor
-node dist-cli/cli/index.js project list
-node dist-cli/cli/index.js project create demo
+node dist-cli/gg.js doctor
+node dist-cli/gg.js project list
+node dist-cli/gg.js project create demo
+node dist-cli/gg.js run "Create a scatter plot" --project demo --wait
 ```
 
 Use `--daemon-url` or `GGAI_DAEMON_URL` to select a daemon. The default is
@@ -57,3 +58,10 @@ Create Task → preflight → Run → events/permission → durable close → ar
 
 Canvas remains a visual shell over the same durable facts rather than the owner
 of the workflow.
+
+`gg run` creates a zero-output Task through the revisioned Canvas command API,
+runs advisory preflight, registers an empty headless community capability set
+(the daemon still contributes protected builtins), and starts the canonical
+RunIntent. `--wait` consumes the durable SSE close and prints verified manifest
+entries. Until an explicit interactive policy lands, permission requests are
+denied by default.

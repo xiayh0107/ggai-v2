@@ -15,6 +15,18 @@ export class CliUsageError extends Error {
   }
 }
 
+export class CliCommandError extends Error {
+  readonly code: string
+  readonly exitCode: number
+
+  constructor(code: string, message: string, exitCode = 5) {
+    super(message)
+    this.name = 'CliCommandError'
+    this.code = code
+    this.exitCode = exitCode
+  }
+}
+
 export function writeResult(
   io: CliIo,
   json: boolean,
