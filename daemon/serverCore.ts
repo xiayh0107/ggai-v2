@@ -105,6 +105,7 @@ import {
 import { TaskRunPreflightService } from './taskRunPreflight.js'
 import { MetadataStore } from './metadataStore.js'
 import { NodeExecutionError, NodeExecutionService } from './nodeExecutions.js'
+import { AssetAssemblyExecutor } from './assetRasterizer.js'
 import {
   createHttpRouter,
   type HttpRoute,
@@ -164,6 +165,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   const metadata = options.metadataStore ?? new MetadataStore(options.projectRoot)
   const ownsMetadata = options.metadataStore === undefined
   const executions = options.nodeExecutionService ?? new NodeExecutionService(metadata)
+  if (!options.nodeExecutionService) executions.executors.register(new AssetAssemblyExecutor())
   if (projects.projectRoot !== path.resolve(options.projectRoot)) {
     throw new TypeError('projectCatalog and daemon server must share a project root')
   }
@@ -1021,8 +1023,10 @@ async function route(
       throw new ProtocolError('execution body must contain only force', 'invalid_execution_request', 400)
     }
     const canvas = (await context.versions.getCanvas(projectDir, branch)).canvas
+    const leasedProjectDir = await context.canvas.acquireProjectLease(projectDir)
     const execution = await context.executions.start({
       projectId: operationalProjectId(projectDir),
+      projectDir: leasedProjectDir,
       canvasBranch: branch,
       document: canvas.document,
       nodeId,

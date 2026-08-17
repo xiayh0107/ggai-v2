@@ -103,6 +103,7 @@
     "react-resizable-panels": "4.2.2",
     "react-router": "8.3.0",
     "recharts": "3.10.1",
+    "sharp": "0.34.5",
     "sonner": "2.0.7",
     "tailwind-merge": "3.4.0",
     "vaul": "1.1.2"

@@ -9,6 +9,10 @@ import type { MetadataStore } from './metadataStore.js'
 
 export interface NodeExecutorInput {
   executionId: string
+  artifactRunId: string
+  projectDir?: string
+  canvasBranch: string
+  document: CanvasDocument
   node: CanvasNode
   inputs: Record<string, ValueRef[]>
   signal: AbortSignal
@@ -69,6 +73,7 @@ export class NodeExecutionService {
 
   async start(input: {
     projectId: string
+    projectDir?: string
     canvasBranch: string
     document: CanvasDocument
     nodeId: string
@@ -91,7 +96,7 @@ export class NodeExecutionService {
       node,
     )
     const codeDigest = createHash('sha256')
-      .update(JSON.stringify({ text: node.text ?? null, payload: node.payload ?? null }))
+      .update(JSON.stringify(executionNodeSnapshot(input.document, node.id)))
       .digest('hex')
     const cacheKey = createHash('sha256').update(JSON.stringify({
       nodeTypeRef: node.typeRef,
@@ -130,7 +135,15 @@ export class NodeExecutionService {
     const created = await this.#metadata.createExecution(execution)
     const controller = new AbortController()
     this.#active.set(executionId, controller)
-    void this.#run(created, executor, structuredClone(node), inputs, controller)
+    void this.#run(
+      created,
+      executor,
+      structuredClone(input.document),
+      structuredClone(node),
+      inputs,
+      controller,
+      input.projectDir,
+    )
     return created
   }
 
@@ -181,13 +194,19 @@ export class NodeExecutionService {
   async #run(
     execution: NodeExecution,
     executor: NodeExecutor,
+    document: CanvasDocument,
     node: CanvasNode,
     inputs: Record<string, ValueRef[]>,
     controller: AbortController,
+    projectDir?: string,
   ): Promise<void> {
     try {
       const outputs = await executor.execute({
         executionId: execution.executionId,
+        artifactRunId: execution.artifactRunId,
+        projectDir,
+        canvasBranch: execution.canvasBranch,
+        document,
         node,
         inputs,
         signal: controller.signal,
@@ -211,7 +230,23 @@ export class NodeExecutionService {
         subjectId: `execution:${execution.executionId}`,
         objectId: `executor:${execution.executorId}`,
         attributes: { environmentDigest: execution.environmentDigest },
-      }])
+      }, ...Object.values(outputs).flatMap((values) => values
+        .filter((value): value is Extract<ValueRef, { kind: 'artifact' }> => value.kind === 'artifact')
+        .map((value) => ({
+          projectId: execution.projectId,
+          relationKind: 'was-generated-by' as const,
+          subjectId: `artifact:${value.runId}:${value.artifactId}`,
+          objectId: `execution:${execution.executionId}`,
+          attributes: {},
+        }))), ...Object.values(inputs).flatMap((values) => values
+        .filter((value): value is Extract<ValueRef, { kind: 'artifact' }> => value.kind === 'artifact')
+        .map((value) => ({
+          projectId: execution.projectId,
+          relationKind: 'used' as const,
+          subjectId: `execution:${execution.executionId}`,
+          objectId: `artifact:${value.runId}:${value.artifactId}`,
+          attributes: {},
+        })))])
     } catch (error) {
       await this.#metadata.completeExecution({
         executionId: execution.executionId,
@@ -267,4 +302,32 @@ export class NodeExecutionService {
       inputsDigest: createHash('sha256').update(JSON.stringify(inputs)).digest('hex'),
     }
   }
+}
+
+function executionNodeSnapshot(document: CanvasDocument, rootId: string) {
+  const included = new Set([rootId])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const node of document.nodes) {
+      if (node.parentId && included.has(node.parentId) && !included.has(node.id)) {
+        included.add(node.id)
+        changed = true
+      }
+    }
+  }
+  return document.nodes.filter((node) => included.has(node.id))
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((node) => ({
+      id: node.id,
+      typeRef: node.typeRef,
+      parentId: node.parentId,
+      orderKey: node.orderKey,
+      bounds: node.bounds,
+      transform: node.transform,
+      coordinateSpace: node.coordinateSpace ?? null,
+      text: node.text ?? null,
+      payload: node.payload ?? null,
+      artifactRefs: node.artifactRefs,
+    }))
 }
