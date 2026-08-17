@@ -7,6 +7,7 @@ import { createDaemonServer, type DaemonServer } from './server.js'
 import { SkillAssetCatalog } from './skillAssets.js'
 import type { DaemonConfig } from './startupOptions.js'
 import { installWorkspaceCapabilityProviders } from './workspaceRuntime.js'
+import { MetadataStore } from './metadataStore.js'
 
 export class DaemonApplication {
   readonly config: DaemonConfig
@@ -14,6 +15,7 @@ export class DaemonApplication {
   readonly scopes: CapabilityExecutionScopes
   readonly skillAssets: SkillAssetCatalog
   readonly projectionContributions: ProjectionContributionRegistry
+  readonly metadata: MetadataStore
   #daemon: DaemonServer | null = null
   #listenPromise: Promise<void> | null = null
   #closePromise: Promise<void> | null = null
@@ -29,6 +31,7 @@ export class DaemonApplication {
     this.scopes = new CapabilityExecutionScopes(this.registry.runtimeServices)
     this.skillAssets = new SkillAssetCatalog(config.projectRoot)
     this.projectionContributions = new ProjectionContributionRegistry()
+    this.metadata = new MetadataStore(config.projectRoot)
     const workspace = this.scopes.workspace(config.projectRoot)
     installWorkspaceCapabilityProviders(workspace, {
       skillCatalog: this.skillAssets,
@@ -57,7 +60,13 @@ export class DaemonApplication {
     if (this.#closePromise) {
       return Promise.reject(new Error('daemon application is closing or closed'))
     }
-    this.#listenPromise ??= new Promise<void>((resolve, reject) => {
+    this.#listenPromise ??= this.#listenApplication()
+    return this.#listenPromise
+  }
+
+  async #listenApplication(): Promise<void> {
+    await this.metadata.open()
+    return await new Promise<void>((resolve, reject) => {
       const server = this.#server().server
       const onError = (error: Error) => {
         server.off('listening', onListening)
@@ -71,7 +80,6 @@ export class DaemonApplication {
       server.once('listening', onListening)
       server.listen(this.config.port, this.config.host)
     })
-    return this.#listenPromise
   }
 
   close(): Promise<void> {
@@ -94,6 +102,11 @@ export class DaemonApplication {
     try {
       if (this.#daemon) await this.#daemon.close()
       else await this.registry.dispose()
+    } catch (error) {
+      errors.push(error)
+    }
+    try {
+      await this.metadata.close()
     } catch (error) {
       errors.push(error)
     }

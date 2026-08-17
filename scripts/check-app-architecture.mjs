@@ -59,6 +59,11 @@ for (const root of CHECKED_ROOTS) {
     const imports = importedSpecifiers(source)
     violations.push(...capabilityBoundaryViolations(sourcePath, imports))
     for (const specifier of imports) {
+      if (specifier === 'node:sqlite'
+        && sourcePath !== 'daemon/metadataWorker.ts'
+        && !sourcePath.includes('/__tests__/')) {
+        violations.push(`${sourcePath} bypasses MetadataStore via ${specifier}`)
+      }
       if (sourcePath.startsWith('cli/') && (
         specifier.startsWith('../daemon/')
         || specifier.includes('/canvas/store')

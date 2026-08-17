@@ -6,7 +6,7 @@ import {
 } from './dependency-policy.mjs'
 
 const ROOT_PACKAGE = ''
-const EXPECTED_NODE_RANGE = '>=22.22.0 <23 || >=24.0.0 <25'
+const EXPECTED_NODE_RANGE = '>=24.19.0 <25'
 const EXPECTED_NPM_RANGE = '>=10.9.0 <12'
 
 const errors = []
@@ -49,7 +49,7 @@ function supportsNpm(version) {
 }
 
 if (!supportsNode(process.versions.node)) {
-  notice(`Node.js ${process.versions.node} is outside the recommended Node 22.22+/24 range`)
+  notice(`Node.js ${process.versions.node} is outside the required Node 24.19+ range`)
 }
 
 const npmUserAgent = process.env.npm_config_user_agent ?? ''
@@ -58,8 +58,8 @@ if (npmVersion && !supportsNpm(npmVersion)) {
   notice(`npm ${npmVersion} is outside the recommended npm 10.9+/11 range`)
 }
 
-if (nvmVersion !== '22.22.3') {
-  notice(`.nvmrc differs from the recommended 22.22.3 baseline: ${nvmVersion || '(empty)'}`)
+if (nvmVersion !== '24.19.0') {
+  notice(`.nvmrc differs from the required 24.19.0 baseline: ${nvmVersion || '(empty)'}`)
 }
 
 if (manifest.packageManager !== 'npm@10.9.8') {

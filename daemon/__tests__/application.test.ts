@@ -27,6 +27,7 @@ test('application owns HTTP startup and idempotent shutdown', async (t) => {
 
   await application.listen()
   assert.ok(application.server.listening)
+  assert.equal((await application.metadata.diagnostics()).integrity, 'ok')
   await Promise.all([application.close(), application.close()])
   assert.equal(application.registry.resolve('codex'), null)
 })

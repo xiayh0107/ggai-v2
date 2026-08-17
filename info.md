@@ -1,4 +1,4 @@
-Using Node.js 22.22+, Tailwind CSS v4.3.3, and Vite v7.3.6
+Using Node.js 24.19+, Tailwind CSS v4.3.3, and Vite v7.3.6
 
 Tailwind CSS has been set up with the shadcn theme
 
