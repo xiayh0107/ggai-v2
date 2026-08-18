@@ -25,14 +25,14 @@ import type { CanvasTaskStatus } from '@/canvas/selectors'
 import CanvasNodeCard from '@/components/canvas/CanvasNodeCard'
 import { NodeDefinitionClient, type NodeDefinitionApi } from '@/node-studio/client'
 import {
-  createBlankCustomNodeManifest,
+  createBlankNodeStudioDefinition,
   customNodeRuntimeId,
   draftCustomNodeFromRequirement,
-  validateCustomNodeManifest,
+  validateNodeStudioDefinition,
   type CustomNodeContentKind,
-  type CustomNodeManifest,
+  type NodeStudioDefinition,
 } from '@/node-studio/model'
-import { createCustomNodeType, registerCustomNodeTypes } from '@/node-studio/runtime'
+import { createCustomNodeType, registerNodeStudioDefinitions } from '@/node-studio/runtime'
 import type { PortDefinition } from '@/plugins/nodeTypeContracts'
 
 type PreviewState = 'empty' | 'content' | 'running' | 'error'
@@ -46,8 +46,8 @@ const KIND_OPTIONS: Array<{ id: CustomNodeContentKind; label: string; icon: type
 
 export default function NodeStudio({ api: injectedApi }: { api?: NodeDefinitionApi } = {}) {
   const api = useMemo(() => injectedApi ?? new NodeDefinitionClient({ baseUrl: DAEMON_URL }), [injectedApi])
-  const [definitions, setDefinitions] = useState<CustomNodeManifest[]>([])
-  const [draft, setDraft] = useState(() => createBlankCustomNodeManifest())
+  const [definitions, setDefinitions] = useState<NodeStudioDefinition[]>([])
+  const [draft, setDraft] = useState(() => createBlankNodeStudioDefinition())
   const [requirement, setRequirement] = useState('')
   const [previewState, setPreviewState] = useState<PreviewState>('content')
   const [loading, setLoading] = useState(true)
@@ -56,7 +56,7 @@ export default function NodeStudio({ api: injectedApi }: { api?: NodeDefinitionA
   const [agentCancelling, setAgentCancelling] = useState(false)
   const [agentRunId, setAgentRunId] = useState<string | null>(null)
   const [agentProgress, setAgentProgress] = useState<string | null>(null)
-  const [agentCandidate, setAgentCandidate] = useState<CustomNodeManifest | null>(null)
+  const [agentCandidate, setAgentCandidate] = useState<NodeStudioDefinition | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -66,7 +66,7 @@ export default function NodeStudio({ api: injectedApi }: { api?: NodeDefinitionA
   const studioLocked = agentBusy || agentCandidate !== null
 
   const latestDefinitions = useMemo(() => latestByPackage(definitions), [definitions])
-  const validationErrors = useMemo(() => validateCustomNodeManifest(draft), [draft])
+  const validationErrors = useMemo(() => validateNodeStudioDefinition(draft), [draft])
   const installedRevision = useMemo(() => definitions
     .filter((item) => item.id === draft.id && item.installed)
     .sort((left, right) => right.revision - left.revision)[0], [definitions, draft.id])
@@ -126,14 +126,14 @@ export default function NodeStudio({ api: injectedApi }: { api?: NodeDefinitionA
     }
   }, [agentRunId, api])
 
-  const patchDraft = (patch: Partial<CustomNodeManifest>) => {
+  const patchDraft = (patch: Partial<NodeStudioDefinition>) => {
     setDraft((current) => ({ ...current, ...patch, updatedAt: new Date().toISOString() }))
     setNotice(null)
   }
 
   const createDraft = () => {
     if (studioLocked) return
-    setDraft(createBlankCustomNodeManifest())
+    setDraft(createBlankNodeStudioDefinition())
     setRequirement('')
     setPreviewState('content')
     setNotice(null)
@@ -202,7 +202,7 @@ export default function NodeStudio({ api: injectedApi }: { api?: NodeDefinitionA
   }
 
   const persist = async (install: boolean) => {
-    const errors = validateCustomNodeManifest(draft)
+    const errors = validateNodeStudioDefinition(draft)
     if (errors.length > 0) {
       setError(errors[0] ?? '节点定义未通过校验')
       return
@@ -221,7 +221,7 @@ export default function NodeStudio({ api: injectedApi }: { api?: NodeDefinitionA
       const nextDefinitions = [...definitions, saved]
       setDefinitions(nextDefinitions)
       setDraft(saved)
-      if (install) registerCustomNodeTypes(nextDefinitions)
+      if (install) registerNodeStudioDefinitions(nextDefinitions)
       setNotice(install
         ? `已安装 ${saved.label} ${customNodeRuntimeId(saved)}，可在画布创建菜单中使用。`
         : `草稿已保存为修订 ${saved.revision}。`)
@@ -243,7 +243,7 @@ export default function NodeStudio({ api: injectedApi }: { api?: NodeDefinitionA
       await api.delete(draft.id)
       const next = definitions.filter((item) => item.id !== draft.id)
       setDefinitions(next)
-      setDraft(latestByPackage(next)[0] ?? createBlankCustomNodeManifest())
+      setDraft(latestByPackage(next)[0] ?? createBlankNodeStudioDefinition())
       setNotice('草稿已删除。')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '草稿删除失败')
@@ -511,10 +511,10 @@ function parsePorts(value: string): PortDefinition[] {
 }
 
 function executionField(
-  current: CustomNodeManifest['execution'],
+  current: NodeStudioDefinition['execution'],
   key: 'capability' | 'policy',
   value: string,
-): CustomNodeManifest['execution'] {
+): NodeStudioDefinition['execution'] {
   const next = {
     capability: current?.capability ?? '',
     policy: current?.policy ?? '',
@@ -523,7 +523,7 @@ function executionField(
   return next.capability || next.policy ? next : undefined
 }
 
-function NodeStudioPreview({ manifest, state }: { manifest: CustomNodeManifest; state: PreviewState }) {
+function NodeStudioPreview({ manifest, state }: { manifest: NodeStudioDefinition; state: PreviewState }) {
   const plugin = useMemo(() => createCustomNodeType(manifest), [manifest])
   const previewNode = useMemo<CanvasNode>(() => ({
     id: 'node-studio-preview',
@@ -642,8 +642,8 @@ function iconForKind(kind: CustomNodeContentKind) {
   return KIND_OPTIONS.find((item) => item.id === kind)?.icon ?? LayoutTemplate
 }
 
-function latestByPackage(definitions: CustomNodeManifest[]): CustomNodeManifest[] {
-  const latest = new Map<string, CustomNodeManifest>()
+function latestByPackage(definitions: NodeStudioDefinition[]): NodeStudioDefinition[] {
+  const latest = new Map<string, NodeStudioDefinition>()
   definitions.forEach((item) => {
     if ((latest.get(item.id)?.revision ?? -1) < item.revision) latest.set(item.id, item)
   })

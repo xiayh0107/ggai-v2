@@ -16,12 +16,12 @@ import { NODE_TYPE_DEFINITION_SCHEMA_VERSION, type NodeTypeIconId } from '@/plug
 import {
   customNodeRuntimeId,
   type CustomNodeContentKind,
-  type CustomNodeManifest,
+  type NodeStudioDefinition,
 } from './model'
 
 const registeredCustomIds = new Set<string>()
 
-export function registerCustomNodeTypes(manifests: CustomNodeManifest[]): void {
+export function registerNodeStudioDefinitions(manifests: NodeStudioDefinition[]): void {
   const installed = manifests.filter((manifest) => manifest.installed && manifest.revision > 0)
   const latestById = new Map<string, number>()
   installed.forEach((manifest) => {
@@ -29,15 +29,15 @@ export function registerCustomNodeTypes(manifests: CustomNodeManifest[]): void {
   })
   installed.forEach((manifest) => {
     try {
-      installCustomNodeManifest(manifest, latestById.get(manifest.id) === manifest.revision)
+      installNodeStudioDefinition(manifest, latestById.get(manifest.id) === manifest.revision)
     } catch {
       // One damaged local manifest must not prevent the app from booting.
     }
   })
 }
 
-export function installCustomNodeManifest(
-  manifest: CustomNodeManifest,
+export function installNodeStudioDefinition(
+  manifest: NodeStudioDefinition,
   creatable = true,
 ): NodeTypeDefinition {
   const runtimeId = customNodeRuntimeId(manifest)
@@ -54,7 +54,7 @@ export function installCustomNodeManifest(
 }
 
 export function createCustomNodeType(
-  manifest: CustomNodeManifest,
+  manifest: NodeStudioDefinition,
   creatable = true,
 ): NodeTypeDefinition {
   return {

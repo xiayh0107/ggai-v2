@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { createBlankCustomNodeManifest } from '../../src/node-studio/model.js'
+import { createBlankNodeStudioDefinition } from '../../src/node-studio/model.js'
 import { createDaemonServer } from '../server.js'
 
 test('node definition HTTP routes persist immutable revisions and reject stale writes', async (t) => {
@@ -19,7 +19,7 @@ test('node definition HTTP routes persist immutable revisions and reject stale w
   })
   const address = daemon.server.address() as AddressInfo
   const baseUrl = `http://127.0.0.1:${address.port}`
-  const draft = { ...createBlankCustomNodeManifest(), id: '@local/research-card' }
+  const draft = { ...createBlankNodeStudioDefinition(), id: '@local/research-card' }
 
   const firstResponse = await fetch(`${baseUrl}/node-definitions/${encodeURIComponent(draft.id)}`, {
     method: 'PUT',

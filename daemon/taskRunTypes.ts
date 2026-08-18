@@ -5,7 +5,6 @@ import type {
 } from '../src/canvas/model.js'
 import type { NodeContextProjectionReceipt } from '../src/agent/nodeContextProjection.js'
 import type { ProjectionPluginCapabilitySnapshot } from './pluginCapabilities.js'
-import type { CreateRunRequest } from './protocol.js'
 import type { RunIntent } from './taskRunProtocol.js'
 import {
   canonicalSkillAssetRef,
@@ -253,15 +252,21 @@ export interface ResolvedTaskRunRequest extends RunIntent {
   automationMode: 'confirm'
 }
 
-/** Internal-only declarative node design Run. It is never accepted by the retired standalone HTTP API. */
-export interface NodeStudioRunRequest extends CreateRunRequest {
+/** Internal-only declarative node design Run accepted only by Node Studio. */
+export interface NodeStudioRunRequest {
   executionKind: 'node-studio'
   baseDefinitionId: string
   baseDefinitionRevision: number
+  runId: string
+  nodeId: string
+  agentId: string
+  prompt: string
+  projectDir: string
+  canvasBranch: 'node-studio'
+  automationMode: 'confirm'
 }
 
 export type RunExecutionRequest =
-  | CreateRunRequest
   | NodeStudioRunRequest
   | ResolvedTaskRunRequest
 
@@ -285,5 +290,6 @@ export function runTargetId(request: RunExecutionRequest): string {
 }
 
 export function requestedRunSessionId(request: RunExecutionRequest): string | null {
-  return isResolvedTaskRunRequest(request) ? null : request.sessionId ?? null
+  void request
+  return null
 }

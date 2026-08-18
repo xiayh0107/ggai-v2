@@ -1,6 +1,6 @@
 import {
   assertCanvasDocument,
-  canvasNodeFrame,
+  canvasNodeWorldRect,
   canvasNodeGeometry,
   canvasNodeTypeRef,
   canvasOrderKey,
@@ -658,9 +658,9 @@ function duplicateNode(
     id: command.newNodeId,
     typeRef: structuredClone(source.typeRef),
     ...canvasNodeGeometry({
-      ...canvasNodeFrame(source),
-      x: canvasNodeFrame(source).x + command.offset.x,
-      y: canvasNodeFrame(source).y + command.offset.y,
+      ...canvasNodeWorldRect(source),
+      x: canvasNodeWorldRect(source).x + command.offset.x,
+      y: canvasNodeWorldRect(source).y + command.offset.y,
       z: maxNodeZ(document) + 1,
     }),
     title: command.title ?? `${source.title} copy`,
@@ -1165,9 +1165,9 @@ function duplicateCollection(
       id,
       typeRef: structuredClone(node.typeRef),
       ...canvasNodeGeometry({
-        ...canvasNodeFrame(node),
-        x: canvasNodeFrame(node).x + command.offset.x,
-        y: canvasNodeFrame(node).y + command.offset.y,
+        ...canvasNodeWorldRect(node),
+        x: canvasNodeWorldRect(node).x + command.offset.x,
+        y: canvasNodeWorldRect(node).y + command.offset.y,
         z: maxZ + index + 1,
       }),
       title: node.title,
@@ -2372,7 +2372,7 @@ function worldTransform(node: CanvasNode, nodesById: Map<string, CanvasNode>): M
 }
 
 function maxNodeZ(document: CanvasDocument): number {
-  return document.nodes.reduce((maximum, node) => Math.max(maximum, canvasNodeFrame(node).z), 0)
+  return document.nodes.reduce((maximum, node) => Math.max(maximum, canvasNodeWorldRect(node).z), 0)
 }
 
 function projectionGeometry(anchor: CanvasPoint, index: number, maxZ: number) {

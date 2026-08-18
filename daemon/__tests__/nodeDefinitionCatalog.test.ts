@@ -4,14 +4,14 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { NodeDefinitionCatalog } from '../nodeDefinitionCatalog.js'
-import { createBlankCustomNodeManifest } from '../../src/node-studio/model.js'
+import { createBlankNodeStudioDefinition } from '../../src/node-studio/model.js'
 
 test('node definition catalog appends immutable revisions and survives restart', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-node-studio-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const catalog = new NodeDefinitionCatalog(root)
   const first = await catalog.upsert({
-    ...createBlankCustomNodeManifest(new Date('2026-01-01T00:00:00.000Z')),
+    ...createBlankNodeStudioDefinition(new Date('2026-01-01T00:00:00.000Z')),
     id: '@local/research-card',
   })
   assert.equal(first.revision, 1)
@@ -38,7 +38,7 @@ test('node definition catalog refuses to follow a catalog symlink', async (t) =>
   t.after(() => rm(root, { recursive: true, force: true }))
   t.after(() => rm(outside, { recursive: true, force: true }))
   const catalog = new NodeDefinitionCatalog(root)
-  await catalog.upsert({ ...createBlankCustomNodeManifest(), id: '@local/safe-card' })
+  await catalog.upsert({ ...createBlankNodeStudioDefinition(), id: '@local/safe-card' })
   await rm(catalog.filePath)
   const outsideFile = path.join(outside, 'definitions.json')
   await writeFile(outsideFile, '{"schemaVersion":1,"definitions":[]}\n')
@@ -56,7 +56,7 @@ test('node definition catalog refuses a workspace parent symlink', async (t) => 
   const catalog = new NodeDefinitionCatalog(root)
 
   await assert.rejects(() => catalog.upsert({
-    ...createBlankCustomNodeManifest(),
+    ...createBlankNodeStudioDefinition(),
     id: '@local/unsafe-parent',
   }), /symlink/u)
   await assert.rejects(() => catalog.list(), /symlink/u)

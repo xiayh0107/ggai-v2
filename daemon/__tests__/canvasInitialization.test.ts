@@ -108,7 +108,8 @@ test('first current startup clears old managed state without touching source fil
   const projectDir = await temporaryProject()
   const projectId = 'project_0123456789abcdef0123456789abcdef'
   await mkdir(path.join(projectDir, '.gg/runtime'), { recursive: true })
-  await mkdir(path.join(projectDir, '.gg/canvas-state-v2'), { recursive: true })
+  const retiredCanvasDir = path.join(projectDir, '.gg', `canvas-state-v${2}`)
+  await mkdir(retiredCanvasDir, { recursive: true })
   await mkdir(path.join(projectDir, '.gg/canvas'), { recursive: true })
   await mkdir(path.join(projectDir, 'artifacts/run-old'), { recursive: true })
   await writeFile(path.join(projectDir, '.gg/runtime/run.json'), '{}\n')
@@ -127,7 +128,7 @@ test('first current startup clears old managed state without touching source fil
   assert.equal(marker.initializedFrom, 'schema-reset')
   await access(path.join(projectDir, 'source.txt'))
   await assert.rejects(access(path.join(projectDir, '.gg/runtime')), /ENOENT/u)
-  await assert.rejects(access(path.join(projectDir, '.gg/canvas-state-v2')), /ENOENT/u)
+  await assert.rejects(access(retiredCanvasDir), /ENOENT/u)
   await assert.rejects(access(path.join(projectDir, '.gg/canvas')), /ENOENT/u)
   await assert.rejects(access(path.join(projectDir, 'artifacts')), /ENOENT/u)
   await assert.rejects(access(path.join(projectDir, '.gg/canvas-reset.json')), /ENOENT/u)

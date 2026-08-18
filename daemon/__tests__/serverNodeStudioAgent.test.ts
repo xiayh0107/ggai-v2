@@ -4,15 +4,15 @@ import type { AddressInfo } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { createBlankCustomNodeManifest } from '../../src/node-studio/model.js'
+import { createBlankNodeStudioDefinition } from '../../src/node-studio/model.js'
 import { AgentRegistry } from '../registry.js'
 import { createDaemonServer } from '../server.js'
 import type { AgentProcessTransport, TransportRunOptions } from '../transport/types.js'
 
 function studioCandidate() {
   const candidate = structuredClone(
-    createBlankCustomNodeManifest(new Date('2026-01-01T00:00:00.000Z')),
-  ) as Partial<ReturnType<typeof createBlankCustomNodeManifest>>
+    createBlankNodeStudioDefinition(new Date('2026-01-01T00:00:00.000Z')),
+  ) as Partial<ReturnType<typeof createBlankNodeStudioDefinition>>
   delete candidate.revision
   delete candidate.installed
   delete candidate.updatedAt
@@ -86,7 +86,7 @@ test('node studio Agent returns a strictly validated candidate without installin
   })
   const address = daemon.server.address() as AddressInfo
   const baseUrl = `http://127.0.0.1:${address.port}`
-  const current = createBlankCustomNodeManifest()
+  const current = createBlankNodeStudioDefinition()
   const startedResponse = await fetch(`${baseUrl}/node-studio/runs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -103,7 +103,7 @@ test('node studio Agent returns a strictly validated candidate without installin
 
   let result: {
     status: string
-    definition?: ReturnType<typeof createBlankCustomNodeManifest>
+    definition?: ReturnType<typeof createBlankNodeStudioDefinition>
     error?: string
   } | undefined
   for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -170,7 +170,7 @@ test('node studio Agent rejects candidate fields outside the declarative contrac
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       requirement: '做一个卡片节点，但让生成结果包含可执行脚本字段',
-      definition: createBlankCustomNodeManifest(),
+      definition: createBlankNodeStudioDefinition(),
     }),
   })
   const started = await startedResponse.json() as {
@@ -242,7 +242,7 @@ test('node studio rejects a candidate changed after its durable close', async (t
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       requirement: '做一个研究卡片节点，用来整理证据和结论',
-      definition: createBlankCustomNodeManifest(),
+      definition: createBlankNodeStudioDefinition(),
     }),
   })
   const started = await startedResponse.json() as {
@@ -324,7 +324,7 @@ test('node studio rejects an unsupported candidate schema version', async (t) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       requirement: '生成一个卡片节点，但候选声明了未知的协议版本',
-      definition: createBlankCustomNodeManifest(),
+      definition: createBlankNodeStudioDefinition(),
     }),
   })
   const started = await startedResponse.json() as {
@@ -384,7 +384,7 @@ test('node studio preserves a saved package identity when Agent changes its id',
   const address = daemon.server.address() as AddressInfo
   const baseUrl = `http://127.0.0.1:${address.port}`
   const initial = {
-    ...createBlankCustomNodeManifest(new Date('2026-01-01T00:00:00.000Z')),
+    ...createBlankNodeStudioDefinition(new Date('2026-01-01T00:00:00.000Z')),
     id: '@local/research-card',
     label: '研究卡片',
     description: '整理研究问题、证据和结论',
@@ -396,7 +396,7 @@ test('node studio preserves a saved package identity when Agent changes its id',
     body: JSON.stringify(initial),
   })
   const savedPayload = await savedResponse.json() as {
-    definition: ReturnType<typeof createBlankCustomNodeManifest>
+    definition: ReturnType<typeof createBlankNodeStudioDefinition>
     error?: { message?: string }
   }
   assert.equal(savedResponse.status, 200, savedPayload.error?.message)
@@ -422,7 +422,7 @@ test('node studio preserves a saved package identity when Agent changes its id',
   assert.equal(result.status, 'error')
   assert.match(result.error ?? '', /ID|改写/u)
   const listed = await (await fetch(`${baseUrl}/node-definitions`)).json() as {
-    definitions: Array<ReturnType<typeof createBlankCustomNodeManifest>>
+    definitions: Array<ReturnType<typeof createBlankNodeStudioDefinition>>
   }
   assert.deepEqual(listed.definitions, [saved])
 })

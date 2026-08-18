@@ -1,6 +1,6 @@
 import {
   assertCanvasDocument,
-  canvasNodeFrame,
+  canvasNodeWorldRect,
   entityKey,
   type CanvasArtifactRef,
   type CanvasDocument,
@@ -37,7 +37,7 @@ export interface CanvasNodeContext {
     artifactRefs: CanvasArtifactRef[]
   }
   placement: {
-    frame: { x: number; y: number; w: number; h: number; z: number }
+    worldBounds: { x: number; y: number; w: number; h: number; z: number }
     task: { id: string; title: string; goal: string } | null
     collection: { id: string; title: string } | null
   }
@@ -131,7 +131,7 @@ export function selectCanvasNodeContext(
       artifactRefs: structuredClone(node.artifactRefs),
     },
     placement: {
-      frame: structuredClone(canvasNodeFrame(node)),
+      worldBounds: structuredClone(canvasNodeWorldRect(node)),
       task: task ? { id: task.id, title: task.title, goal: task.goal } : null,
       collection: collection ? { id: collection.id, title: collection.title } : null,
     },

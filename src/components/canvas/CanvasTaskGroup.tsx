@@ -11,7 +11,7 @@ import {
 import type { KeyboardEvent, PointerEvent } from 'react'
 import { TASK_CHROME_LAYOUT } from '@/canvas/layout'
 import { nodeHasVisibleContent } from '@/canvas/contextComposer'
-import { canvasNodeFrame, type CanvasNode, type CanvasTask } from '@/canvas/model'
+import { canvasNodeWorldRect, type CanvasNode, type CanvasTask } from '@/canvas/model'
 import {
   taskChromeFrame,
   taskPrimaryOutputFrame,
@@ -401,7 +401,7 @@ function taskRunPanelPosition(
   const chrome = taskChromeFrame(view.task, view.nodes, view.ghosts, view.presentation)
   const primary = taskPrimaryOutputFrame(view.nodes, view.ghosts)
   const outputFrames = [
-    ...view.nodes.map((node) => canvasNodeFrame(node)),
+    ...view.nodes.map((node) => canvasNodeWorldRect(node)),
     ...view.ghosts.map((ghost) => ghost.frame),
   ]
   const anchor = primary ?? chrome

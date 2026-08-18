@@ -2,20 +2,18 @@ import { randomUUID } from 'node:crypto'
 import { lstat } from 'node:fs/promises'
 import path from 'node:path'
 import type { RunOutcome } from '../src/agent/outcome.js'
-import type { LegacyRunOutcome } from './legacyOutcome.js'
 import type { SuggestedAction } from '../src/agent/suggestedActions.js'
 import type { CanvasAgentEvent } from '../src/agent/types.js'
 import type { ArtifactManifest } from './artifactManifest.js'
-import { artifactRunRelativeDir, isArtifactControlPath } from './artifactPaths.js'
+import { isArtifactControlPath } from './artifactPaths.js'
 import { canvasBranchStorageId } from './canvasBranch.js'
-import { readLegacyRunOutcome } from './legacyOutcome.js'
 import { readRunOutcome } from './outcome.js'
 import { RunCapabilityReceiptStore } from './capabilityReceipt.js'
 import {
   CapabilityExecutionScopes,
   type RunCapabilityScope,
 } from './capabilityScopes.js'
-import { listArtifactSnapshot, prepareRunContext } from './packer.js'
+import { prepareRunContext } from './packer.js'
 import {
   BUILTIN_PROJECTION_PLUGIN_CAPABILITY_SNAPSHOT,
   ProjectionPluginCapabilityStore,
@@ -51,7 +49,6 @@ import {
   RunArtifactStore,
   type RunArtifactLookup,
 } from './runArtifactStorage.js'
-import { SessionStore, type SessionRecord } from './sessions.js'
 import {
   TaskSessionStore,
   type TaskSessionListFilter,
@@ -240,7 +237,6 @@ export class RunManager {
   readonly #resolveGraphResourceHandles?: RunManagerOptions['resolveGraphResourceHandles']
   readonly #runs = new Map<string, InternalRun>()
   readonly #tasks = new Map<string, Promise<void>>()
-  readonly #sessionStores = new Map<string, SessionStore>()
   readonly #taskSessionStores = new Map<string, TaskSessionStore>()
   readonly #artifactStores = new Map<string, RunArtifactStore>()
   readonly #projectionPlanStores = new Map<string, ProjectionPlanStore>()
@@ -320,7 +316,7 @@ export class RunManager {
     } finally {
       this.#endRunPreparation(projectDir)
     }
-    const canvasBranch = request.canvasBranch ?? 'main'
+    const canvasBranch = request.canvasBranch
     const runId = request.runId ?? randomUUID()
     const existing = this.#runs.get(runId)
     if (existing) {
@@ -432,7 +428,7 @@ export class RunManager {
         !run.closed
         && run.projectDir === projectDir
         && runTargetId(run.request) === runTargetId(request)
-        && (run.request.canvasBranch ?? 'main') === canvasBranch)) {
+        && (run.request.canvasBranch) === canvasBranch)) {
         const targetKind = isResolvedTaskRunRequest(request) ? 'task' : 'node'
         throw new ProtocolError(
           `this ${targetKind} already has an active run`,
@@ -665,7 +661,7 @@ export class RunManager {
     if (!summary) return null
     return await this.#artifactStore(
       projectDir,
-      summary.canvasBranch ?? 'main',
+      summary.canvasBranch,
     ).lookup(runId, artifactId) ?? null
   }
 
@@ -705,7 +701,7 @@ export class RunManager {
     const closeActions = close?.suggestedActions ?? []
     if (!summary
       || summary.taskId !== record.plan.taskId
-      || (summary.canvasBranch ?? 'main') !== canvasBranch
+      || (summary.canvasBranch) !== canvasBranch
       || !close?.projectionPlan
       || close.projectionPlan.planId !== planId
       || close.projectionPlan.digest !== record.plan.digest
@@ -818,14 +814,6 @@ export class RunManager {
       }
     }
     return null
-  }
-
-  async listSessions(
-    projectDirRequest = '.',
-    filter: { canvasBranch?: string; nodeId?: string; agentId?: string } = {},
-  ): Promise<SessionRecord[]> {
-    const projectDir = await this.#leaseProject(projectDirRequest)
-    return this.#sessions(projectDir).list(filter)
   }
 
   async listTaskSessions(
@@ -1002,7 +990,6 @@ export class RunManager {
       this.#runs.delete(runId)
       this.#tasks.delete(runId)
     }
-    this.#sessionStores.delete(projectDir)
     this.#taskSessionStores.delete(projectDir)
     this.#runLogStores.delete(projectDir)
     this.#runLogRecovery.delete(projectDir)
@@ -1038,7 +1025,7 @@ export class RunManager {
     let capturedSessionId: string | null = null
     let watcherError: Error | null = null
     const targetId = runTargetId(run.request)
-    const canvasBranch = run.request.canvasBranch ?? 'main'
+    const canvasBranch = run.request.canvasBranch
     const taskOwned = isResolvedTaskRunRequest(run.request)
     const manifestOwned = taskOwned || isNodeStudioRunRequest(run.request)
 
@@ -1065,12 +1052,10 @@ export class RunManager {
         nodeId: targetId,
         canvasBranch,
         runId: run.summary.runId,
-        ...(manifestOwned ? {
-          projectRelativeRoot: this.#artifactStore(
-            run.projectDir,
-            canvasBranch,
-          ).location(run.summary.runId).projectRelativeFilesRoot,
-        } : {}),
+        projectRelativeRoot: this.#artifactStore(
+          run.projectDir,
+          canvasBranch,
+        ).location(run.summary.runId).projectRelativeFilesRoot,
         onEvent: (event) => this.#publishAgentEvent(run, event),
         onError: (error) => {
           watcherError = error
@@ -1088,17 +1073,11 @@ export class RunManager {
         // reusable draft labels, so resuming their prior Agent session would
         // leak an unrelated draft's conversation into this run.
         priorSessionId = null
-      } else if (isResolvedTaskRunRequest(run.request)) {
+      } else {
         priorSessionId = (await this.#taskSessions(run.projectDir).get(
           canvasBranch,
           run.request.taskId,
           run.request.agentId,
-        ))?.sessionId ?? null
-      } else {
-        priorSessionId = (await this.#sessions(run.projectDir).get(
-          targetId,
-          run.request.agentId,
-          canvasBranch,
         ))?.sessionId ?? null
       }
       throwIfAborted(run.abortController.signal)
@@ -1160,10 +1139,8 @@ export class RunManager {
       await watcher?.close()
       watcher = null
       const artifacts = await this.#collectTerminalArtifacts(run, true)
-      const outcome = status === 'done'
-        ? taskOwned
-          ? await readRunOutcome(prepared.artifactDir)
-          : await readLegacyRunOutcome(prepared.artifactDir)
+      const outcome = status === 'done' && taskOwned
+        ? await readRunOutcome(prepared.artifactDir)
         : undefined
       await this.#finish(
         run,
@@ -1256,16 +1233,10 @@ export class RunManager {
       ? path.resolve(reportedPath)
       : path.resolve(run.projectDir, reportedPath)
     const relative = path.relative(run.projectDir, absolute).split(path.sep).join('/')
-    const root = isResolvedTaskRunRequest(run.request) || isNodeStudioRunRequest(run.request)
-      ? this.#artifactStore(
-          run.projectDir,
-          run.request.canvasBranch ?? 'node-studio',
-        ).location(run.summary.runId).projectRelativeFilesRoot
-      : artifactRunRelativeDir(
-          run.request.canvasBranch ?? 'main',
-          run.summary.runId,
-          runTargetId(run.request),
-        )
+    const root = this.#artifactStore(
+      run.projectDir,
+      run.request.canvasBranch,
+    ).location(run.summary.runId).projectRelativeFilesRoot
     const prefix = `${root}/`
     if (!relative.startsWith(prefix) || relative.includes('\0')) return null
     return isArtifactControlPath(relative.slice(prefix.length)) ? null : relative
@@ -1303,7 +1274,7 @@ export class RunManager {
     status: Extract<DaemonRunStatus, 'done' | 'error' | 'cancelled'>,
     artifacts: string[],
     artifactsComplete: boolean,
-    outcome?: LegacyRunOutcome | RunOutcome,
+    outcome?: RunOutcome,
     artifactManifest?: ArtifactManifest,
   ): Promise<void> {
     if (run.closed) return
@@ -1363,9 +1334,9 @@ export class RunManager {
       artifacts,
       artifactsComplete,
       ...(artifactManifest ? { artifactManifest } : {}),
-      ...(isResolvedTaskRunRequest(run.request)
-        ? projectionPlan ? { projectionPlan, suggestedActions: suggestedActions ?? [] } : {}
-        : status === 'done' && outcome ? { outcome: outcome as LegacyRunOutcome } : {}),
+      ...(isResolvedTaskRunRequest(run.request) && projectionPlan
+        ? { projectionPlan, suggestedActions: suggestedActions ?? [] }
+        : {}),
     }
     const buffered: BufferedStreamMessage = {
       event: 'close',
@@ -1382,7 +1353,6 @@ export class RunManager {
       run.summary.status = 'error'
       run.summary.error = `Could not finalize the run log: ${errorMessage(error)}`
       close.status = 'error'
-      delete close.outcome
       delete close.projectionPlan
       delete close.suggestedActions
     }
@@ -1391,12 +1361,12 @@ export class RunManager {
         await this.#onProjectionPlanReady({
           plan: close.projectionPlan,
           projectDir: run.projectDir,
-          canvasBranch: run.request.canvasBranch ?? 'main',
+          canvasBranch: run.request.canvasBranch,
         })
         if (close.projectionPlan.taskProposals.length === 0) {
           await this.#projectionPlans(
             run.projectDir,
-            run.request.canvasBranch ?? 'main',
+            run.request.canvasBranch,
           ).dismiss(close.projectionPlan.planId)
         }
       } catch {
@@ -1427,55 +1397,29 @@ export class RunManager {
     run: InternalRun,
     complete: boolean,
   ): Promise<TerminalArtifactSnapshot> {
-    if (isResolvedTaskRunRequest(run.request) || isNodeStudioRunRequest(run.request)) {
-      const closed = await this.#artifactStore(
-        run.projectDir,
-        run.request.canvasBranch ?? 'node-studio',
-      ).closeRun(run.summary.runId, { complete })
-      return {
-        files: closed.manifest.entries.map((entry) => path.posix.join(
-          closed.location.projectRelativeFilesRoot,
-          entry.relativePath,
-        )),
-        complete: closed.manifest.complete,
-        manifest: closed.manifest,
-      }
+    const closed = await this.#artifactStore(
+      run.projectDir,
+      run.request.canvasBranch,
+    ).closeRun(run.summary.runId, { complete })
+    return {
+      files: closed.manifest.entries.map((entry) => path.posix.join(
+        closed.location.projectRelativeFilesRoot,
+        entry.relativePath,
+      )),
+      complete: closed.manifest.complete,
+      manifest: closed.manifest,
     }
-    return listArtifactSnapshot(run.projectDir, run.request.nodeId, {
-      canvasBranch: run.request.canvasBranch ?? 'main',
-      runId: run.summary.runId,
-    })
   }
 
   async #persistRunSession(run: InternalRun, sessionId: string): Promise<void> {
-    const canvasBranch = run.request.canvasBranch ?? 'main'
+    const canvasBranch = run.request.canvasBranch
     if (isNodeStudioRunRequest(run.request)) return
-    if (isResolvedTaskRunRequest(run.request)) {
-      await this.#taskSessions(run.projectDir).upsert({
-        canvasBranch,
-        taskId: run.request.taskId,
-        agentId: run.request.agentId,
-        sessionId,
-      })
-      return
-    }
-    await this.#sessions(run.projectDir).upsert({
+    await this.#taskSessions(run.projectDir).upsert({
       canvasBranch,
-      nodeId: run.request.nodeId,
+      taskId: run.request.taskId,
       agentId: run.request.agentId,
       sessionId,
     })
-  }
-
-  #sessions(projectDir: string): SessionStore {
-    let store = this.#sessionStores.get(projectDir)
-    if (!store) {
-      store = new SessionStore(projectDir, {
-        validatePath: () => assertSessionStorePath(projectDir),
-      })
-      this.#sessionStores.set(projectDir, store)
-    }
-    return store
   }
 
   #taskSessions(projectDir: string): TaskSessionStore {
@@ -1688,7 +1632,7 @@ export class RunManager {
     if (!run.sourceProjectDir) return
     const candidate = await this.#resolveSourceProjectDir?.({
       projectDir: run.projectDir,
-      canvasBranch: run.request.canvasBranch ?? 'main',
+      canvasBranch: run.request.canvasBranch,
       taskOwned: isResolvedTaskRunRequest(run.request),
       studioOwned: isNodeStudioRunRequest(run.request),
     })
@@ -1798,6 +1742,7 @@ async function assertManagedPaths(
   taskOwned = false,
   manifestOwned = taskOwned,
 ): Promise<void> {
+  void targetId
   if (taskOwned) {
     await assertTaskSessionStorePath(scope.projectDir)
     const branchStorageId = canvasBranchStorageId(parseCanvasBranch(canvasBranch))
@@ -1814,15 +1759,13 @@ async function assertManagedPaths(
       projectionPlanPath,
     )
   }
-  const artifactRoot = manifestOwned
-    ? new RunArtifactStore(scope.projectDir, canvasBranch)
-        .location(runId).projectRelativeFilesRoot
-    : artifactRunRelativeDir(canvasBranch, runId, targetId)
+  if (!manifestOwned) throw new ProtocolError('non-manifest Run artifacts are unsupported')
+  const artifactRoot = new RunArtifactStore(scope.projectDir, canvasBranch)
+    .location(runId).projectRelativeFilesRoot
   const paths = [
     artifactRoot,
     `.gg/context/runs/${runId}`,
     '.gg/skills',
-    ...(!taskOwned ? ['.gg/sessions.json'] : []),
     `.gg/runs/${runId}`,
   ]
   for (const managedPath of paths) {
@@ -1859,31 +1802,6 @@ async function validateSourceExecutionDir(
     )
   }
   return sourceProjectDir
-}
-
-async function assertSessionStorePath(projectDir: string): Promise<void> {
-  const expected = path.join(projectDir, '.gg', 'sessions.json')
-  const canonicalProject = await canonicalizePotentialPath(projectDir)
-  const canonical = await canonicalizePotentialPath(expected)
-  if (canonicalProject !== projectDir || canonical !== expected) {
-    throw new ProtocolError(
-      'unsafe sessions path: path resolves through a symlink',
-      'unsafe_managed_path',
-      403,
-    )
-  }
-  try {
-    const info = await lstat(expected)
-    if (!info.isFile() || info.isSymbolicLink()) {
-      throw new ProtocolError(
-        'unsafe sessions path: expected a regular file',
-        'unsafe_managed_path',
-        403,
-      )
-    }
-  } catch (error) {
-    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
-  }
 }
 
 async function assertTaskSessionStorePath(projectDir: string): Promise<void> {
@@ -2009,7 +1927,7 @@ function sameRunIdentity(
   return run.projectDir === projectDir
     && runTargetId(run.request) === runTargetId(request)
     && run.request.agentId === request.agentId
-    && (run.request.canvasBranch ?? 'main') === canvasBranch
+    && (run.request.canvasBranch) === canvasBranch
     && runRequestIdentity(run.request) === runRequestIdentity(request)
 }
 
@@ -2027,7 +1945,12 @@ function samePendingRunIdentity(
 }
 
 function runRequestIdentity(request: RunExecutionRequest): string {
-  if (!isResolvedTaskRunRequest(request)) return 'standalone-run'
+  if (isNodeStudioRunRequest(request)) return JSON.stringify({
+    executionKind: request.executionKind,
+    baseDefinitionId: request.baseDefinitionId,
+    baseDefinitionRevision: request.baseDefinitionRevision,
+    prompt: request.prompt,
+  })
   return JSON.stringify({
     schemaVersion: request.schemaVersion,
     baseRevision: request.baseRevision,

@@ -1,12 +1,12 @@
 import type { PortDefinition } from '../plugins/nodeTypeContracts.js'
 
-export const CUSTOM_NODE_MANIFEST_SCHEMA_VERSION = 2 as const
+export const NODE_STUDIO_DEFINITION_SCHEMA_VERSION = 2 as const
 
 export type CustomNodeContentKind = 'text' | 'image' | 'table' | 'card'
 export type CustomNodeIconId = 'text' | 'image' | 'table' | 'card'
 
-export interface CustomNodeManifest {
-  schemaVersion: typeof CUSTOM_NODE_MANIFEST_SCHEMA_VERSION
+export interface NodeStudioDefinition {
+  schemaVersion: typeof NODE_STUDIO_DEFINITION_SCHEMA_VERSION
   revision: number
   installed: boolean
   id: string
@@ -42,9 +42,9 @@ const RESERVED_IDS = new Set([
   'pdf', 'web', 'image', 'text', 'table', 'formula', 'code', 'graphic', 'smart', 'group', 'file',
 ])
 
-export function createBlankCustomNodeManifest(now = new Date()): CustomNodeManifest {
+export function createBlankNodeStudioDefinition(now = new Date()): NodeStudioDefinition {
   return {
-    schemaVersion: CUSTOM_NODE_MANIFEST_SCHEMA_VERSION,
+    schemaVersion: NODE_STUDIO_DEFINITION_SCHEMA_VERSION,
     revision: 0,
     installed: false,
     id: '@local/custom-node',
@@ -78,9 +78,9 @@ export function createBlankCustomNodeManifest(now = new Date()): CustomNodeManif
 
 export function draftCustomNodeFromRequirement(
   requirement: string,
-  current: CustomNodeManifest,
+  current: NodeStudioDefinition,
   now = new Date(),
-): CustomNodeManifest {
+): NodeStudioDefinition {
   const normalized = requirement.trim()
   const kind = inferContentKind(normalized)
   const label = inferLabel(normalized, kind)
@@ -104,7 +104,7 @@ export function draftCustomNodeFromRequirement(
   }
 }
 
-export function validateCustomNodeManifest(manifest: CustomNodeManifest): string[] {
+export function validateNodeStudioDefinition(manifest: NodeStudioDefinition): string[] {
   const errors: string[] = []
   if (!Number.isSafeInteger(manifest.revision) || manifest.revision < 0) {
     errors.push('节点版本号无效')
@@ -157,9 +157,9 @@ export function validateCustomNodeManifest(manifest: CustomNodeManifest): string
   return errors
 }
 
-export function isCustomNodeManifest(value: unknown): value is CustomNodeManifest {
+export function isNodeStudioDefinition(value: unknown): value is NodeStudioDefinition {
   if (!value || typeof value !== 'object') return false
-  const candidate = value as Partial<CustomNodeManifest>
+  const candidate = value as Partial<NodeStudioDefinition>
   const exactKeys = [
     'schemaVersion', 'revision', 'installed', 'id', 'label', 'description', 'contentKind',
     'icon', 'defaultWidth', 'initialPayloadSchema', 'initialPayload', 'placeholder', 'actions',
@@ -169,7 +169,7 @@ export function isCustomNodeManifest(value: unknown): value is CustomNodeManifes
   ]
   return Object.keys(value).length === exactKeys.length
     && exactKeys.every((key) => Object.hasOwn(value, key))
-    && candidate.schemaVersion === CUSTOM_NODE_MANIFEST_SCHEMA_VERSION
+    && candidate.schemaVersion === NODE_STUDIO_DEFINITION_SCHEMA_VERSION
     && typeof candidate.revision === 'number'
     && typeof candidate.installed === 'boolean'
     && typeof candidate.id === 'string'
@@ -195,7 +195,7 @@ export function isCustomNodeManifest(value: unknown): value is CustomNodeManifes
     && typeof candidate.updatedAt === 'string'
 }
 
-function validContainment(value: CustomNodeManifest['containment']): boolean {
+function validContainment(value: NodeStudioDefinition['containment']): boolean {
   return isRecord(value)
     && typeof value.canHaveChildren === 'boolean'
     && Array.isArray(value.allowedChildTypes)
@@ -218,7 +218,7 @@ function validPort(value: PortDefinition): boolean {
       || ['inline', 'tray', 'child-node', 'canvas-node'].includes(value.materialization))
 }
 
-function validAgent(value: CustomNodeManifest['agent']): boolean {
+function validAgent(value: NodeStudioDefinition['agent']): boolean {
   return isRecord(value)
     && typeof value.constructible === 'boolean'
     && (value.writableInitSchema === undefined
@@ -226,7 +226,7 @@ function validAgent(value: CustomNodeManifest['agent']): boolean {
         && value.writableInitSchema.startsWith('ggai://')))
 }
 
-function validExecution(value: NonNullable<CustomNodeManifest['execution']>): boolean {
+function validExecution(value: NonNullable<NodeStudioDefinition['execution']>): boolean {
   return isRecord(value)
     && typeof value.capability === 'string'
     && typeof value.policy === 'string'
@@ -245,7 +245,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-export function customNodeRuntimeId(manifest: Pick<CustomNodeManifest, 'id' | 'revision'>): string {
+export function customNodeRuntimeId(manifest: Pick<NodeStudioDefinition, 'id' | 'revision'>): string {
   return `${manifest.id}@${manifest.revision}`
 }
 

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { NodeDefinitionClient } from './client'
-import { createBlankCustomNodeManifest } from './model'
+import { createBlankNodeStudioDefinition } from './model'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -8,7 +8,7 @@ afterEach(() => {
 
 describe('NodeDefinitionClient', () => {
   it('starts a restricted Agent run with the current definition and AbortSignal', async () => {
-    const draft = createBlankCustomNodeManifest(new Date('2026-01-01T00:00:00.000Z'))
+    const draft = createBlankNodeStudioDefinition(new Date('2026-01-01T00:00:00.000Z'))
     const controller = new AbortController()
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(new URL(String(input)).pathname).toBe('/node-studio/runs')
@@ -28,7 +28,7 @@ describe('NodeDefinitionClient', () => {
   })
 
   it('strictly decodes an Agent candidate and rejects protocol drift', async () => {
-    const candidate = createBlankCustomNodeManifest(new Date('2026-01-01T00:00:00.000Z'))
+    const candidate = createBlankNodeStudioDefinition(new Date('2026-01-01T00:00:00.000Z'))
     const fetch = vi.fn()
       .mockResolvedValueOnce(json({
         schemaVersion: 1,

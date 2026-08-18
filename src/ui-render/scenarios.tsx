@@ -12,7 +12,7 @@ import type {
   TaskRunPreflightResult,
 } from '@/agent/taskRunPreflightClient'
 import {
-  canvasNodeFrame,
+  canvasNodeWorldRect,
   emptyCanvasDocument,
   type CanvasDocument,
   type CanvasTask,
@@ -43,7 +43,7 @@ import CanvasRunLogViewer from '@/components/canvas/CanvasRunLogViewer'
 import CanvasTaskRunPanel from '@/components/canvas/CanvasTaskRunPanel'
 import CanvasWorkbench from '@/components/canvas/CanvasWorkbench'
 import type { NodeDefinitionApi } from '@/node-studio/client'
-import { createBlankCustomNodeManifest } from '@/node-studio/model'
+import { createBlankNodeStudioDefinition } from '@/node-studio/model'
 import NodeStudio from '@/pages/NodeStudio'
 import type {
   ProjectArtifactCatalogApi,
@@ -239,12 +239,78 @@ const scenarios: readonly UiRenderScenario[] = [
       />
     ),
   },
+  ...([
+    ['convergence-hierarchy', '层级编辑', 'Layer Tree · 素材组合', '局部坐标 · 3 个子节点', '进入隔离编辑'],
+    ['convergence-compute-approval', 'Compute 审批', 'python-3.13 · network none', 'awaiting-approval', '批准此代码与环境'],
+    ['convergence-filesystem-conflict', '文件同步冲突', 'README.md · bidirectional', 'Canvas 与磁盘均已修改', '需要显式选择版本'],
+    ['convergence-graph-review', 'Agent 构图预览', '12 个节点 · 18 条数据边', '接受后仍不会自动执行', '接受整图'],
+    ['convergence-pdf-strip', 'PDF 页面条', '300 页 · 初始 1 个 Document node', '1 / 300 页', '按需生成页面预览'],
+    ['convergence-pptx-export', 'PowerPoint 导出', 'hybrid · 原生对象 + fallback', '2 条字体/栅格诊断', '下载 PPTX'],
+  ] as const).map(([id, title, detail, state, action]) => ({
+    id,
+    title,
+    render: () => (
+      <ConvergenceScenario
+        id={id}
+        title={title}
+        detail={detail}
+        state={state}
+        action={action}
+      />
+    ),
+  })),
 ]
 
 export function getUiRenderScenario(id: string): UiRenderScenario {
   const scenario = scenarios.find((candidate) => candidate.id === id)
   if (!scenario) throw new Error(`Unknown UI render scenario: ${id}`)
   return scenario
+}
+
+function ConvergenceScenario({
+  id,
+  title,
+  detail,
+  state,
+  action,
+}: {
+  id: string
+  title: string
+  detail: string
+  state: string
+  action: string
+}) {
+  const conflict = id.includes('conflict')
+  return (
+    <main
+      data-ui-render-ready={id}
+      className="flex min-h-screen items-center justify-center bg-[#F5F6F8] p-12"
+    >
+      <section className="w-[720px] rounded-2xl border border-gg-line bg-white p-7 shadow-sm">
+        <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-gg-muted">Canvas v3 · 最终回归</p>
+        <div className="mt-4 flex items-start justify-between gap-5">
+          <div>
+            <h1 className="text-[22px] font-semibold text-gg-ink">{title}</h1>
+            <p className="mt-1 text-[12px] text-gg-muted">{detail}</p>
+          </div>
+          <span className={`rounded-full px-3 py-1 text-[10px] font-medium ${
+            conflict ? 'bg-red-50 text-red-700' : 'bg-blue-50 text-gg-primary'
+          }`}>{state}</span>
+        </div>
+        <div className="mt-7 grid grid-cols-3 gap-3">
+          {['可信数据', 'daemon 校验', '原子 receipt'].map((label, index) => (
+            <div key={label} className="rounded-[14px] border border-gg-line bg-gg-subtle p-4">
+              <span className="text-[10px] text-gg-muted">0{index + 1}</span>
+              <p className="mt-2 text-[12px] font-medium text-gg-ink">{label}</p>
+            </div>
+          ))}
+        </div>
+        <button type="button" className={`mt-6 rounded-[9px] px-4 py-2 text-[11px] font-medium ${
+          conflict ? 'border border-red-200 bg-red-50 text-red-700' : 'bg-gg-primary text-white'
+        }`}>{action}</button>
+      </section>
+    </main>
+  )
 }
 
 function NodeLifecycleScenario({
@@ -325,7 +391,7 @@ function NodeLifecycleScenario({
                   {node && (
                     <CanvasNodeCard
                       node={node}
-                      frame={{ ...canvasNodeFrame(node), x: 0, y: 0 }}
+                      frame={{ ...canvasNodeWorldRect(node), x: 0, y: 0 }}
                       projectDir="/ui-render/project"
                       selected
                       compact={false}
@@ -608,7 +674,7 @@ function renderSkillApi(): SkillAssetApi {
 
 function renderNodeDefinitionApi(): NodeDefinitionApi {
   const definition = {
-    ...createBlankCustomNodeManifest(new Date('2026-08-16T00:00:00.000Z')),
+    ...createBlankNodeStudioDefinition(new Date('2026-08-16T00:00:00.000Z')),
     revision: 3,
     installed: true,
     id: '@local/research-insight',

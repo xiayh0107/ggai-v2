@@ -31,8 +31,9 @@ src/
     taskRunHttpClient.ts # 严格 HTTP/SSE 协议客户端
     taskRunClient.ts  # Canvas store 所需的窄适配器
   plugins/
-    types.tsx              # NodePlugin 契约 + 注册表（含未知类型回退）
-    builtins/index.tsx     # 9 个内置插件（也是"普通插件"，无任何特权）
+    nodeTypeContracts.ts   # data-only NodeTypeDefinition exact validator
+    types.tsx              # 当前定义注册表（含未知类型回退）
+    builtins/definitions.ts # daemon/browser 共用的纯数据内置定义
     README.md              # 插件规范（人读版，最详细）
   skills/
     contracts.ts           # SkillAssetRef、类型/实例绑定与继承规则
@@ -89,45 +90,32 @@ Task/Node 的 `collectionId` 上。Collection 端口是 UI macro：一次 bounde
 
 完整规范在 `src/plugins/README.md`，这里是速查：
 
-一个插件 = 一个满足 `NodePlugin` 接口的对象（见 `src/plugins/types.tsx`）：
+一个节点类型 = 一个满足 schema-2 `NodeTypeDefinition` 的纯数据对象：
 
-```tsx
-export const videoPlugin: NodePlugin = {
-  id: 'video',                    // 全局唯一，kebab-case
-  label: '视频',                   // 菜单/卡片标题
-  desc: '上传或引用视频片段',       // 一句话描述（插件管理界面显示）
-  icon: Clapperboard,             // lucide 图标
-  defaultWidth: 340,              // 新建时的初始宽度
-
-  initialPayload: () => ({ videoUrl: null }),   // 内容契约：存进 node.payload
-  isEmpty: (n) => !n.payload?.videoUrl,         // 决定内容是否为空
-
-  views: {
-    Content: ({ node }) => <div className="p-4">{/* 渲染 payload */}</div>,
-    Artifact: ({ artifact }) => <video controls src={artifact.url} />,
-  },
-
+```ts
+export const videoType: NodeTypeDefinition = {
+  schemaVersion: 2,
+  id: 'video', revision: 1,
+  label: '视频', description: '上传或引用视频片段',
+  creatable: true, icon: 'file', defaultWidth: 340,
+  initialPayloadSchema: 'ggai://schema/payload/video',
+  initialPayload: {},
+  ui: defineNodeUi('media'),
+  instruction: { placeholder: '对这个视频做什么？', actions: [], marks: [] },
+  containment: { canHaveChildren: false, allowedChildTypes: [], maxDepth: 0 },
+  ports: [], exporters: [],
+  agent: { constructible: true, writableInitSchema: 'ggai://schema/payload/video' },
   artifactClaims: [{ extensions: ['.mp4', '.mov'], mediaTypes: ['video/*'], priority: 20 }],
-  nodeContext: {
-    schemaVersion: 1,
-    summary: { textMaxChars: 300, payloadFields: ['duration'] },
-    full: { textMaxChars: 8_000, payloadFields: ['duration'], artifactRefs: 'all' },
-  },
-  projectArtifact: (artifact) => ({ title: artifact.title }),
-
-  instr: {                        // 通用指令区配置（可选）
-    placeholder: '对这个视频做什么？',
-    actions: ['总结要点', '提取字幕'],
-  },
-};
+  nodeContext: defineNodeContextPolicy(/* bounded data */),
+}
 ```
 
 注册（两种都行）：
 
 ```tsx
-// 内置：src/plugins/builtins/index.tsx 的 PLUGINS 数组加一项
+// 内置：src/plugins/builtins/definitions.ts 的定义数组加一项
 // 运行时（社区/自定义）：
-registerPlugin(videoPlugin);
+registerPlugin(videoType);
 ```
 
 规则：
@@ -135,9 +123,9 @@ registerPlugin(videoPlugin);
 2. 内容一律走 `node.payload`，**不要**给 `CanvasNode` 加类型专属字段。
 3. 不要给 `CanvasNode` 增加 prompt、phase、session 或日志字段；运行态只在 Task Run store。
 4. `artifactClaims` 必须是 JSON 可序列化数据；community 插件不能覆盖内置声明或接管 unknown fallback。
-5. `projectArtifact` 必须是纯函数；拿不到 entity ID、坐标、Edge、command 或 dispatcher。
+5. 类型定义不能携带函数、JS/TSX/CSS、命令、镜像或路径；host 能力属于 daemon provider。
 6. 样式只用 `gg.*` 设计 token；遵守上面的设计红线。
-7. `isEmpty` 仍应准确；artifact 投影的身份与安全元数据以 daemon manifest 为准。
+7. 空态与 marks/actions 由有限声明式模板计算；artifact 身份以 daemon manifest 为准。
 8. 未知格式由不可创建的通用 `file` fallback 承接，禁用插件不会破坏已持久化 Node。
 
 ## 构建与验证

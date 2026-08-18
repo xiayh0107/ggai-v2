@@ -14,21 +14,29 @@ const ROOT = process.cwd()
 const CHECKED_ROOTS = [
   'cli',
   'src/agent',
+  'src/assets',
   'src/canvas',
   'src/components/canvas',
+  'src/compute',
+  'src/filesystem',
+  'src/instances',
   'src/node-studio',
+  'src/pdf',
   'src/plugins',
+  'src/presentation',
   'src/resources',
   'src/workspace',
   'daemon',
 ]
-const LEGACY_IMPORTS = [
+const RETIRED_IMPORTS = [
   '@/hooks/useCanvasStore',
   '@/persistence/canvasPersistence',
   '@/types/canvas',
 ]
 const VERSIONED_PRODUCT_LAYER = /(?:^|\/)(?:canvas-v\d+|components\/canvas-v\d+)(?:\/|$)|\bCanvasV\d+\b/u
 const PLUGIN_VIEW_ESCAPE_HATCH = /\bviews\s*:\s*\{/su
+const RETIRED_V3_SOURCE = /\b(?:serverLegacy|legacyCanvasContext|legacyOutcome|legacyRepairs|CustomNodeManifest|NodePlugin|CanvasFrame|parseCreateRunRequest|CreateRunRequest)\b|canvas-state-v2|canvas-worktrees-v2|plugin-capabilities-v[23]|\/(?:canvas|plugin-capabilities|artifact-catalog)\/v2/u
+const RETIRED_NODE_FIELDS = /\bnode\.frame\b|\btype\s*:\s*node\.type\b/u
 const FILE_LINE_BUDGETS = new Map([
   ['src/components/canvas/CanvasStage.tsx', 2_150],
   ['src/components/canvas/CanvasContextComposer.tsx', 620],
@@ -56,6 +64,12 @@ for (const root of CHECKED_ROOTS) {
     if (!/\.test\.[cm]?[jt]sx?$/u.test(file) && PLUGIN_VIEW_ESCAPE_HATCH.test(source)) {
       violations.push(`${sourcePath} restores a plugin component escape hatch`)
     }
+    if (!/\.test\.[cm]?[jt]sx?$/u.test(file) && RETIRED_V3_SOURCE.test(source)) {
+      violations.push(`${sourcePath} restores a retired v3-incompatible contract`)
+    }
+    if (!/\.test\.[cm]?[jt]sx?$/u.test(file) && RETIRED_NODE_FIELDS.test(source)) {
+      violations.push(`${sourcePath} restores retired Canvas Node fields`)
+    }
     const imports = importedSpecifiers(source)
     violations.push(...capabilityBoundaryViolations(sourcePath, imports))
     for (const specifier of imports) {
@@ -71,8 +85,8 @@ for (const root of CHECKED_ROOTS) {
       )) {
         violations.push(`${sourcePath} bypasses the daemon HTTP boundary via ${specifier}`)
       }
-      if (LEGACY_IMPORTS.some((legacy) => specifier.startsWith(legacy))) {
-        violations.push(`${sourcePath} imports legacy module ${specifier}`)
+      if (RETIRED_IMPORTS.some((retired) => specifier.startsWith(retired))) {
+        violations.push(`${sourcePath} imports retired module ${specifier}`)
       }
       if (VERSIONED_PRODUCT_LAYER.test(specifier)) {
         violations.push(`${sourcePath} imports versioned product layer ${specifier}`)
@@ -81,7 +95,7 @@ for (const root of CHECKED_ROOTS) {
         violations.push(`${sourcePath} imports composition layer ${specifier}`)
       }
       if (!/\.test\.[cm]?[jt]sx?$/u.test(file) && specifier === '@/agent/daemonClient') {
-        violations.push(`${sourcePath} imports the legacy aggregate daemon client`)
+        violations.push(`${sourcePath} imports the retired aggregate daemon client`)
       }
     }
   }

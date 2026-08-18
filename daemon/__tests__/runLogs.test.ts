@@ -128,23 +128,6 @@ test('run history cursor is stable across timestamp ties and continues strictly 
   }
 })
 
-test('legacy summaries without a canvas branch normalize to main', async () => {
-  const subject = await fixture()
-  try {
-    const legacy = summary('run-legacy', 'done')
-    delete legacy.canvasBranch
-    await subject.store.start(legacy)
-
-    assert.equal((await subject.store.summary('run-legacy'))?.canvasBranch, 'main')
-    assert.deepEqual(
-      (await subject.store.list({ canvasBranch: 'main' })).map((entry) => entry.runId),
-      ['run-legacy'],
-    )
-  } finally {
-    await subject.close()
-  }
-})
-
 test('Task-owned intent metadata survives finish, list, and a new store instance', async () => {
   const subject = await fixture()
   try {
@@ -257,15 +240,15 @@ test('run log persists ordered messages and paginates by event id', async () => 
   }
 })
 
-test('legacy close messages without an outcome remain replayable', async () => {
+test('current close messages without a projection plan remain replayable', async () => {
   const subject = await fixture()
   try {
-    await subject.store.start(summary('run-legacy-close'))
-    await subject.store.append('run-legacy-close', {
+    await subject.store.start(summary('run-current-close'))
+    await subject.store.append('run-current-close', {
       id: 1,
       event: 'close',
       data: {
-        runId: 'run-legacy-close',
+        runId: 'run-current-close',
         status: 'done',
         sessionId: null,
         artifacts: [],
@@ -273,14 +256,14 @@ test('legacy close messages without an outcome remain replayable', async () => {
       },
     })
     await subject.store.finish({
-      ...summary('run-legacy-close', 'done'),
+      ...summary('run-current-close', 'done'),
       finishedAt: 200,
     })
 
-    const page = await subject.store.page('run-legacy-close')
+    const page = await subject.store.page('run-current-close')
     const close = page?.entries[0]
     assert.ok(close && close.event === 'close')
-    assert.equal(close.data.outcome, undefined)
+    assert.equal(close.data.projectionPlan, undefined)
   } finally {
     await subject.close()
   }

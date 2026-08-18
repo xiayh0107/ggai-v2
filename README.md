@@ -87,8 +87,8 @@ npm run verify        # 上述策略、完整 lint、测试、构建与最小 da
 .gg/context/AGENTS.md
 .gg/context/runs/<runId>/
 .gg/skills/
-.gg/runtime/task-sessions-v2.json
-.gg/runtime/plugin-capabilities-v2/<digest>.json
+.gg/runtime/task-sessions.json
+.gg/runtime/plugin-capabilities/<digest>.json
 .gg/runtime/projection-plans/<branch-hash>.json
 .gg/runs/<runId>/
 artifacts/.branches/<branch-hash>/<runId>/files/<relative-path>
@@ -96,3 +96,4 @@ artifacts/.branches/<branch-hash>/<runId>/.ggai/artifact-manifest.v1.json
 ```
 
 daemon 不覆盖项目已有的根 `AGENTS.md`。详细协议、安全边界与模块说明见 [docs/AGENT-BACKEND.md](./docs/AGENT-BACKEND.md)，依赖升级和生产 runtime 规则见 [docs/DEPENDENCIES.md](./docs/DEPENDENCIES.md)，画布上下文策略见 [docs/AGENT-ARCHITECTURE.md](./docs/AGENT-ARCHITECTURE.md)。
+最终 v3-only 路径、能力与发布门禁见 [docs/V3-CONVERGENCE.md](./docs/V3-CONVERGENCE.md)。

@@ -5,7 +5,7 @@ import {
 } from './commands'
 import { TASK_OUTPUT_LAYOUT } from './layout'
 import {
-  canvasNodeFrame,
+  canvasNodeWorldRect,
   entityKey,
   type CanvasDocument,
   type CanvasEntityRef,
@@ -99,7 +99,7 @@ export function buildContextTaskPlan(input: {
     }
     const derivedTask: CanvasTask = {
       ...task,
-      anchor: derivedTaskAnchor([canvasNodeFrame(node)]),
+      anchor: derivedTaskAnchor([canvasNodeWorldRect(node)]),
     }
     return {
       task: derivedTask,
@@ -184,7 +184,7 @@ function entityBoundsForAnchor(
 ): CanvasBounds | null {
   if (entity.kind === 'node') {
     const node = document.nodes.find((candidate) => candidate.id === entity.id)
-    return node ? canvasNodeFrame(node) : null
+    return node ? canvasNodeWorldRect(node) : null
   }
   const task = document.tasks.find((entry) => entry.id === entity.id)
   if (!task) return null

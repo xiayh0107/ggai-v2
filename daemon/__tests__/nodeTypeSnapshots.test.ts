@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createBlankCustomNodeManifest } from '../../src/node-studio/model.js'
+import { createBlankNodeStudioDefinition } from '../../src/node-studio/model.js'
 import { snapshotCustomNodeType } from '../nodeTypeSnapshots.js'
 
 test('custom node type snapshots are immutable, typed, and content-addressed', () => {
   const manifest = {
-    ...createBlankCustomNodeManifest(new Date('2026-08-17T00:00:00.000Z')),
+    ...createBlankNodeStudioDefinition(new Date('2026-08-17T00:00:00.000Z')),
     id: '@local/analysis',
     revision: 4,
     installed: true,

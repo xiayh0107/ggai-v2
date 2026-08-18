@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { createBlankCustomNodeManifest } from './model'
+import { createBlankNodeStudioDefinition } from './model'
 import { getPluginRegistryVersion, unregisterPlugin } from '@/plugins/types'
-import { createCustomNodeType, installCustomNodeManifest } from './runtime'
+import { createCustomNodeType, installNodeStudioDefinition } from './runtime'
 
 describe('node studio runtime compiler', () => {
   it('compiles an immutable plugin without making a new node look populated', () => {
     const manifest = {
-      ...createBlankCustomNodeManifest(new Date('2026-01-01T00:00:00.000Z')),
+      ...createBlankNodeStudioDefinition(new Date('2026-01-01T00:00:00.000Z')),
       id: '@local/research-card',
       revision: 4,
       installed: true,
@@ -25,7 +25,7 @@ describe('node studio runtime compiler', () => {
 
   it('keeps historical revisions renderable but out of creation menus', () => {
     const plugin = createCustomNodeType({
-      ...createBlankCustomNodeManifest(),
+      ...createBlankNodeStudioDefinition(),
       id: '@local/research-card',
       revision: 2,
       installed: true,
@@ -36,14 +36,14 @@ describe('node studio runtime compiler', () => {
 
   it('publishes a changing registry snapshot when a custom plugin is installed', () => {
     const manifest = {
-      ...createBlankCustomNodeManifest(),
+      ...createBlankNodeStudioDefinition(),
       id: '@local/registry-snapshot-test',
       revision: 1,
       installed: true,
     }
     const before = getPluginRegistryVersion()
     try {
-      installCustomNodeManifest(manifest)
+      installNodeStudioDefinition(manifest)
       expect(getPluginRegistryVersion()).toBeGreaterThan(before)
     } finally {
       unregisterPlugin('@local/registry-snapshot-test@1')

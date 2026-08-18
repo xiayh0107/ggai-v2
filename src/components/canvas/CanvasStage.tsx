@@ -43,7 +43,7 @@ import {
   type CanvasEdge,
   type CanvasEntityRef,
   type CanvasNode,
-  type CanvasFrame,
+  type CanvasWorldRect,
   type CanvasPoint,
   type CanvasTask,
 } from '@/canvas/model'
@@ -171,7 +171,7 @@ type Gesture =
       startX: number
       startY: number
       zoom: number
-      frame: CanvasFrame
+      frame: CanvasWorldRect
     }
 type GesturePreview =
   | { kind: 'task' | 'node' | 'collection'; id: string; dx: number; dy: number }
@@ -182,7 +182,7 @@ type GesturePreview =
       dx: number
       dy: number
     }
-  | { kind: 'resize'; id: string; frame: CanvasFrame }
+  | { kind: 'resize'; id: string; frame: CanvasWorldRect }
   | null
 export default function CanvasStage() {
   const store = useCanvasStore()

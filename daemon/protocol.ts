@@ -1,7 +1,5 @@
 import type { CanvasAgentEvent } from '../src/agent/types.js'
-import type { LegacyRunOutcome } from './legacyOutcome.js'
 import type { SuggestedAction } from '../src/agent/suggestedActions.js'
-import type { LegacyCanvasEdge, LegacyCanvasNode } from './legacyCanvasContext.js'
 import type { ArtifactManifest } from './artifactManifest.js'
 import type { ProjectionPlan } from './projectionPlan.js'
 
@@ -19,41 +17,6 @@ export interface AgentDescriptor {
   binaryPath?: string
   detail?: string
   models: string[]
-}
-
-/** Retired standalone-run contract; current node types use NodeTypeDefinition snapshots. */
-export interface PluginContract {
-  id: string
-  label: string
-  description: string
-  instruction?: {
-    placeholder: string
-    actions: string[]
-  }
-  initialPayload?: Record<string, unknown>
-}
-
-export interface CanvasSnapshot {
-  nodes: LegacyCanvasNode[]
-  edges: LegacyCanvasEdge[]
-  plugins?: PluginContract[]
-}
-
-export interface CreateRunRequest {
-  /** Optional idempotency/cancellation handle allocated by the client. */
-  runId?: string
-  nodeId: string
-  agentId: string
-  prompt: string
-  /** Relative paths are resolved underneath the daemon's configured project root. */
-  projectDir?: string
-  /** Logical canvas branch used by later source-worktree binding. */
-  canvasBranch?: string
-  /** Project default can be overridden per run without changing legacy callers. */
-  automationMode?: 'auto' | 'confirm'
-  /** Optional browser hint. The daemon's persisted mapping remains authoritative. */
-  sessionId?: string | null
-  canvasSnapshot: CanvasSnapshot
 }
 
 export interface CreateRunResponse {
@@ -77,11 +40,11 @@ export interface RunSummary {
   baseRevision?: number
   /** Exact prompt accepted for this Task-owned run. */
   prompt?: string
-  /** Compatibility target identity; current Task runs mirror taskId here. */
+  /** Target identity; Task runs mirror taskId and Node Studio uses its design node. */
   nodeId: string
   agentId: string
-  /** Logical canvas branch that owned the run; absent only on legacy summaries. */
-  canvasBranch?: string
+  /** Logical canvas branch that owned the run. */
+  canvasBranch: string
   /** Content-addressed artifact projection registry fixed when this run was accepted. */
   pluginCapabilityDigest?: string
   /** Exact Node-bound skill set and authority sources fixed at Run acceptance. */
@@ -119,8 +82,6 @@ export interface RunClosePayload {
   artifactsComplete: boolean
   /** Present only for Task-owned runs after durable artifact close. */
   artifactManifest?: ArtifactManifest
-  /** Optional, bounded semantic result authored by the Agent for a successful run. */
-  outcome?: LegacyRunOutcome
   /** Daemon-authored and durably pending plan for a Task-owned run. */
   projectionPlan?: ProjectionPlan
   /** Trusted successful-run actions persisted beside projectionPlan; partial plans use []. */
@@ -184,49 +145,6 @@ export function parseNodeId(value: unknown): string {
   return validIdentifier(value, 'nodeId')
 }
 
-function parsePlugins(value: unknown): PluginContract[] | undefined {
-  if (value === undefined) return undefined
-  if (!Array.isArray(value)) throw new ProtocolError('canvasSnapshot.plugins must be an array')
-  if (value.length > 500) throw new ProtocolError('canvasSnapshot.plugins has too many entries')
-  return value.map((entry, index) => {
-    if (!isRecord(entry)) throw new ProtocolError(`plugins[${index}] must be an object`)
-    const contract: PluginContract = {
-      id: validIdentifier(entry.id, `plugins[${index}].id`, true),
-      label: requiredString(entry.label, `plugins[${index}].label`, { max: 120 }),
-      description: requiredString(entry.description, `plugins[${index}].description`, {
-        max: 1_000,
-        allowEmpty: true,
-      }),
-    }
-    if (entry.initialPayload !== undefined) {
-      if (!isRecord(entry.initialPayload)) {
-        throw new ProtocolError(`plugins[${index}].initialPayload must be an object`)
-      }
-      contract.initialPayload = entry.initialPayload
-    }
-    if (entry.instruction !== undefined) {
-      if (!isRecord(entry.instruction) || !Array.isArray(entry.instruction.actions)) {
-        throw new ProtocolError(`plugins[${index}].instruction is invalid`)
-      }
-      if (entry.instruction.actions.length > 100) {
-        throw new ProtocolError(`plugins[${index}].instruction has too many actions`)
-      }
-      contract.instruction = {
-        placeholder: requiredString(
-          entry.instruction.placeholder,
-          `plugins[${index}].instruction.placeholder`,
-          { max: 500, allowEmpty: true },
-        ),
-        actions: entry.instruction.actions.map((action, actionIndex) =>
-          requiredString(action, `plugins[${index}].instruction.actions[${actionIndex}]`, {
-            max: 200,
-          })),
-      }
-    }
-    return contract
-  })
-}
-
 export const MAX_CANVAS_BRANCH_LENGTH = 120
 
 /** Validates a branch label before it is used as a logical canvas key. */
@@ -244,115 +162,6 @@ export function parseCanvasBranch(value: unknown): string {
     throw new ProtocolError('branch contains unsupported characters')
   }
   return branch
-}
-
-/** Runtime validation at the localhost trust boundary. */
-export function parseCreateRunRequest(value: unknown): CreateRunRequest {
-  if (!isRecord(value)) throw new ProtocolError('request body must be a JSON object')
-  if (!isRecord(value.canvasSnapshot)) {
-    throw new ProtocolError('canvasSnapshot must be an object')
-  }
-  const { canvasSnapshot } = value
-  if (!Array.isArray(canvasSnapshot.nodes) || !Array.isArray(canvasSnapshot.edges)) {
-    throw new ProtocolError('canvasSnapshot.nodes and canvasSnapshot.edges must be arrays')
-  }
-  if (canvasSnapshot.nodes.length > 10_000 || canvasSnapshot.edges.length > 50_000) {
-    throw new ProtocolError('canvasSnapshot exceeds the supported graph size')
-  }
-
-  const nodeId = validIdentifier(value.nodeId, 'nodeId')
-  const nodeIds = new Set<string>()
-  for (const [index, node] of canvasSnapshot.nodes.entries()) {
-    if (!isRecord(node)) throw new ProtocolError(`nodes[${index}] must be an object`)
-    const currentId = validIdentifier(node.id, `nodes[${index}].id`)
-    if (nodeIds.has(currentId)) throw new ProtocolError(`duplicate node id: ${currentId}`)
-    nodeIds.add(currentId)
-    validIdentifier(node.type, `nodes[${index}].type`, true)
-    requiredString(node.title, `nodes[${index}].title`, { max: 1_000, allowEmpty: true })
-    if (node.text !== undefined && typeof node.text !== 'string') {
-      throw new ProtocolError(`nodes[${index}].text must be a string`)
-    }
-    if (node.meta !== undefined && (
-      !Array.isArray(node.meta)
-      || node.meta.length > 1_000
-      || !node.meta.every((entry) => typeof entry === 'string' && entry.length <= 10_000)
-    )) {
-      throw new ProtocolError(`nodes[${index}].meta must be a string array`)
-    }
-    if (node.payload !== undefined && !isRecord(node.payload)) {
-      throw new ProtocolError(`nodes[${index}].payload must be an object`)
-    }
-    if (node.instruction !== undefined) {
-      if (!isRecord(node.instruction)) {
-        throw new ProtocolError(`nodes[${index}].instruction must be an object`)
-      }
-      const attachments = node.instruction.attachments
-      if (attachments !== undefined && (
-        !Array.isArray(attachments)
-        || attachments.length > 100
-        || !attachments.every((entry) =>
-          typeof entry === 'string' && entry.length > 0 && entry.length <= 4_096)
-      )) {
-        throw new ProtocolError(`nodes[${index}].instruction.attachments is invalid`)
-      }
-    }
-  }
-  for (const [index, edge] of canvasSnapshot.edges.entries()) {
-    if (!isRecord(edge)) throw new ProtocolError(`edges[${index}] must be an object`)
-    const from = validIdentifier(edge.from, `edges[${index}].from`)
-    const to = validIdentifier(edge.to, `edges[${index}].to`)
-    if (!nodeIds.has(from) || !nodeIds.has(to)) {
-      throw new ProtocolError(`edges[${index}] references a missing node`)
-    }
-    requiredString(edge.label, `edges[${index}].label`, { max: 500, allowEmpty: true })
-  }
-  const nodes = canvasSnapshot.nodes as LegacyCanvasNode[]
-  if (!nodeIds.has(nodeId)) {
-    throw new ProtocolError('target node is missing from canvasSnapshot.nodes')
-  }
-
-  const request: CreateRunRequest = {
-    nodeId,
-    agentId: validIdentifier(value.agentId, 'agentId'),
-    prompt: requiredString(value.prompt, 'prompt', { max: 250_000, allowEmpty: true }),
-    canvasSnapshot: {
-      nodes,
-      edges: canvasSnapshot.edges as LegacyCanvasEdge[],
-      plugins: parsePlugins(canvasSnapshot.plugins),
-    },
-  }
-  if (value.runId !== undefined) {
-    request.runId = validIdentifier(value.runId, 'runId')
-  }
-  if (value.projectDir !== undefined) {
-    request.projectDir = requiredString(value.projectDir, 'projectDir', { max: 4_096 })
-  }
-  if (value.canvasBranch !== undefined) {
-    request.canvasBranch = parseCanvasBranch(value.canvasBranch)
-  }
-  if (value.automationMode !== undefined) {
-    if (value.automationMode !== 'auto' && value.automationMode !== 'confirm') {
-      throw new ProtocolError('automationMode must be "auto" or "confirm"')
-    }
-    request.automationMode = value.automationMode
-  }
-  if (value.sessionId !== undefined && value.sessionId !== null) {
-    const sessionId = requiredString(value.sessionId, 'sessionId', { max: 512 })
-    if (sessionId.startsWith('-') || hasControlCharacters(sessionId)) {
-      throw new ProtocolError('sessionId contains unsupported characters')
-    }
-    request.sessionId = sessionId
-  } else if (value.sessionId === null) {
-    request.sessionId = null
-  }
-  return request
-}
-
-function hasControlCharacters(value: string): boolean {
-  return [...value].some((character) => {
-    const codePoint = character.codePointAt(0) ?? 0
-    return codePoint <= 0x1f || codePoint === 0x7f
-  })
 }
 
 export function parsePermissionDecision(value: unknown): PermissionDecision {

@@ -1,5 +1,5 @@
 import {
-  canvasNodeFrame,
+  canvasNodeWorldRect,
   entityKey,
   type CanvasDocument,
   type CanvasEdgeContextRole,
@@ -206,7 +206,7 @@ export function taskPrimaryOutputFrame(
   ghosts: readonly CanvasGhostLayout[] = [],
 ): CanvasBounds | null {
   const frames: CanvasBounds[] = [
-    ...nodes.map(canvasNodeFrame),
+    ...nodes.map(canvasNodeWorldRect),
     ...ghosts.map(({ frame }) => frame),
   ]
   if (frames.length === 0) return null
@@ -256,7 +256,7 @@ export function selectTaskBounds(
 ): CanvasBounds {
   const chrome = taskChromeFrame(task, nodes, ghosts)
   const children: CanvasBounds[] = [
-    ...nodes.map(canvasNodeFrame),
+    ...nodes.map(canvasNodeWorldRect),
     ...ghosts.map(({ frame }) => frame),
   ]
   if (children.length === 0) return chrome
@@ -438,7 +438,7 @@ export function selectCollectionBounds(
   if (!collection) return null
   const members = selectCollectionMembers(document, collectionId)
   const memberBounds: CanvasBounds[] = [
-    ...members.nodes.map(canvasNodeFrame),
+    ...members.nodes.map(canvasNodeWorldRect),
     ...members.tasks.map((task) => selectTaskBounds(
       task,
       selectTaskNodes(document, task.id),
