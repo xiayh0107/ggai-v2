@@ -1,4 +1,6 @@
 import {
+  ArrowDownToLine,
+  ArrowUpFromLine,
   Boxes,
   Copy,
   FolderPlus,
@@ -10,6 +12,7 @@ import type { PointerEvent as ReactPointerEvent } from 'react'
 import type { CanvasCameraState } from '@/canvas/persistence'
 import type { CanvasBounds } from '@/canvas/selectors'
 import type { NodeMark } from '@/plugins/types'
+import type { PortDefinition } from '@/plugins/nodeTypeContracts'
 import CanvasConnectionPort, {
   type CanvasConnectionPortSide,
 } from './CanvasConnectionPort'
@@ -121,9 +124,11 @@ export function CanvasSelectionToolbar({
   canSaveCollection,
   nodeActions = [],
   nodeMarks = [],
+  dataPorts = [],
   onFocusComposer,
   onNodeAction,
   onToggleNodeMark,
+  onDataPort,
   onDuplicate,
   onDelete,
   onSaveCollection,
@@ -137,9 +142,11 @@ export function CanvasSelectionToolbar({
   nodeActions?: string[]
   /** 单选节点时的标记按钮（如文本节点的粗体 / 斜体 / 标题）：直接改写节点。 */
   nodeMarks?: NodeMark[]
+  dataPorts?: PortDefinition[]
   onFocusComposer: () => void
   onNodeAction?: (prompt: string) => void
   onToggleNodeMark?: (markId: string) => void
+  onDataPort?: (port: PortDefinition) => void
   onDuplicate?: () => void
   onDelete?: () => void
   onSaveCollection?: () => void
@@ -166,6 +173,29 @@ export function CanvasSelectionToolbar({
       >
         <MessageSquareText size={14} aria-hidden="true" />
       </button>
+
+      {!compound && dataPorts.length > 0 && onDataPort && (
+        <>
+          <span className="mx-0.5 h-4 w-px bg-gg-line" aria-hidden="true" />
+          {dataPorts.slice(0, 8).map((port) => (
+            <button
+              key={`${port.direction}:${port.key}`}
+              type="button"
+              data-node-data-port={port.key}
+              data-port-direction={port.direction}
+              aria-label={`${port.direction === 'input' ? '输入' : '输出'}端口：${port.key}`}
+              title={`${port.key} · ${port.schema}`}
+              onClick={() => onDataPort(port)}
+              className="flex h-7 items-center gap-1 rounded-[8px] px-2 text-[10px] text-gg-muted outline-none hover:bg-gg-subtle hover:text-gg-primary focus-visible:ring-2 focus-visible:ring-gg-primary/35"
+            >
+              {port.direction === 'input'
+                ? <ArrowDownToLine size={12} aria-hidden="true" />
+                : <ArrowUpFromLine size={12} aria-hidden="true" />}
+              {port.key}
+            </button>
+          ))}
+        </>
+      )}
 
       {compound && onSaveCollection && (
         <button

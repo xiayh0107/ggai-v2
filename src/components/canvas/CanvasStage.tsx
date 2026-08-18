@@ -33,11 +33,10 @@ import {
   type CanvasSelectableBounds,
   type CanvasViewportRect,
 } from '@/canvas/interaction'
-import { COLLECTION_CHROME_LAYOUT } from '@/canvas/layout'
 import {
-  canvasNodeFrame,
   canvasNodeGeometry,
   canvasNodeTypeRef,
+  canvasNodeWorldFrame,
   canvasEdgeTopologyIssue,
   type CanvasCollection,
   type CanvasDocument,
@@ -50,8 +49,6 @@ import {
 } from '@/canvas/model'
 import type { CanvasSelectionTarget } from '@/canvas/persistence'
 import {
-  deriveTaskStatus,
-  selectCollectionBounds,
   selectCollectionMembers,
   selectTaskView,
   type CanvasBounds,
@@ -66,6 +63,13 @@ import {
   nodeTypeMarks,
   toggleNodeTypeMark,
 } from '@/plugins/types'
+import type { PortDefinition } from '@/plugins/nodeTypeContracts'
+import { resolveDataPortConnection } from './CanvasDataflow'
+import {
+  dataPortEndpointAction,
+  deriveCanvasCollectionViews,
+  deriveCanvasHierarchyVisibility,
+} from './CanvasHierarchy'
 import CanvasCollectionFrame from './CanvasCollectionFrame'
 import CanvasContextComposer from './CanvasContextComposer'
 import {
@@ -91,7 +95,8 @@ import {
   taskInteractionBounds,
   visualEntityKey,
 } from './CanvasEdgeLayer.utils'
-import CanvasNodeCard from './CanvasNodeCard'
+import CanvasLooseNodeLayer from './CanvasLooseNodeLayer'
+import CanvasIsolationBanner from './CanvasIsolationBanner'
 import {
   CanvasSelectionToolbar,
   CanvasSelectionWorldSurface,
@@ -122,7 +127,6 @@ import {
   selectionCoverage,
   unionBounds,
 } from './CanvasStage.logic'
-
 type Gesture =
   | {
       kind: 'pan'
@@ -169,7 +173,6 @@ type Gesture =
       zoom: number
       frame: CanvasFrame
     }
-
 type GesturePreview =
   | { kind: 'task' | 'node' | 'collection'; id: string; dx: number; dy: number }
   | {
@@ -181,15 +184,6 @@ type GesturePreview =
     }
   | { kind: 'resize'; id: string; frame: CanvasFrame }
   | null
-
-interface CollectionView {
-  collection: CanvasCollection
-  bounds: CanvasBounds
-  collapsed: boolean
-  memberCount: number
-  artifactCount: number
-}
-
 export default function CanvasStage() {
   const store = useCanvasStore()
   const state = useCanvasState()
@@ -203,6 +197,7 @@ export default function CanvasStage() {
   const [rovingKey, setRovingKey] = useState<string | null>(null)
   const [edgeDraft, setEdgeDraft] = useState<EdgeEndpoint | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [isolatedNodeId, setIsolatedNodeId] = useState<string | null>(null)
   const [createMenu, setCreateMenu] = useState<CreateNodeMenuState | null>(null)
   // 右侧抽屉面板：产物查看与详细日志共用同一个位置，打开一个即替换另一个。
   const [sidePanel, setSidePanel] = useState<
@@ -235,18 +230,14 @@ export default function CanvasStage() {
     dispatchWithUndo,
     feedbackProps: actionFeedbackProps,
   } = actionHistory
-
   useEffect(() => {
     stateRef.current = state
   }, [state])
-
   useEffect(() => () => {
     connectDragCleanupRef.current?.()
     connectDragCleanupRef.current = null
     connectDragRef.current = null
   }, [])
-
-
   useEffect(() => {
     if (!createMenu) return
     const onDown = (event: PointerEvent) => {
@@ -263,7 +254,6 @@ export default function CanvasStage() {
       window.removeEventListener('keydown', onKey)
     }
   }, [createMenu])
-
   useEffect(() => {
     const selection = canonicalizeCanvasSelection(
       state.document,
@@ -281,7 +271,6 @@ export default function CanvasStage() {
     state.view.selection,
     store,
   ])
-
   const effectiveSelection = canonicalizeCanvasSelection(
     stageDocument,
     state.view.selection,
@@ -317,37 +306,23 @@ export default function CanvasStage() {
     }))
     .filter((view): view is CanvasTaskView => view !== null)
   const taskViewsById = new Map(taskViews.map((view) => [view.task.id, view]))
-  const collectionViews = stageDocument.collections.map((collection): CollectionView => {
-    const members = selectCollectionMembers(stageDocument, collection.id)
-    const childNodes = stageDocument.nodes.filter((node) =>
-      node.homeTaskId !== undefined
-      && members.tasks.some((task) => task.id === node.homeTaskId))
-    return {
-      collection,
-      bounds: selectCollectionBounds(stageDocument, collection.id) ?? {
-        x: collection.anchor.x,
-        y: collection.anchor.y,
-        w: COLLECTION_CHROME_LAYOUT.minimumWidth,
-        h: COLLECTION_CHROME_LAYOUT.minimumHeight,
-      },
-      collapsed: state.view.collapsedCollectionIds.includes(collection.id),
-      memberCount: members.tasks.length + members.nodes.length,
-      artifactCount: new Set([...members.nodes, ...childNodes]
-        .flatMap((node) => node.artifactRefs.map((artifact) =>
-          `${artifact.runId}\u001f${artifact.artifactId}`))).size,
-    }
-  })
+  const collectionViews = deriveCanvasCollectionViews(
+    stageDocument,
+    state.view.collapsedCollectionIds,
+  )
   const collectionViewsById = new Map(collectionViews.map((view) => [view.collection.id, view]))
   const collapsedCollectionIds = new Set(collectionViews
     .filter((view) => view.collapsed)
     .map((view) => view.collection.id))
-  const hiddenTaskIds = new Set(stageDocument.tasks
-    .filter((task) => task.collectionId && collapsedCollectionIds.has(task.collectionId))
-    .map((task) => task.id))
-  const visibleTaskViews = taskViews.filter((view) => !hiddenTaskIds.has(view.task.id))
-  const topLevelNodes = stageDocument.nodes.filter((node) => !node.homeTaskId)
-  const visibleTopLevelNodes = topLevelNodes.filter((node) =>
-    !node.collectionId || !collapsedCollectionIds.has(node.collectionId))
+  const {
+    visibleTaskViews,
+    visibleRootNodes: visibleTopLevelNodes,
+    visibleChildNodes,
+  } = deriveCanvasHierarchyVisibility({
+    document: stageDocument,
+    taskViews,
+    collapsedCollectionIds,
+  })
   const selectedTaskIds = new Set(effectiveSelection
     .filter((target) => target.kind === 'task')
     .map((target) => target.id))
@@ -357,7 +332,6 @@ export default function CanvasStage() {
   const selectedCollectionIds = new Set(effectiveSelection
     .filter((target) => target.kind === 'collection')
     .map((target) => target.id))
-
   const focusableKeys = collectionViews.map((view) => `collection:${view.collection.id}`)
     .concat(visibleTaskViews.flatMap((view) => [
     `task:${view.task.id}`,
@@ -365,13 +339,13 @@ export default function CanvasStage() {
       ? []
       : view.nodes.map((node) => `node:${node.id}`)),
     ])).concat(visibleTopLevelNodes.map((node) => `node:${node.id}`))
+    .concat(visibleChildNodes.map((node) => `node:${node.id}`))
   const selectedFocusableKey = effectiveSelection
     .map(selectionKey)
     .find((key) => focusableKeys.includes(key))
   const activeKey = rovingKey && focusableKeys.includes(rovingKey)
     ? rovingKey
     : selectedFocusableKey ?? focusableKeys[0] ?? null
-
   const registerFocusable = useCallback((key: string, element: HTMLButtonElement | null) => {
     if (element) {
       focusableRefs.current.set(key, element)
@@ -381,7 +355,6 @@ export default function CanvasStage() {
     if (previous && document.activeElement === previous) focusRestoreKeyRef.current = key
     focusableRefs.current.delete(key)
   }, [])
-
   useLayoutEffect(() => {
     const key = focusRestoreKeyRef.current
     if (!key) return
@@ -605,9 +578,9 @@ export default function CanvasStage() {
       startX: event.clientX,
       startY: event.clientY,
       zoom: stateRef.current.view.camera.zoom,
-      frame: structuredClone(canvasNodeFrame(node)),
+      frame: structuredClone(canvasNodeWorldFrame(stageDocument, node)),
     }, event.currentTarget)
-  }, [beginGesture])
+  }, [beginGesture, stageDocument])
 
   const selectable = (() : CanvasSelectableBounds[] => {
     const values: CanvasSelectableBounds[] = collectionViews.map((view) => ({
@@ -625,11 +598,11 @@ export default function CanvasStage() {
       })
       if (view.presentation === 'collapsed') continue
       for (const node of view.nodes) {
-        values.push({ target: { kind: 'node', id: node.id }, bounds: canvasNodeFrame(node) })
+        values.push({ target: { kind: 'node', id: node.id }, bounds: canvasNodeWorldFrame(stageDocument, node) })
       }
     }
     for (const node of visibleTopLevelNodes) {
-      values.push({ target: { kind: 'node', id: node.id }, bounds: canvasNodeFrame(node) })
+      values.push({ target: { kind: 'node', id: node.id }, bounds: canvasNodeWorldFrame(stageDocument, node) })
     }
     return values
   })()
@@ -853,7 +826,14 @@ export default function CanvasStage() {
   }
 
   const onStageKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== 'Escape' || (!currentEdgeDraft && !connectDragRef.current)) return
+    if (event.key !== 'Escape') return
+    if (isolatedNodeId) {
+      event.preventDefault()
+      setIsolatedNodeId(null)
+      setNotice('已退出组合隔离编辑')
+      return
+    }
+    if (!currentEdgeDraft && !connectDragRef.current) return
     event.preventDefault()
     connectDragCleanupRef.current?.()
     connectDragCleanupRef.current = null
@@ -868,10 +848,10 @@ export default function CanvasStage() {
   if (preview?.kind === 'node') {
     const node = stageDocument.nodes.find((entry) => entry.id === preview.id)
     if (node) nodeFrames.set(node.id, {
-      x: canvasNodeFrame(node).x + preview.dx,
-      y: canvasNodeFrame(node).y + preview.dy,
-      w: canvasNodeFrame(node).w,
-      h: canvasNodeFrame(node).h,
+      x: canvasNodeWorldFrame(stageDocument, node).x + preview.dx,
+      y: canvasNodeWorldFrame(stageDocument, node).y + preview.dy,
+      w: canvasNodeWorldFrame(stageDocument, node).w,
+      h: canvasNodeWorldFrame(stageDocument, node).h,
     })
   } else if (preview?.kind === 'resize') {
     nodeFrames.set(preview.id, preview.frame)
@@ -880,10 +860,10 @@ export default function CanvasStage() {
       // Child nodes move through their parent TaskGroup transform.
       if (node.homeTaskId || node.collectionId !== preview.id) continue
       nodeFrames.set(node.id, {
-        x: canvasNodeFrame(node).x + preview.dx,
-        y: canvasNodeFrame(node).y + preview.dy,
-        w: canvasNodeFrame(node).w,
-        h: canvasNodeFrame(node).h,
+        x: canvasNodeWorldFrame(stageDocument, node).x + preview.dx,
+        y: canvasNodeWorldFrame(stageDocument, node).y + preview.dy,
+        w: canvasNodeWorldFrame(stageDocument, node).w,
+        h: canvasNodeWorldFrame(stageDocument, node).h,
       })
     }
   } else if (preview?.kind === 'selection') {
@@ -904,10 +884,10 @@ export default function CanvasStage() {
       if (!movingNodeIds.has(node.id)
         && (!node.collectionId || !movingCollectionIds.has(node.collectionId))) continue
       nodeFrames.set(node.id, {
-        x: canvasNodeFrame(node).x + preview.dx,
-        y: canvasNodeFrame(node).y + preview.dy,
-        w: canvasNodeFrame(node).w,
-        h: canvasNodeFrame(node).h,
+        x: canvasNodeWorldFrame(stageDocument, node).x + preview.dx,
+        y: canvasNodeWorldFrame(stageDocument, node).y + preview.dy,
+        w: canvasNodeWorldFrame(stageDocument, node).w,
+        h: canvasNodeWorldFrame(stageDocument, node).h,
       })
     }
   }
@@ -918,7 +898,7 @@ export default function CanvasStage() {
         const node = stageDocument.nodes.find((entry) => entry.id === target.id)
         if (!node) return []
         const previewFrame = nodeFrames.get(node.id)
-        const frame = previewFrame ?? canvasNodeFrame(node)
+        const frame = previewFrame ?? canvasNodeWorldFrame(stageDocument, node)
         const offset = previewFrame
           ? null
           : nodeParentPreviewOffset(node, stageDocument.tasks, preview)
@@ -1180,6 +1160,27 @@ export default function CanvasStage() {
       setNotice('已取消连接')
       return
     }
+    const dataflow = resolveDataPortConnection({
+      source: currentEdgeDraft,
+      target: endpoint,
+      edges: stageDocument.edges,
+      edgeId: clientCanvasId('edge'),
+    })
+    if (dataflow.handled) {
+      if ('error' in dataflow) {
+        setNotice(dataflow.error)
+        return
+      }
+      const edge = dataflow.edge
+      void store.dispatchCommand({ type: 'CreatePortEdge', edge }).then(() => {
+        setEdgeDraft(null)
+        showUndoOffer({
+          label: `已连接 ${edge.from.kind === 'node' ? edge.from.port : ''} → ${edge.to.kind === 'node' ? edge.to.port : ''}`,
+          undoCommands: [{ type: 'DeleteEdge', edgeId: edge.id }],
+        })
+      }).catch((error: unknown) => setNotice(errorMessage(error)))
+      return
+    }
     const fromEndpoints = expandEndpoint(currentEdgeDraft)
     const toEndpoints = expandEndpoint(endpoint)
     if (fromEndpoints.length * toEndpoints.length > MAX_CANVAS_EDGE_BATCH) {
@@ -1366,6 +1367,25 @@ export default function CanvasStage() {
     if (nodeTypeMarks(plugin, sidePanelNode).length > 0) return []
     return nodeTypeActions(plugin).slice(0, 5)
   })()
+  const selectedNodeDataPorts = selectedNodeForSurface
+    ? [...getPlugin(selectedNodeForSurface.typeRef.id).ports]
+    : []
+  const activateDataPort = (port: PortDefinition) => {
+    if (!selectedNodeForSurface) return
+    const action = dataPortEndpointAction({
+      portDirection: port.direction,
+      nodeId: selectedNodeForSurface.id,
+      hasOutputDraft: currentEdgeDraft?.kind === 'node'
+        && currentEdgeDraft.dataPort?.direction === 'output',
+    })
+    if (action.kind === 'notice') return setNotice(action.message)
+    onPortActivate({ ...action.endpoint, dataPort: port })
+  }
+  const openNodeIsolation = (node: CanvasNode) => {
+    setIsolatedNodeId(node.id)
+    store.setSelection([{ kind: 'node', id: node.id }])
+    setNotice(`正在隔离编辑“${node.title}”`)
+  }
   const fillComposerWithAction = (prompt: string) => {
     store.setComposerDraft(canvasContextComposerKey(effectiveSelection), prompt)
     focusContextComposer()
@@ -1453,7 +1473,7 @@ export default function CanvasStage() {
       return nodeFrames.get(endpoint.id)
         ?? (() => {
           const node = stageDocument.nodes.find((candidate) => candidate.id === endpoint.id)
-          return node ? canvasNodeFrame(node) : undefined
+          return node ? canvasNodeWorldFrame(stageDocument, node) : undefined
         })()
         ?? null
     }
@@ -1582,7 +1602,7 @@ export default function CanvasStage() {
     const plugin = getPlugin(pluginId)
     const world = menu?.world ?? contextComposerAnchor()
     const cascade = menu?.cascade ? (stageDocument.nodes.length % 8) * 24 : 0
-    const maxZ = stageDocument.nodes.reduce((z, node) => Math.max(z, canvasNodeFrame(node).z), 0)
+    const maxZ = stageDocument.nodes.reduce((z, node) => Math.max(z, canvasNodeWorldFrame(stageDocument, node).z), 0)
     const id = clientCanvasId('node')
     const sourceEndpoint = menu?.source?.endpoint
     const sourceFrame = sourceEndpoint ? endpointRectForWire(sourceEndpoint) : undefined
@@ -1873,29 +1893,25 @@ export default function CanvasStage() {
             registerFocusable={registerFocusable}
           />
         ))}
-        {visibleTopLevelNodes.map((node) => (
-          <CanvasNodeCard
-            key={node.id}
-            node={node}
-            frame={nodeFrames.get(node.id)}
-            projectDir={state.scope.projectDir}
-            selected={selectedNodeIds.has(node.id)}
-            compoundSelected={compoundSelection && compoundSelectedNodeIds.has(node.id)}
-            taskStatus={node.origin.kind === 'agent-output'
-              ? deriveTaskStatus(state.runtimeByTaskId[node.origin.taskId])
-              : undefined}
-            taskRunId={node.origin.kind === 'agent-output'
-              ? state.runtimeByTaskId[node.origin.taskId]?.runId
-              : undefined}
-            tabIndex={activeKey === `node:${node.id}` ? 0 : -1}
-            onFocus={() => setRovingKey(`node:${node.id}`)}
-            onKeyDown={(event) => onEntityKeyDown(`node:${node.id}`, event)}
-            onDragStart={beginNodeDrag}
-            onResizeStart={beginNodeResize}
-            onMenuAction={onNodeMenuAction}
-            registerFocusable={(element) => registerFocusable(`node:${node.id}`, element)}
-          />
-        ))}
+        <CanvasLooseNodeLayer
+          document={stageDocument}
+          roots={visibleTopLevelNodes}
+          children={visibleChildNodes}
+          nodeFrames={nodeFrames}
+          projectDir={state.scope.projectDir}
+          selectedNodeIds={selectedNodeIds}
+          compoundSelectedNodeIds={compoundSelectedNodeIds}
+          compoundSelection={compoundSelection}
+          runtimeByTaskId={state.runtimeByTaskId}
+          activeKey={activeKey}
+          onFocus={setRovingKey}
+          onKeyDown={onEntityKeyDown}
+          onDragStart={beginNodeDrag}
+          onResizeStart={beginNodeResize}
+          onMenuAction={onNodeMenuAction}
+          onOpenIsolation={openNodeIsolation}
+          registerFocusable={registerFocusable}
+        />
         {marquee && (
           <div
             data-testid="canvas-marquee"
@@ -1935,9 +1951,11 @@ export default function CanvasStage() {
           canSaveCollection={collectableSelection.length >= 2}
           nodeActions={selectedNodeActions}
           nodeMarks={selectedNodeMarks}
+          dataPorts={selectedNodeDataPorts}
           onFocusComposer={focusContextComposer}
           onNodeAction={fillComposerWithAction}
           onToggleNodeMark={toggleSelectedNodeMark}
+          onDataPort={activateDataPort}
           onDuplicate={selectedNodeForSurface
             ? () => onNodeMenuAction(selectedNodeForSurface, 'duplicate')
             : undefined}
@@ -1960,6 +1978,10 @@ export default function CanvasStage() {
         selectionBounds={selectionSurfaceBounds}
         getViewport={viewportRect}
       />
+
+      {isolatedNodeId && (
+        <CanvasIsolationBanner nodeId={isolatedNodeId} onClose={() => setIsolatedNodeId(null)} />
+      )}
 
       {currentEdgeDraft && (
         <div className="absolute left-4 top-4">
@@ -2116,7 +2138,7 @@ function entityBounds(
 ): CanvasBounds | null {
   if (ref.kind === 'node') {
     const node = document.nodes.find((candidate) => candidate.id === ref.id)
-    return node ? canvasNodeFrame(node) : null
+    return node ? canvasNodeWorldFrame(document, node) : null
   }
   const view = taskViewsById.get(ref.id)
   return view ? taskInteractionBounds(view) : null

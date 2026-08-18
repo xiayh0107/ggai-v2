@@ -29,6 +29,10 @@ Canvas 把旧节点承担的内容、提示、运行状态、会话与产物职�
     从 closed manifest 独立索引这些资源。移除 Task 的最后一个输出 Node 时，同一
     command revision 必须同时移除失去输出的 Task 与相关 Edge；物理回收由未来的
     跨快照、Canvas Git 与 run log 可达性 GC 统一处理。
+12. `parentId` 是 containment 唯一事实源；child 不保存 Task/Collection scope，最大深度 32，
+    reparent 保持 world transform 并拒绝 cycle。
+13. `data` Edge 必须从注册 output port 指向相同 schema 的 input port，`contextRole` 固定为
+    `none`；cardinality-one input 最多一条入边。
 
 ## 2. 持久 Canvas 文档
 
@@ -135,6 +139,8 @@ POST /canvas/commands
 规范命令包括：
 
 - `CreateTask`、`UpdateTaskGoal`、`CreateNode`、`UpdateNodeContent`、`ResizeNode`
+- `SetNodeBounds`、`SetNodeTransform`、`ReparentNodes`、`ReorderChildren`
+- `CreatePortEdge`、`SelectNodeExecution`、`BindNodeToFilesystem`
 - `UpdateNodeSkillBindings`（节点实例级任务能力；类型默认绑定由 Workspace catalog 管理）
 - `CreateEdge(s)`、`UpdateEdge`、`DeleteEdge(s)`、`MoveEntities`
 - `CreateTaskForOutputSlot`、`CreateDerivedTaskFromSelection`、`AssignNodeToTask`、`DetachNodeFromTask`
@@ -267,6 +273,12 @@ daemon 将 raw outcome、ArtifactManifest 与序列化插件 artifact claim 求�
 - 点 Node 选择内容，点 Task 标题或边框选择 Task；Shift 点击与框选永远只是临时多选。
 
 ### Collection 与 Edge
+
+- 节点管理面板以 `parentId + orderKey` 显示层级树，reparent/reorder 只派发共享 command。
+- 可包含子节点的类型支持双击进入隔离编辑；Esc 或隔离条退出。descendant 使用 parent-local
+  transform，Stage 与 Edge layer 都从同一 world-transform selector 取几何。
+- 选中节点的工具条显示声明式 named ports。数据连线只能 output→input、schema 完全相同，
+  不兼容和 cardinality-one 冲突在提交前明确提示。
 
 - “保存为集合”显式持久化当前顶层多选；不自动保存框选。
 - Task 端口创建一条正式 Task Edge；Collection 端口是 UI macro，展开为成员的多条普通 Edge，Collection 本身不是 Edge 端点。

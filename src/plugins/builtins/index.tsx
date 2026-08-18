@@ -48,6 +48,10 @@ const builtinPlugins: readonly NodeTypeDefinition[] = [
         { id: 'h2', title: '标题 2', icon: 'heading-2', payloadKey: 'heading', value: 2, exclusiveGroup: 'heading' },
       ],
     },
+    ports: [
+      { key: 'content-in', direction: 'input', schema: 'ggai://value/text', cardinality: 'one' },
+      { key: 'content', direction: 'output', schema: 'ggai://value/text', cardinality: 'one', materialization: 'tray' },
+    ],
     nodeContext: nodeContextPolicyForBuiltin('text'),
     artifactClaims: artifactClaimsForBuiltin('text'),
   }),
@@ -92,6 +96,15 @@ const builtinPlugins: readonly NodeTypeDefinition[] = [
     artifactClaims: [],
   }),
   builtin({
+    id: 'group', label: '组合', description: '在局部坐标系中组织可编辑子节点', icon: 'card',
+    defaultWidth: 480,
+    ui: defineNodeUi('card'),
+    instruction: { placeholder: '描述这个组合要承载的内容…', actions: [], marks: [] },
+    containment: { canHaveChildren: true, allowedChildTypes: [], maxDepth: 32 },
+    nodeContext: nodeContextPolicyForBuiltin('smart'),
+    artifactClaims: [],
+  }),
+  builtin({
     id: 'file', label: '文件', description: '未识别产物的安全通用视图', icon: 'file',
     creatable: false, defaultWidth: 320,
     ui: defineNodeUi('file'),
@@ -113,7 +126,11 @@ function builtin(
     | 'instruction'
     | 'nodeContext'
     | 'artifactClaims'
-  > & { creatable?: boolean },
+  > & {
+    creatable?: boolean
+    containment?: NodeTypeDefinition['containment']
+    ports?: NodeTypeDefinition['ports']
+  },
 ): NodeTypeDefinition {
   const creatable = input.creatable ?? true
   return {

@@ -422,6 +422,37 @@ function dispatchPointer(
 }
 
 describe('Canvas interactive stage', () => {
+  it('renders descendants from parent-local transforms while keeping one node shell', async () => {
+    const document = fixtureDocument()
+    const parent = {
+      id: 'node-group',
+      ...nodeShape('group', { x: 900, y: 700, w: 480, h: 360, z: 20 }),
+      title: 'Group',
+      artifactRefs: [],
+      origin: { kind: 'user' as const },
+    }
+    const child = {
+      id: 'node-group-child',
+      ...nodeShape('text', { x: 40, y: 60, w: 240, h: 120, z: 1 }),
+      parentId: parent.id,
+      title: 'Nested text',
+      text: 'Child content',
+      artifactRefs: [],
+      origin: { kind: 'user' as const },
+    }
+    document.nodes.push(parent, child)
+
+    const { host } = await createSubject(undefined, document)
+    const childCard = required<HTMLElement>(host, '[data-node-id="node-group-child"]')
+    expect(childCard.style.left).toBe('940px')
+    expect(childCard.style.top).toBe('760px')
+    expect(host.querySelectorAll('[data-node-id="node-group-child"]')).toHaveLength(1)
+    act(() => required<HTMLElement>(host, '[data-node-id="node-group"]')
+      .dispatchEvent(new MouseEvent('dblclick', { bubbles: true })))
+    expect(required(host, '[data-testid="canvas-isolation-banner"]')
+      .getAttribute('data-isolation-node-id')).toBe('node-group')
+  })
+
   it('opens the create menu on blank-canvas double click without selecting menu text', async () => {
     const { host } = await createSubject(undefined, emptyCanvasDocument())
     const removeAllRanges = vi.fn()

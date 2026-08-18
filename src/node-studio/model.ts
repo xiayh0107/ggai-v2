@@ -39,7 +39,7 @@ export interface CustomNodeManifest {
 }
 
 const RESERVED_IDS = new Set([
-  'pdf', 'web', 'image', 'text', 'table', 'formula', 'code', 'graphic', 'smart', 'file',
+  'pdf', 'web', 'image', 'text', 'table', 'formula', 'code', 'graphic', 'smart', 'group', 'file',
 ])
 
 export function createBlankCustomNodeManifest(now = new Date()): CustomNodeManifest {

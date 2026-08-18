@@ -66,7 +66,9 @@ export function edgeSemanticKey(edge: Pick<
 >): string {
   return JSON.stringify([
     entityKey(edge.from),
+    edge.from.kind === 'node' ? edge.from.port ?? null : null,
     entityKey(edge.to),
+    edge.to.kind === 'node' ? edge.to.port ?? null : null,
     edge.relation,
     edge.contextRole,
   ])

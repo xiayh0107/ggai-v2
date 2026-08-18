@@ -10,7 +10,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useCanvasState, useCanvasStore } from '@/canvas/hooks'
-import { canvasNodeFrame, type CanvasNode } from '@/canvas/model'
+import { canvasNodeWorldFrame, type CanvasNode } from '@/canvas/model'
 import {
   useOptionalCanvasWorkbenchController,
   type CanvasWorkbenchSection,
@@ -90,6 +90,7 @@ export default function CanvasWorkbench({
 
   const selectAndLocate = (node: CanvasNode) => {
     const zoom = state.view.camera.zoom
+    const frame = canvasNodeWorldFrame(state.document, node)
     const viewportWidth = Math.max(480, globalThis.innerWidth)
     const viewportHeight = Math.max(360, globalThis.innerHeight - 52)
     const availableLeft = section ? 400 : 72
@@ -97,8 +98,8 @@ export default function CanvasWorkbench({
     store.setSelection([{ kind: 'node', id: node.id }])
     store.setCamera({
       zoom,
-      x: Math.round(centerX - (canvasNodeFrame(node).x + canvasNodeFrame(node).w / 2) * zoom),
-      y: Math.round(viewportHeight / 2 - (canvasNodeFrame(node).y + canvasNodeFrame(node).h / 2) * zoom),
+      x: Math.round(centerX - (frame.x + frame.w / 2) * zoom),
+      y: Math.round(viewportHeight / 2 - (frame.y + frame.h / 2) * zoom),
     })
   }
 
@@ -193,6 +194,16 @@ export default function CanvasWorkbench({
                   type: 'UpdateNodeContent',
                   nodeId,
                   patch: { title },
+                })}
+                onReparent={(nodeId, parentId) => store.dispatchCommand({
+                  type: 'ReparentNodes',
+                  nodeIds: [nodeId],
+                  parentId,
+                })}
+                onReorder={(parentId, moves) => store.dispatchCommand({
+                  type: 'ReorderChildren',
+                  parentId,
+                  moves,
                 })}
               />
             )}
