@@ -39,7 +39,7 @@ export const MAX_PROPOSAL_EDIT_TITLE_LENGTH = MAX_TASK_PROPOSAL_EDIT_TITLE_LENGT
 export const MAX_PROPOSAL_EDIT_PROMPT_LENGTH = MAX_TASK_PROPOSAL_EDIT_PROMPT_LENGTH
 
 type TrustedPlanCommand = Extract<CanvasCommand, {
-  type: 'MaterializeProjectionPlan' | 'AcceptTaskProposals' | 'DismissPlan'
+  type: 'MaterializeProjectionPlan' | 'MaterializeGraphPlan' | 'AcceptTaskProposals' | 'DismissPlan'
 }>
 
 export type OrdinaryCanvasCommand = Exclude<CanvasCommand, TrustedPlanCommand>
@@ -55,6 +55,7 @@ export type TaskProposalEditWire = TaskProposalEdit
 export type CanvasCommandWire =
   | OrdinaryCanvasCommand
   | { type: 'MaterializeProjectionPlan'; planId: string }
+  | { type: 'MaterializeGraphPlan'; planId: string }
   | {
       type: 'AcceptTaskProposals'
       planId: string
@@ -151,6 +152,7 @@ export function parseCanvasCommandWire(value: unknown): CanvasCommandWire {
   }
   switch (value.type) {
     case 'MaterializeProjectionPlan':
+    case 'MaterializeGraphPlan':
       assertCommandKeys(value, ['type', 'planId'], ['type', 'planId'])
       return { type: value.type, planId: parsePlanId(value.planId) }
     case 'AcceptTaskProposals':

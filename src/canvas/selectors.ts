@@ -517,7 +517,7 @@ export function selectProposalReview(
       }
     } else if (receipt.kind === 'plan-dismissal') {
       for (const key of receipt.proposalKeys) dismissedKeys.add(key)
-    } else {
+    } else if (receipt.kind === 'materialization') {
       for (const key of receipt.dismissedProposalKeys) dismissedKeys.add(key)
     }
   }

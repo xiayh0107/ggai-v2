@@ -22,6 +22,13 @@ import {
   type ArtifactManifest,
 } from './artifactManifest.js'
 import { parseRunId } from './protocol.js'
+import {
+  buildGraphMaterializationPlan,
+  inspectGraphMaterializationPlan,
+  type GraphMaterializationPlan,
+} from './graphPlan.js'
+import type { CanvasPoint } from '../src/canvas/model.js'
+import type { NodeTypeSnapshot } from '../src/plugins/nodeTypeContracts.js'
 
 export const PROJECTION_PLAN_SCHEMA_VERSION = 2
 export const MAX_PROJECTION_PLUGINS = MAX_ARTIFACT_PLUGIN_REGISTRATIONS
@@ -79,6 +86,7 @@ export interface ProjectionPlan {
   manifestDigest: string
   outputs: ProjectionOutput[]
   taskProposals: ProjectionTaskProposal[]
+  graphPlan?: GraphMaterializationPlan
   warnings: string[]
   digest: string
 }
@@ -99,6 +107,7 @@ export interface ProjectionDiagnostic {
     | 'unclaimed-artifact'
     | 'projection-limit'
     | 'discarded-proposals'
+    | 'discarded-graph-proposal'
   message: string
   outputKey?: string
   artifactPath?: string
@@ -112,6 +121,9 @@ export interface BuildProjectionPlanInput {
   plugins: readonly ProjectionPluginContract[]
   /** Raw Agent value; invalid and unsupported values safely fall back. */
   outcome?: unknown
+  nodeTypes?: readonly NodeTypeSnapshot[]
+  taskAnchor?: CanvasPoint
+  allowedRootIds?: ReadonlySet<string>
 }
 
 export interface BuildProjectionPlanResult {
@@ -284,6 +296,36 @@ export function buildProjectionPlan(
 
   const status = runStatus === 'done' && manifest.complete ? 'complete' : 'partial'
   const planId = projectionPlanId(taskId, runId)
+  let graphPlan: GraphMaterializationPlan | undefined
+  if (outcome?.graphProposal) {
+    if (status !== 'complete') {
+      diagnostics.push({
+        code: 'discarded-graph-proposal',
+        message: 'Unsuccessful or incomplete runs cannot retain graph proposals',
+      })
+    } else if (!input.nodeTypes || !input.taskAnchor) {
+      diagnostics.push({
+        code: 'discarded-graph-proposal',
+        message: 'Graph proposal could not be pinned to node types and task layout',
+      })
+    } else {
+      try {
+        graphPlan = buildGraphMaterializationPlan({
+          taskId,
+          runId,
+          taskAnchor: input.taskAnchor,
+          proposal: outcome.graphProposal,
+          nodeTypes: input.nodeTypes,
+          allowedRootIds: input.allowedRootIds ?? new Set<string>(),
+        })
+      } catch (error) {
+        diagnostics.push({
+          code: 'discarded-graph-proposal',
+          message: error instanceof Error ? error.message : 'Graph proposal validation failed',
+        })
+      }
+    }
+  }
   const warnings = diagnostics.map((diagnostic) =>
     `${diagnostic.code}: ${diagnostic.message}`)
   const unsigned = {
@@ -295,6 +337,7 @@ export function buildProjectionPlan(
     manifestDigest,
     outputs,
     taskProposals,
+    ...(graphPlan ? { graphPlan } : {}),
     warnings,
   } as const
   const digest = digestJson('ggai-projection-plan-v2', unsigned)
@@ -316,6 +359,7 @@ export function inspectProjectionPlan(value: unknown): ProjectionPlanInspection 
     'manifestDigest',
     'outputs',
     'taskProposals',
+    ...(isRecord(value) && value.graphPlan !== undefined ? ['graphPlan'] : []),
     'warnings',
     'digest',
   ])) return invalid('projection plan has an invalid envelope')
@@ -388,6 +432,17 @@ export function inspectProjectionPlan(value: unknown): ProjectionPlanInspection 
       return invalid('projection warnings are invalid')
     }
     const warnings = [...value.warnings] as string[]
+    const graphInspection = value.graphPlan === undefined
+      ? null
+      : inspectGraphMaterializationPlan(value.graphPlan)
+    if (graphInspection?.status === 'invalid') return invalid(graphInspection.reason)
+    if (graphInspection?.status === 'valid'
+      && (graphInspection.plan.planId !== value.planId
+        || graphInspection.plan.taskId !== taskId
+        || graphInspection.plan.runId !== runId
+        || value.status !== 'complete')) {
+      return invalid('projection graph plan identity is invalid')
+    }
 
     const unsigned = {
       schemaVersion: PROJECTION_PLAN_SCHEMA_VERSION,
@@ -398,6 +453,7 @@ export function inspectProjectionPlan(value: unknown): ProjectionPlanInspection 
       manifestDigest: value.manifestDigest,
       outputs,
       taskProposals: semanticInspection.outcome.taskProposals,
+      ...(graphInspection?.status === 'valid' ? { graphPlan: graphInspection.plan } : {}),
       warnings,
     } as const
     const expectedDigest = digestJson('ggai-projection-plan-v2', unsigned)

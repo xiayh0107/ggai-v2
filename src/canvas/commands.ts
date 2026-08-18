@@ -27,6 +27,7 @@ import {
 } from '../skills/contracts.js'
 import { taskOutputFrame } from './layout.js'
 import { isContextBearingEdge, promotedTaskInputsForOutputSlot } from './contextEdges.js'
+import type { NodeTypeSnapshot } from '../plugins/nodeTypeContracts.js'
 
 export type TrustedProjectionOutputRole = 'primary' | 'supporting' | 'auxiliary'
 
@@ -79,7 +80,19 @@ export interface TrustedProjectionPlanInput {
   manifestDigest: string
   outputs: TrustedProjectionOutput[]
   taskProposals: TrustedTaskProposal[]
+  graphPlan?: TrustedGraphMaterializationPlanInput
   warnings: string[]
+  digest: string
+}
+
+export interface TrustedGraphMaterializationPlanInput {
+  schemaVersion: 1
+  planId: string
+  runId: string
+  taskId: string
+  nodes: Array<{ logicalKey: string; node: CanvasNode }>
+  edges: CanvasEdge[]
+  nodeTypes: NodeTypeSnapshot[]
   digest: string
 }
 
@@ -196,6 +209,10 @@ export type CanvasCommand =
   | {
       type: 'DismissPlan'
       plan: TrustedProjectionPlanInput
+    }
+  | {
+      type: 'MaterializeGraphPlan'
+      plan: TrustedGraphMaterializationPlanInput
     }
 
 export class CanvasCommandError extends Error {
@@ -338,6 +355,9 @@ export function applyCanvasCommand(
       break
     case 'DismissPlan':
       dismissPlan(next, command)
+      break
+    case 'MaterializeGraphPlan':
+      materializeGraphPlan(next, command.plan)
       break
     default:
       command satisfies never
@@ -1313,6 +1333,67 @@ function materializeProjectionPlan(
   document.everCreated = true
 }
 
+function materializeGraphPlan(
+  document: CanvasDocument,
+  plan: TrustedGraphMaterializationPlanInput,
+): void {
+  requireTask(document, plan.taskId)
+  if (plan.nodes.length < 1 || plan.nodes.length > 256 || plan.edges.length > 512) {
+    throw new CanvasCommandError('invalid-graph-plan', 'Graph materialization plan exceeds bounds')
+  }
+  const logicalKeys = new Set<string>()
+  const nodeIds = new Set<string>()
+  const types = new Map(plan.nodeTypes.map((type) => [type.id, type]))
+  for (const entry of plan.nodes) {
+    if (logicalKeys.has(entry.logicalKey) || nodeIds.has(entry.node.id)) {
+      throw new CanvasCommandError('invalid-graph-plan', 'Graph materialization plan duplicates a node')
+    }
+    logicalKeys.add(entry.logicalKey)
+    nodeIds.add(entry.node.id)
+    ensureEntityIdAvailable(document, entry.node.id)
+    const type = types.get(entry.node.typeRef.id)
+    if (!type || type.revision !== entry.node.typeRef.revision
+      || type.digest !== entry.node.typeRef.digest
+      || entry.node.origin.kind !== 'agent-output'
+      || entry.node.origin.planId !== plan.planId
+      || entry.node.origin.runId !== plan.runId
+      || entry.node.origin.taskId !== plan.taskId
+      || entry.node.origin.outputKey !== entry.logicalKey) {
+      throw new CanvasCommandError('invalid-graph-plan', 'Graph node identity or type snapshot is invalid')
+    }
+  }
+  for (const { node } of plan.nodes) {
+    if (node.parentId !== null && !nodeIds.has(node.parentId)) {
+      throw new CanvasCommandError('invalid-graph-plan', 'Graph node parent is outside the plan')
+    }
+    if (node.parentId === null && node.homeTaskId !== plan.taskId) {
+      throw new CanvasCommandError('invalid-graph-plan', 'Graph root does not belong to its Task')
+    }
+    if (node.parentId !== null && (node.homeTaskId || node.collectionId)) {
+      throw new CanvasCommandError('invalid-graph-plan', 'Graph descendant stores root ownership')
+    }
+  }
+  for (const edge of plan.edges) {
+    ensureEdgeIdAvailable(document, edge.id)
+    if (edge.from.kind !== 'node' || edge.to.kind !== 'node'
+      || !nodeIds.has(edge.from.id) || !nodeIds.has(edge.to.id)
+      || edge.relation !== 'data' || edge.origin.kind !== 'agent'
+      || edge.origin.planId !== plan.planId || edge.origin.runId !== plan.runId) {
+      throw new CanvasCommandError('invalid-graph-plan', 'Graph edge is outside the trusted plan')
+    }
+  }
+  document.nodes.push(...plan.nodes.map((entry) => structuredClone(entry.node)))
+  document.edges.push(...structuredClone(plan.edges))
+  document.receipts.push({
+    kind: 'graph-materialization',
+    planId: plan.planId,
+    runId: plan.runId,
+    taskId: plan.taskId,
+    nodes: plan.nodes.map((entry) => ({ logicalKey: entry.logicalKey, nodeId: entry.node.id })),
+  })
+  document.everCreated = true
+}
+
 function acceptTaskProposals(
   document: CanvasDocument,
   command: Extract<CanvasCommand, { type: 'AcceptTaskProposals' }>,
@@ -1802,6 +1883,12 @@ function dismissPlan(
 }
 
 function isIdempotentReplay(document: CanvasDocument, command: CanvasCommand): boolean {
+  if (command.type === 'MaterializeGraphPlan') {
+    ensurePlanReceiptIdentity(
+      document, command.plan.planId, command.plan.runId, command.plan.taskId,
+    )
+    return Boolean(findReceipt(document, 'graph-materialization', command.plan.planId))
+  }
   if (command.type === 'MaterializeProjectionPlan') {
     ensurePlanReceiptIdentity(
       document,

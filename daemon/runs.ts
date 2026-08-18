@@ -72,6 +72,7 @@ import { ServiceScope } from './runtime/services.js'
 import type { CapabilityProfileSnapshot } from './runtime/composition.js'
 import { watchArtifacts, type ArtifactWatcher } from './watcher.js'
 import type { ProjectionPlan, ProjectionSettlement } from './projectionPlan.js'
+import type { NodeTypeSnapshot } from '../src/plugins/nodeTypeContracts.js'
 import {
   ProjectionPlanStore,
   type ProjectionPlanLifecycle,
@@ -163,6 +164,9 @@ export interface RunManagerOptions {
   capabilityScopes?: CapabilityExecutionScopes
   /** Snapshots the active profile at the acceptance boundary. */
   capabilityProfile?: () => CapabilityProfileSnapshot
+  /** Resolves daemon-owned immutable Node type snapshots for GraphProposal validation. */
+  resolveNodeTypes?: (projectDir: string) => Promise<NodeTypeSnapshot[]>
+  resolveGraphResourceHandles?: (projectDir: string) => Promise<string[]>
 }
 
 export type TaskRunReproducibilityReadModel = {
@@ -232,6 +236,8 @@ export class RunManager {
   readonly #capabilityScopes: CapabilityExecutionScopes
   readonly #ownsCapabilityScopes: boolean
   readonly #capabilityProfile: () => CapabilityProfileSnapshot
+  readonly #resolveNodeTypes?: RunManagerOptions['resolveNodeTypes']
+  readonly #resolveGraphResourceHandles?: RunManagerOptions['resolveGraphResourceHandles']
   readonly #runs = new Map<string, InternalRun>()
   readonly #tasks = new Map<string, Promise<void>>()
   readonly #sessionStores = new Map<string, SessionStore>()
@@ -265,6 +271,8 @@ export class RunManager {
     )
     this.#capabilityProfile = options.capabilityProfile
       ?? (() => this.#registry.runtimeDiagnostics?.().profile ?? FALLBACK_CAPABILITY_PROFILE)
+    this.#resolveNodeTypes = options.resolveNodeTypes
+    this.#resolveGraphResourceHandles = options.resolveGraphResourceHandles
   }
 
   async create(
@@ -1314,6 +1322,16 @@ export class RunManager {
     let suggestedActions: SuggestedAction[] | undefined
     if (isResolvedTaskRunRequest(run.request) && artifactManifest) {
       try {
+        const taskRequest = run.request
+        const task = taskRequest.canvasDocument.tasks.find((candidate) =>
+          candidate.id === taskRequest.taskId)
+        const allowedRootIds = new Set(taskRequest.canvasDocument.nodes.flatMap((node) => {
+          const rootId = node.payload?.rootId
+          return typeof rootId === 'string' ? [rootId] : []
+        }))
+        for (const rootId of await this.#resolveGraphResourceHandles?.(run.projectDir) ?? []) {
+          allowedRootIds.add(rootId)
+        }
         const created = await this.#projectionPlans(
           run.projectDir,
           run.request.canvasBranch,
@@ -1323,6 +1341,11 @@ export class RunManager {
           runStatus: status,
           manifest: artifactManifest,
           plugins: projectionPluginContracts(requirePinnedPluginCapabilities(run.request)),
+          ...(this.#resolveNodeTypes && task ? {
+            nodeTypes: await this.#resolveNodeTypes(run.projectDir),
+            taskAnchor: task.anchor,
+            allowedRootIds,
+          } : {}),
           ...(status === 'done' && outcome ? { outcome } : {}),
         })
         projectionPlan = created.plan

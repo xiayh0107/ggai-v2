@@ -1,4 +1,6 @@
 import type { SuggestedAction } from './suggestedActions'
+import type { CanvasEdge, CanvasNode } from '@/canvas/model'
+import type { NodeTypeSnapshot } from '@/plugins/nodeTypeContracts'
 
 export interface DaemonProjectionArtifactRef {
   runId: string
@@ -32,7 +34,19 @@ export interface DaemonProjectionPlan {
   manifestDigest: string
   outputs: DaemonProjectionOutput[]
   taskProposals: DaemonProjectionTaskProposal[]
+  graphPlan?: DaemonGraphMaterializationPlan
   warnings: string[]
+  digest: string
+}
+
+export interface DaemonGraphMaterializationPlan {
+  schemaVersion: 1
+  planId: string
+  runId: string
+  taskId: string
+  nodes: Array<{ logicalKey: string; node: CanvasNode }>
+  edges: CanvasEdge[]
+  nodeTypes: NodeTypeSnapshot[]
   digest: string
 }
 

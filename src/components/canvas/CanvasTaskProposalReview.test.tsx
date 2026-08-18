@@ -8,7 +8,8 @@ import type {
   CanvasCommandOutbox,
   CanvasEnvelope,
 } from '@/canvas/daemonClient'
-import { emptyCanvasDocument, type CanvasDocument } from '@/canvas/model'
+import { canvasOrderKey, emptyCanvasDocument, type CanvasDocument } from '@/canvas/model'
+import { BUILTIN_NODE_TYPE_DEFINITIONS } from '@/plugins/builtins/definitions'
 import {
   CanvasPersistence,
   MemoryCanvasPersistenceAdapter,
@@ -324,11 +325,11 @@ async function renderHarness(input: {
   return { store, controller, flushedCommands }
 }
 
-function emitProjection(controller: FakeController) {
+function emitProjection(controller: FakeController, projection = plan) {
   act(() => controller.callbacks?.onProjectionPlan({
     taskId: task.id,
-    runId: plan.runId,
-    plan,
+    runId: projection.runId,
+    plan: projection,
     suggestedActions: [],
   }))
 }
@@ -351,6 +352,59 @@ function setTextValue(element: HTMLInputElement | HTMLTextAreaElement, value: st
 }
 
 describe('Canvas Task proposal review integration', () => {
+  it('previews and atomically accepts a whole graph without auto-running nodes', async () => {
+    const textType = BUILTIN_NODE_TYPE_DEFINITIONS.find((type) => type.id === 'text')!
+    const graphNodeId = `canvas_node_${'d'.repeat(32)}`
+    const graphPlan = {
+      ...plan,
+      taskProposals: [],
+      graphPlan: {
+        schemaVersion: 1 as const,
+        planId,
+        runId: plan.runId,
+        taskId: task.id,
+        nodes: [{
+          logicalKey: 'result',
+          node: {
+            id: graphNodeId,
+            typeRef: { id: 'text', revision: 1, digest: 'e'.repeat(64) },
+            parentId: null,
+            orderKey: canvasOrderKey(0),
+            bounds: { w: 320, h: 200 },
+            transform: { matrix: [1, 0, 0, 1, 500, 50] as [number, number, number, number, number, number] },
+            title: 'Result', payload: {}, artifactRefs: [], homeTaskId: task.id,
+            origin: {
+              kind: 'agent-output' as const,
+              taskId: task.id, runId: plan.runId, planId, outputKey: 'result',
+            },
+          },
+        }],
+        edges: [],
+        nodeTypes: [{ ...textType, digest: 'e'.repeat(64) }],
+        digest: 'f'.repeat(64),
+      },
+    }
+    const { store, controller, flushedCommands } = await renderHarness()
+    emitProjection(controller, graphPlan)
+    expect(container?.textContent).toContain('Agent 构图预览')
+    expect(container?.textContent).toContain('接受后仍不会自动执行')
+    await act(async () => {
+      [...(container?.querySelectorAll('button') ?? [])]
+        .find((button) => button.textContent === '接受整图')?.click()
+      await vi.waitFor(() => expect(store.getSnapshot().commandSync.status).toBe('saved'))
+    })
+    expect(flushedCommands).toContainEqual({
+      type: 'MaterializeGraphPlan', plan: graphPlan.graphPlan,
+    })
+    expect(store.getSnapshot().document.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: graphNodeId }),
+    ]))
+    expect(store.getSnapshot().document.receipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'graph-materialization', planId }),
+    ]))
+    expect(controller.runTaskMock).not.toHaveBeenCalled()
+  })
+
   it('renders pending proposals inside the selected Task and derives settled keys from receipts', async () => {
     const { controller } = await renderHarness({
       document: canvasDocument('publish'),

@@ -18,6 +18,11 @@ import {
   type CustomNodeContentKind,
   type CustomNodeManifest,
 } from '../src/node-studio/model.js'
+import { BUILTIN_NODE_TYPE_DEFINITIONS } from '../src/plugins/builtins/definitions.js'
+
+export function builtinNodeTypeSnapshots(): NodeTypeSnapshot[] {
+  return BUILTIN_NODE_TYPE_DEFINITIONS.map(snapshotNodeTypeDefinition)
+}
 
 export function snapshotCustomNodeType(manifest: CustomNodeManifest): NodeTypeSnapshot {
   const definition: NodeTypeDefinition = {
@@ -45,9 +50,13 @@ export function snapshotCustomNodeType(manifest: CustomNodeManifest): NodeTypeSn
     artifactClaims: artifactClaimsForContentKind(manifest.contentKind),
     nodeContext: customNodeContextPolicy(manifest.contentKind),
   }
+  return snapshotNodeTypeDefinition(definition)
+}
+
+export function snapshotNodeTypeDefinition(definition: NodeTypeDefinition): NodeTypeSnapshot {
   const inspection = inspectNodeTypeDefinition(definition)
   if (inspection.status !== 'valid') {
-    throw new TypeError(`custom node type snapshot is invalid: ${inspection.reason}`)
+    throw new TypeError(`node type snapshot is invalid: ${inspection.reason}`)
   }
   return {
     ...inspection.definition,

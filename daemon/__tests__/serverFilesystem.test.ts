@@ -22,6 +22,14 @@ test('filesystem HTTP API keeps paths daemon-only and binds through a Canvas com
     daemon.server.listen(0, '127.0.0.1', resolve)
   })
   const baseUrl = `http://127.0.0.1:${(daemon.server.address() as AddressInfo).port}`
+  const types = await (await fetch(`${baseUrl}/canvas/node-types`)).json() as {
+    nodeTypes: Array<{ id: string; digest: string }>
+  }
+  assert.ok(types.nodeTypes.some((type) => type.id === 'compute'))
+  assert.ok(types.nodeTypes.every((type) => /^[0-9a-f]{64}$/u.test(type.digest)))
+  assert.equal((await fetch(
+    `${baseUrl}/graph-plans/plan_${'a'.repeat(64)}?projectDir=.&branch=main`,
+  )).status, 404)
   const rootResponse = await fetch(`${baseUrl}/workspace/roots?projectDir=.`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ displayName: 'Sources', path: files }),
