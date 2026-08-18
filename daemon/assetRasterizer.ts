@@ -30,6 +30,30 @@ export interface RasterizedNodeTree {
 
 /** Trusted, declarative renderer shared by Asset execution and later exporters. */
 export class DeclarativeNodeRasterizer {
+  async renderNode(input: {
+    projectDir: string
+    canvasBranch: string
+    document: CanvasDocument
+    root: CanvasNode
+  }): Promise<RasterizedNodeTree> {
+    if (input.root.typeRef.id === 'asset-assembly') return this.render(input)
+    const width = boundedDimension(Math.max(1, Math.ceil(input.root.bounds.w)), 'width')
+    const height = boundedDimension(Math.max(1, Math.ceil(input.root.bounds.h)), 'height')
+    const label = escapeXml(input.root.text || input.root.title || input.root.typeRef.id)
+      .replaceAll(/\s+/gu, ' ').slice(0, 240)
+    const svg = Buffer.from([
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
+      `<rect width="${width}" height="${height}" rx="12" fill="#f7f7f8" stroke="#d0d2d6"/>`,
+      `<text x="16" y="36" font-family="Arial,sans-serif" font-size="16" fill="#202124">${label}</text>`,
+      '</svg>',
+    ].join(''), 'utf8')
+    const png = await sharp(svg, {
+      density: 144, failOn: 'warning', limitInputPixels: MAX_INPUT_PIXELS, unlimited: false,
+    }).png({ compressionLevel: 9, adaptiveFiltering: false, palette: false, effort: 10 })
+      .toBuffer()
+    return { svg, png }
+  }
+
   async render(input: {
     projectDir: string
     canvasBranch: string
@@ -200,4 +224,8 @@ function number(value: number): string {
   if (!Number.isFinite(value)) throw new TypeError('asset geometry contains a non-finite number')
   const rounded = Math.round(value * 1_000_000) / 1_000_000
   return Object.is(rounded, -0) ? '0' : String(rounded)
+}
+
+function escapeXml(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
 }

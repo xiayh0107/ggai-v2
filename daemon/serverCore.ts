@@ -113,6 +113,10 @@ import { builtinNodeTypeSnapshots } from './nodeTypeSnapshots.js'
 import { PdfImportError, PdfImportService } from './pdfImportService.js'
 import { inspectGraphProposal } from '../src/agent/graphProposal.js'
 import {
+  PresentationExporter,
+  PresentationExportError,
+} from './presentationExporter.js'
+import {
   createHttpRouter,
   type HttpRoute,
   type HttpRouteContext,
@@ -149,6 +153,7 @@ export interface DaemonServerOptions {
   nodeExecutionService?: NodeExecutionService
   computeExecutor?: ComputeExecutor
   pdfImportService?: PdfImportService
+  presentationExporter?: PresentationExporter
 }
 
 export interface DaemonServer {
@@ -165,6 +170,7 @@ export interface DaemonServer {
   compute: ComputeExecutor
   filesystem: FilesystemService
   pdfImports: PdfImportService
+  presentations: PresentationExporter
   close(): Promise<void>
 }
 
@@ -220,6 +226,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   }
   const filesystem = new FilesystemService(metadata, canvas)
   const pdfImports = options.pdfImportService ?? new PdfImportService()
+  const presentations = options.presentationExporter ?? new PresentationExporter()
   const projectionCanvases = workspaceProjectionCommitter(versions)
   const runs = options.runManager ?? new RunManager({
     projectRoot: options.projectRoot,
@@ -297,6 +304,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
       filesystem,
       metadata,
       pdfImports,
+      presentations,
     }, domainRouter)
       .catch((error: unknown) => writeError(response, error))
   })
@@ -319,6 +327,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     compute,
     filesystem,
     pdfImports,
+    presentations,
     close() {
       closePromise ??= filesystem.close().then(() => closeDaemonServer(
         server,
@@ -359,6 +368,7 @@ interface RouteContext extends HttpRouteContext {
   filesystem: FilesystemService
   metadata: MetadataStore
   pdfImports: PdfImportService
+  presentations: PresentationExporter
 }
 
 async function route(
@@ -638,6 +648,41 @@ async function route(
       proposal: inspection.proposal,
     })
     writeJson(response, 201, { schemaVersion: 1, plan })
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/exports/pptx') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
+    const body = requestObject(await readJson(request))
+    const expected = body.mode === undefined ? ['presentationNodeId'] : ['presentationNodeId', 'mode']
+    if (!hasExactBodyKeys(body, expected)) {
+      throw new ProtocolError('PPTX export body is invalid', 'invalid_pptx_export', 400)
+    }
+    const canvas = (await context.versions.getCanvas(projectDir, branch)).canvas
+    const leasedProjectDir = await context.canvas.acquireProjectLease(projectDir)
+    const mode = body.mode === undefined
+      ? undefined
+      : body.mode === 'hybrid' || body.mode === 'editable' || body.mode === 'fidelity'
+        ? body.mode
+        : (() => { throw new ProtocolError('PPTX export mode is invalid') })()
+    const result = await context.presentations.export({
+      projectId: operationalProjectId(projectDir),
+      projectDir: leasedProjectDir,
+      canvasBranch: branch,
+      canvasRevision: canvas.revision,
+      document: canvas.document,
+      presentationNodeId: parseTaskId(requiredBodyString(body, 'presentationNodeId', 200)),
+      ...(mode ? { mode } : {}),
+    })
+    await context.metadata.appendProvenance([{
+      projectId: operationalProjectId(projectDir),
+      relationKind: 'was-generated-by',
+      subjectId: `artifact:${result.pptx.runId}:${result.pptx.artifactId}`,
+      objectId: `export:pptx:${result.runId}`,
+      attributes: { presentationNodeId: body.presentationNodeId, canvasRevision: canvas.revision },
+    }]).catch(() => undefined)
+    writeJson(response, 201, { schemaVersion: 1, export: result })
     return
   }
 
@@ -2590,6 +2635,12 @@ function writeError(response: ServerResponse, error: unknown): void {
     return
   }
   if (error instanceof PdfImportError) {
+    writeJson(response, error.status, {
+      error: { code: error.code, message: error.message },
+    })
+    return
+  }
+  if (error instanceof PresentationExportError) {
     writeJson(response, error.status, {
       error: { code: error.code, message: error.message },
     })

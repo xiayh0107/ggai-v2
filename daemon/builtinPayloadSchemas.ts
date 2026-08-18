@@ -152,6 +152,48 @@ export const BUILTIN_PAYLOAD_SCHEMAS: readonly AnySchema[] = [
     $defs: { bbox: bboxSchema() },
     additionalProperties: false,
   },
+  {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    $id: 'ggai://schema/payload/presentation',
+    type: 'object', required: ['title', 'author', 'widthPt', 'heightPt', 'mode'],
+    properties: {
+      title: { type: 'string', minLength: 1, maxLength: 240 },
+      author: { type: 'string', maxLength: 240 },
+      widthPt: { type: 'number', minimum: 72, maximum: 2_400 },
+      heightPt: { type: 'number', minimum: 72, maximum: 2_400 },
+      mode: { enum: ['hybrid', 'editable', 'fidelity'] },
+    }, additionalProperties: false,
+  },
+  {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    $id: 'ggai://schema/payload/slide',
+    type: 'object', required: ['background', 'notes'],
+    properties: {
+      background: { type: 'string', pattern: '^#[0-9A-Fa-f]{6}$' },
+      notes: { type: 'string', maxLength: 100_000 },
+    }, additionalProperties: false,
+  },
+  {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    $id: 'ggai://schema/payload/chart',
+    type: 'object', required: ['chartType', 'title', 'showLegend', 'series'],
+    properties: {
+      chartType: { enum: ['bar', 'line', 'pie', 'doughnut'] },
+      title: { type: 'string', maxLength: 240 },
+      showLegend: { type: 'boolean' },
+      series: {
+        type: 'array', maxItems: 50,
+        items: {
+          type: 'object', required: ['name', 'labels', 'values'],
+          properties: {
+            name: { type: 'string', minLength: 1, maxLength: 120 },
+            labels: { type: 'array', maxItems: 500, items: { type: 'string', maxLength: 240 } },
+            values: { type: 'array', maxItems: 500, items: { type: 'number' } },
+          }, additionalProperties: false,
+        },
+      },
+    }, additionalProperties: false,
+  },
 ]
 
 export function createBuiltinPayloadSchemaRegistry(): NodePayloadSchemaRegistry {
