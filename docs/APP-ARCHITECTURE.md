@@ -22,6 +22,10 @@ pages (route composition)
 - Browser code never reads daemon-managed paths directly. Resource and project identity always
   comes from the corresponding daemon catalog.
 
+The daemon's operational indices use the separate `MetadataStore` authority documented in
+[`OPERATIONAL-METADATA.md`](./OPERATIONAL-METADATA.md). Only its dedicated worker imports
+`node:sqlite`; Canvas semantics still flow through commands and Canvas Git.
+
 ## Node type boundary
 
 ```text

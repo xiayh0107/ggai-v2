@@ -5,7 +5,7 @@ await build({
   outfile: 'dist-cli/ggai.js',
   bundle: true,
   platform: 'node',
-  target: 'node22',
+  target: 'node24',
   format: 'esm',
   sourcemap: false,
 })

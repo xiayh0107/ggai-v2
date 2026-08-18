@@ -4,7 +4,7 @@
 
 ## 本地运行
 
-推荐 Node.js 22.22.3 + npm 10.9.8（也支持 Node.js 24 LTS / npm 11）。版本不符合 `package.json` 的建议范围时只会警告，不会阻止安装。先安装锁定依赖：
+要求 Node.js 24.19+（低于 25）与 npm 10.9+。版本不符合 `package.json` 的范围时开发安装会提示警告，daemon 启动时还会验证内置 SQLite 版本。先安装锁定依赖：
 
 ```bash
 npm ci
