@@ -33,7 +33,7 @@ afterAll(() => {
 function capabilities(initializationRequired = false): CanvasDaemonCapabilities {
   return {
     canvas: true,
-    schemaVersion: 2,
+    schemaVersion: 3,
     initializationRequired,
   }
 }

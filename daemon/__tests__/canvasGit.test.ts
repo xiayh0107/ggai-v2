@@ -46,7 +46,7 @@ function document(options: {
   everCreated?: boolean
 } = {}): CanvasDocument {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     nodes: options.nodes ?? [],
     tasks: options.tasks ?? [],
     collections: [],
@@ -59,8 +59,11 @@ function document(options: {
 function userNode(id: string, title: string): CanvasNode {
   return {
     id,
-    type: 'text',
-    frame: { x: 20, y: 30, w: 280, h: 180, z: 1 },
+    typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+    parentId: null,
+    orderKey: (1).toString(36).padStart(12, '0'),
+    bounds: { w: 280, h: 180 },
+    transform: { matrix: [1, 0, 0, 1, 20, 30] },
     title,
     text: `${title} body`,
     artifactRefs: [],
@@ -89,8 +92,8 @@ function expectProtocolError(code: CanvasGitError['code']): (error: unknown) => 
 test('checkpoints only normalized Canvas entities and provides deterministic history', async () => {
   const projectDir = await temporaryProject()
   const store = new CanvasGitStore(projectDir)
-  assert.notEqual(store.repoDir, join(projectDir, '.gg', 'canvas-state'))
-  assert.notEqual(store.worktreesDir, join(projectDir, '.gg', 'canvas-worktrees'))
+  assert.equal(store.repoDir, join(projectDir, '.gg', 'canvas'))
+  assert.equal(store.worktreesDir, join(projectDir, '.gg', 'canvas-worktrees'))
   assert.deepEqual(await store.status(), {
     state: 'uninitialized',
     initialized: false,
@@ -421,7 +424,7 @@ test('refuses dirty managed worktrees and unsafe repository symlinks', async () 
   const secondProject = await temporaryProject()
   const outside = await temporaryProject()
   await mkdir(join(secondProject, '.gg'), { recursive: true })
-  await symlink(outside, join(secondProject, '.gg', 'canvas-state-v2'))
+  await symlink(outside, join(secondProject, '.gg', 'canvas'))
   const unsafe = new CanvasGitStore(secondProject)
   await assert.rejects(
     unsafe.checkpoint({ branch: 'main', document: document() }),

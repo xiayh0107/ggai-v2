@@ -22,7 +22,6 @@ const persistenceScope: CanvasPersistenceScope = {
   daemonBaseUrl: 'http://127.0.0.1:7380',
   ...scope,
 }
-const LEGACY_PLAN_ID = `plan_${'f'.repeat(64)}`
 
 function documentWithTask(goal = 'Initial goal'): CanvasDocument {
   const document = emptyCanvasDocument()
@@ -33,37 +32,6 @@ function documentWithTask(goal = 'Initial goal'): CanvasDocument {
     anchor: { x: 100, y: 120 },
     origin: { kind: 'user' },
   })
-  return document
-}
-
-function legacyDeletedViewDocument(): CanvasDocument {
-  const document = documentWithTask('Generate an image')
-  document.nodes.push({
-    id: 'node-source',
-    type: 'text',
-    frame: { x: 20, y: 120, w: 320, h: 180, z: 1 },
-    title: 'Source',
-    text: 'Generate an image from this sentence',
-    artifactRefs: [],
-    origin: { kind: 'user' },
-  })
-  document.edges.push({
-    id: 'edge-source-task',
-    from: { kind: 'node', id: 'node-source' },
-    to: { kind: 'task', id: 'task-1' },
-    relation: 'source',
-    contextRole: 'full',
-    origin: { kind: 'user' },
-  })
-  document.receipts.push({
-    kind: 'materialization',
-    planId: LEGACY_PLAN_ID,
-    runId: 'run-legacy',
-    taskId: 'task-1',
-    outcomes: [{ outputKey: 'image', nodeId: 'node-already-deleted' }],
-    dismissedProposalKeys: [],
-  })
-  document.everCreated = true
   return document
 }
 
@@ -100,62 +68,6 @@ function deferred<Value = void>() {
 }
 
 describe('Canvas store', () => {
-  it('repairs a legacy deleted-view Task through a revisioned DeleteTask command', async () => {
-    const subjectPersistence = persistence()
-    let serverDocument = legacyDeletedViewDocument()
-    let serverRevision = 7
-    const flushedCommands: CanvasCommand[] = []
-    const client: CanvasStoreClient = {
-      getCanvas: async () => envelope(serverDocument, serverRevision),
-      flushOutbox: async (_scope, outbox) => {
-        const entries = await outbox.list(persistenceScope)
-        for (const entry of entries) {
-          flushedCommands.push(entry.command)
-          serverDocument = applyCanvasCommand(serverDocument, entry.command)
-          serverRevision += 1
-          await outbox.ack(persistenceScope, entry.mutationId)
-        }
-        return {
-          status: 'flushed',
-          acknowledged: entries.length,
-          envelope: envelope(serverDocument, serverRevision),
-        }
-      },
-    }
-    const store = new CanvasStore({
-      daemonBaseUrl: persistenceScope.daemonBaseUrl,
-      scope,
-      persistence: subjectPersistence,
-      client,
-      mutationId: () => 'repair-legacy-deleted-view',
-    })
-
-    await store.load()
-
-    expect(store.getSnapshot().document).toMatchObject({
-      tasks: [],
-      nodes: [{ id: 'node-source' }],
-      edges: [],
-      receipts: [{
-        kind: 'materialization',
-        taskId: 'task-1',
-        outcomes: [{ nodeId: 'node-already-deleted' }],
-      }],
-    })
-
-    await store.flushCommands()
-
-    expect(flushedCommands).toEqual([{ type: 'DeleteTask', taskId: 'task-1' }])
-    expect(store.getSnapshot()).toMatchObject({
-      envelope: {
-        revision: 8,
-        document: { tasks: [], edges: [], receipts: [{ taskId: 'task-1' }] },
-      },
-      commandSync: { status: 'saved', pendingCount: 0 },
-    })
-    expect(await subjectPersistence.list(persistenceScope)).toEqual([])
-  })
-
   it('hydrates daemon data, branch view state, and a durable optimistic outbox', async () => {
     const subjectPersistence = persistence()
     const storedView: CanvasViewState = {
@@ -338,8 +250,11 @@ describe('Canvas store', () => {
     const materialized = documentWithTask('Materialized goal')
     materialized.nodes.push({
       id: 'node-1',
-      type: 'text',
-      frame: { x: 420, y: 120, w: 320, h: 180, z: 1 },
+      typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (1).toString(36).padStart(12, '0'),
+      bounds: { w: 320, h: 180 },
+      transform: { matrix: [1, 0, 0, 1, 420, 120] },
       title: 'Materialized output',
       artifactRefs: [],
       homeTaskId: 'task-1',

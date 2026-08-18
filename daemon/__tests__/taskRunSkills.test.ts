@@ -54,9 +54,12 @@ test('conflicting participating Skill revisions fail before the resolver is quer
   const document = canvas([
     {
       id: 'node-a',
-      type: 'text',
+      typeRef: { id: 'text', revision: 1, digest: '0'.repeat(64) },
+      parentId: null,
+      orderKey: '000000000001',
+      bounds: { w: 320, h: 180 },
+      transform: { matrix: [1, 0, 0, 1, 0, 0] },
       title: 'A',
-      frame: { x: 0, y: 0, w: 320, h: 180, z: 1 },
       artifactRefs: [],
       homeTaskId: INTENT.taskId,
       origin: { kind: 'user' },
@@ -67,9 +70,12 @@ test('conflicting participating Skill revisions fail before the resolver is quer
     },
     {
       id: 'node-b',
-      type: 'text',
+      typeRef: { id: 'text', revision: 1, digest: '0'.repeat(64) },
+      parentId: null,
+      orderKey: '000000000002',
+      bounds: { w: 320, h: 180 },
+      transform: { matrix: [1, 0, 0, 1, 400, 0] },
       title: 'B',
-      frame: { x: 400, y: 0, w: 320, h: 180, z: 2 },
       artifactRefs: [],
       homeTaskId: INTENT.taskId,
       origin: { kind: 'user' },
@@ -101,7 +107,7 @@ test('conflicting participating Skill revisions fail before the resolver is quer
 
 function canvas(nodes: CanvasDocument['nodes']): CanvasDocument {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     tasks: [{
       id: INTENT.taskId,
       title: 'Skill task',

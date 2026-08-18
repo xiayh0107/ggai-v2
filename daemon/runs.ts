@@ -1458,7 +1458,7 @@ export class RunManager {
   #taskSessions(projectDir: string): TaskSessionStore {
     let store = this.#taskSessionStores.get(projectDir)
     if (!store) {
-      const filePath = path.join(projectDir, '.gg', 'runtime', 'task-sessions-v2.json')
+      const filePath = path.join(projectDir, '.gg', 'runtime', 'task-sessions.json')
       store = new TaskSessionStore(filePath, {
         validatePath: () => assertTaskSessionStorePath(projectDir),
       })
@@ -1865,7 +1865,7 @@ async function assertSessionStorePath(projectDir: string): Promise<void> {
 
 async function assertTaskSessionStorePath(projectDir: string): Promise<void> {
   const runtimeDir = path.join(projectDir, '.gg', 'runtime')
-  const expected = path.join(runtimeDir, 'task-sessions-v2.json')
+  const expected = path.join(runtimeDir, 'task-sessions.json')
   const [canonicalProject, canonicalRuntime, canonicalExpected] = await Promise.all([
     canonicalizePotentialPath(projectDir),
     canonicalizePotentialPath(runtimeDir),

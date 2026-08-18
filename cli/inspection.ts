@@ -1,4 +1,4 @@
-import type { CanvasDocument, CanvasEntityRef } from '../src/canvas/model.js'
+import { canvasNodeFrame, type CanvasDocument, type CanvasEntityRef } from '../src/canvas/model.js'
 import type { WorkspaceProjectClient } from '../src/workspace/projectClient.js'
 import type { HeadlessCanvasClient } from './canvasClient.js'
 import { CliCommandError } from './output.js'
@@ -61,14 +61,22 @@ export async function inspectNode(
     revision: canvas.revision,
     node: {
       id: node.id,
-      type: node.type,
+      type: node.typeRef.id,
       title: node.title,
       text: node.text ?? null,
       payload: node.payload ?? null,
       homeTask: task ? { id: task.id, title: task.title } : null,
       origin: node.origin,
       artifacts,
-      ...(request.debugLayout ? { frame: node.frame } : {}),
+      ...(request.debugLayout ? {
+        layout: {
+          parentId: node.parentId,
+          orderKey: node.orderKey,
+          bounds: node.bounds,
+          transform: node.transform,
+          rootFrame: node.parentId === null ? canvasNodeFrame(node) : null,
+        },
+      } : {}),
     },
   }
 }
@@ -80,13 +88,13 @@ export function canvasTreeText(input: Awaited<ReturnType<typeof inspectCanvas>>)
     const outputs = input.document.nodes.filter((node) => node.homeTaskId === task.id)
     if (outputs.length === 0) lines.push('│  └─ no outputs')
     for (const node of outputs) {
-      lines.push(`│  └─ ${node.type} · ${node.title}  [${node.id}] · ${node.artifactRefs.length} artifact(s)`)
+      lines.push(`│  └─ ${node.typeRef.id} · ${node.title}  [${node.id}] · ${node.artifactRefs.length} artifact(s)`)
     }
   }
-  const topLevel = input.document.nodes.filter((node) => !node.homeTaskId)
+  const topLevel = input.document.nodes.filter((node) => node.parentId === null && !node.homeTaskId)
   if (topLevel.length > 0) {
     lines.push('', 'Top-level Nodes')
-    for (const node of topLevel) lines.push(`├─ ${node.type} · ${node.title}  [${node.id}]`)
+    for (const node of topLevel) lines.push(`├─ ${node.typeRef.id} · ${node.title}  [${node.id}]`)
   }
   if (input.document.collections.length > 0) {
     lines.push('', 'Collections')
@@ -107,7 +115,7 @@ export function canvasGraph(
 ): string | { entities: Array<{ ref: CanvasEntityRef; label: string }>; edges: CanvasDocument['edges'] } {
   const entities = [
     ...document.tasks.map((task) => ({ ref: { kind: 'task' as const, id: task.id }, label: `Task · ${task.title}` })),
-    ...document.nodes.map((node) => ({ ref: { kind: 'node' as const, id: node.id }, label: `${node.type} · ${node.title}` })),
+    ...document.nodes.map((node) => ({ ref: { kind: 'node' as const, id: node.id }, label: `${node.typeRef.id} · ${node.title}` })),
   ]
   if (format === 'json') return { entities, edges: document.edges }
   const key = (ref: CanvasEntityRef) => `${ref.kind}:${ref.id}`
@@ -156,8 +164,17 @@ export function nodeText(input: Awaited<ReturnType<typeof inspectNode>>): string
       )
     }
   }
-  const frame = 'frame' in node ? node.frame : undefined
-  if (frame) lines.push('', `  frame:   x=${frame.x} y=${frame.y} w=${frame.w} h=${frame.h} z=${frame.z}`)
+  const layout = 'layout' in node ? node.layout : undefined
+  if (layout) {
+    const [a, b, c, d, e, f] = layout.transform.matrix
+    lines.push(
+      '',
+      `  parent:  ${layout.parentId ?? 'root'}`,
+      `  order:   ${layout.orderKey}`,
+      `  bounds:  w=${layout.bounds.w} h=${layout.bounds.h}`,
+      `  matrix:  [${a}, ${b}, ${c}, ${d}, ${e}, ${f}]`,
+    )
+  }
   return lines.join('\n')
 }
 

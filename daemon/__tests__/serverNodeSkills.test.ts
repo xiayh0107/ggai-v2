@@ -149,8 +149,11 @@ test('accepted Runs pin and expose effective type plus instance Node skills', as
     type: 'CreateNode',
     node: {
       id: 'node-skilled-image',
-      type: 'image',
-      frame: { x: 100, y: 100, w: 320, h: 320, z: 1 },
+      typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (1).toString(36).padStart(12, '0'),
+      bounds: { w: 320, h: 320 },
+      transform: { matrix: [1, 0, 0, 1, 100, 100] },
       title: 'Campaign image',
       artifactRefs: [],
       homeTaskId: 'task-skilled-image',

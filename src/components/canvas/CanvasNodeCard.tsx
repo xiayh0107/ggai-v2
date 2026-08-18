@@ -15,7 +15,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerE
 import { runArtifactUrl } from '@/agent/config'
 import { loadArtifactProjection } from '@/agent/artifactProjection'
 import { nodeHasVisibleContent } from '@/canvas/contextComposer'
-import type { CanvasNode } from '@/canvas/model'
+import { canvasNodeFrame, type CanvasNode } from '@/canvas/model'
 import type { CanvasBounds, CanvasTaskStatus } from '@/canvas/selectors'
 import {
   artifactViewerKindForMediaType,
@@ -80,7 +80,7 @@ export interface CanvasNodeCardProps {
 export default function CanvasNodeCard({
   node,
   pluginOverride,
-  frame = node.frame,
+  frame = canvasNodeFrame(node),
   projectDir,
   selected,
   compoundSelected = false,
@@ -97,7 +97,7 @@ export default function CanvasNodeCard({
   onMenuAction,
   registerFocusable,
 }: CanvasNodeCardProps) {
-  const plugin = pluginOverride ?? getPlugin(node.type)
+  const plugin = pluginOverride ?? getPlugin(node.typeRef.id)
   const Icon = nodeTypeIcon(plugin)
   const label = `${plugin.label}节点：${node.title || plugin.label}`
   const showActivityStrip = !compact && (
@@ -175,7 +175,7 @@ export default function CanvasNodeCard({
       data-selected={selected ? 'true' : 'false'}
       data-compound-selected={compoundSelected ? 'true' : 'false'}
       frame={frame}
-      zIndex={node.frame.z + 10}
+      zIndex={canvasNodeFrame(node).z + 10}
       pointerEvents="auto"
       selected={selected}
       compoundSelected={compoundSelected}
@@ -348,7 +348,7 @@ function CanvasArtifactRefLinks({
   node: CanvasNode
   projectDir: string
 }) {
-  const plugin = getPlugin(node.type)
+  const plugin = getPlugin(node.typeRef.id)
   const openViewer = useOpenCanvasArtifactViewer()
   const [pendingKey, setPendingKey] = useState<string | null>(null)
   const aliveRef = useRef(true)

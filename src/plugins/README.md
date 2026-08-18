@@ -97,7 +97,7 @@ matcher 各最多 64 个；`priority` 必须是 `-1000..1000` 的安全整数。
 
 浏览器通过 `PUT /plugin-capabilities` 注册 claims；daemon 合并不可覆盖的内置 registry、受信
 runtime contributions 与 browser-community claims，规范化为带来源的 v3 并按 digest 保存到
-`.gg/runtime/plugin-capabilities-v3/<digest>.json`。Run acceptance 会在 reservation 内重新读取
+`.gg/runtime/plugin-capabilities/<digest>.json`。Run acceptance 会在 reservation 内重新读取
 runtime contributions；变化会要求调用方重试，接受后的 Run 只读自身快照。历史 v2 不进入新 Run，
 仅用于 crash recovery。浏览器只在 daemon 用 manifest 校验 `{ runId, artifactId }` 后，才把产物交给平台模板。
 普通 Node 内容始终由 `NodeTemplateView` 按 `ui.template` 渲染；插件、社区包与 Agent 候选都

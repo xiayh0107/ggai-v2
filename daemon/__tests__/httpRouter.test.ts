@@ -31,7 +31,7 @@ test('bounded HTTP routes preserve health and expose runtime diagnostics', async
       pluginArtifactCapabilities: true,
       nodeSkills: true,
     },
-    canvas: { schemaVersion: 2, initializationRequired: false },
+    canvas: { schemaVersion: 3, initializationRequired: false },
     projectRoot: root,
   })
 

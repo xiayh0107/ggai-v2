@@ -11,11 +11,10 @@
 | 当前 Canvas | `.gg/runtime/canvas/<branch-hash>/snapshot.json` | 当前 `CanvasDocument`、revision、checkpoint 锚点及 daemon 内部 mutation ledger | 是 |
 | 语义 revision | `.gg/runtime/canvas/<branch-hash>/revisions/<revision>.json` | 带 document digest 的不可变历史基底，供显式冲突恢复使用 | 是，限 command 历史 |
 | 运行记录 | `.gg/runtime/runs/<runId>/events.jsonl`、`events.idx`、`summary.json` | durable SSE 事件、终态 close、分页索引，以及固化实际 prompt/baseRevision 的 Run 摘要 | 是 |
-| Task 会话 | `.gg/runtime/task-sessions-v2.json` | `canvasBranch + taskId + agentId` 到 Agent session 的映射 | 是 |
+| Task 会话 | `.gg/runtime/task-sessions.json` | `canvasBranch + taskId + agentId` 到 Agent session 的映射 | 是 |
 | ProjectionPlan | `.gg/runtime/projection-plans/<branch-hash>.json` | daemon 生成的 pending/dismissed 可信计划 | 是 |
-| 插件能力 v3 | `.gg/runtime/plugin-capabilities-v3/<digest>.json` | 新 Run 接受时固定的、带 provenance 的 projection capability 快照 | 是 |
-| 历史插件能力 v2 | `.gg/runtime/plugin-capabilities-v2/<digest>.json` | 仅供旧 Run crash recovery 读取 | 是，只读 |
-| Canvas 历史 | `.gg/canvas-state-v2/`、`.gg/canvas-worktrees-v2/` | 规范化 Task/Node/Collection/Edge/receipt Git checkpoint | 历史事实源 |
+| 插件能力 | `.gg/runtime/plugin-capabilities/<digest>.json` | Run 接受时固定的、带 provenance 的 capability 快照 | 是 |
+| Canvas 历史 | `.gg/canvas/`、`.gg/canvas-worktrees/` | 规范化 Task/Node/Collection/Edge/receipt Git checkpoint | 历史事实源 |
 | Artifact | `artifacts/.branches/<branch-hash>/<runId>/files/<relative-path>` | Run-owned 不可变文件 | 是 |
 
 `CanvasDocument` 只保存 Task、Node、Collection、typed Edge、materialization/proposal receipt 和 `everCreated`。active Run、SSE cursor、日志缓存、视图状态、outbox、mutation ledger、artifact bytes 与原始 JSONL 不进入 Canvas Git。
@@ -118,7 +117,7 @@ meta.json
 
 | 接口 | 用途 |
 | --- | --- |
-| `GET /health` | 确认 `canvas`、schema 2 与 reset 状态 |
+| `GET /health` | 确认 `canvas`、schema 3 与 reset 状态 |
 | `GET /canvas` | 加载指定分支 envelope |
 | `POST /canvas/commands` | CAS 提交一个 command |
 | `POST /canvas/conflicts` | 从 daemon-owned revision 与 outbox journal 保存冲突分支 |

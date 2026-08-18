@@ -143,7 +143,7 @@ test('auto-materializes the latest revision once and preserves auxiliary tray ou
   })
 
   assert.equal(first.revision, 2)
-  assert.deepEqual(first.document.nodes.map((node) => node.type), ['code', 'image'])
+  assert.deepEqual(first.document.nodes.map((node) => node.typeRef.id), ['code', 'image'])
   assert.equal(first.document.edges.filter((edge) => edge.relation === 'produced').length, 2)
   assert.equal(first.document.edges.filter((edge) => edge.relation === 'derived').length, 1)
   assert.equal(first.document.receipts[0]?.kind, 'materialization')

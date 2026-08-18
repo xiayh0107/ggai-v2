@@ -19,7 +19,7 @@ const OUTPUT_ARTIFACT_B = `artifact_${'b'.repeat(64)}`
 
 function documentFixture(): CanvasDocument {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     tasks: [
       {
         id: 'task-b',
@@ -45,8 +45,11 @@ function documentFixture(): CanvasDocument {
     nodes: [
       {
         id: 'node-b',
-        type: 'image',
-        frame: { x: 40, y: 140, w: 360, h: 280, z: 2 },
+        typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+        parentId: null,
+        orderKey: (2).toString(36).padStart(12, '0'),
+        bounds: { w: 360, h: 280 },
+        transform: { matrix: [1, 0, 0, 1, 40, 140] },
         title: 'Chart',
         payload: {
           presentation: { caption: 'Vehicle weight versus economy' },
@@ -67,8 +70,11 @@ function documentFixture(): CanvasDocument {
       },
       {
         id: 'node-a',
-        type: 'text',
-        frame: { x: -300, y: 40, w: 280, h: 180, z: 1 },
+        typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+        parentId: null,
+        orderKey: (1).toString(36).padStart(12, '0'),
+        bounds: { w: 280, h: 180 },
+        transform: { matrix: [1, 0, 0, 1, -300, 40] },
         title: 'Brief',
         text: 'Use the mtcars dataset',
         artifactRefs: [],
@@ -161,7 +167,7 @@ test('encodes and reads a deterministic normalized Canvas Git tree', () => {
   )
   assert.deepEqual(JSON.parse(entries.find((entry) => entry.path === 'meta.json')!.content), {
     everCreated: true,
-    schemaVersion: 2,
+    schemaVersion: 3,
   })
   assert.equal(entries.some((entry) => /(?:runs|runtime|artifacts|selection|session)/u.test(entry.path)), false)
   assert.ok(entries.every((entry) => entry.path === '.gitignore'
@@ -189,7 +195,7 @@ test('encodes and reads a deterministic normalized Canvas Git tree', () => {
 
 test('represents an empty canvas with only the managed root files', () => {
   const document: CanvasDocument = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     tasks: [],
     nodes: [],
     collections: [],

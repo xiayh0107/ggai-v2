@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -60,4 +60,18 @@ test('node definition catalog refuses a workspace parent symlink', async (t) => 
     id: '@local/unsafe-parent',
   }), /symlink/u)
   await assert.rejects(() => catalog.list(), /symlink/u)
+})
+
+test('node definition catalog clears schema-1 definitions instead of migrating them', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ggai-node-studio-reset-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const catalog = new NodeDefinitionCatalog(root)
+  await mkdir(catalog.workspaceDir, { recursive: true })
+  await writeFile(catalog.filePath, `${JSON.stringify({
+    schemaVersion: 1,
+    definitions: [{ id: '@local/old' }],
+  })}\n`)
+
+  assert.deepEqual(await catalog.list(), [])
+  await assert.rejects(access(catalog.filePath), /ENOENT/u)
 })

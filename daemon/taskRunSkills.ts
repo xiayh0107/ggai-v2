@@ -55,14 +55,14 @@ export async function resolveRunIntentSkills(
   }
 
   const typeBindings = await bindings.typeBindings(
-    [...new Set([...participation.values()].map(({ node }) => node.type))],
+    [...new Set([...participation.values()].map(({ node }) => node.typeRef.id))],
   )
   const requested = new Map<string, {
     ref: ReturnType<typeof effectiveNodeSkillRefs>[number]
     sources: ResolvedSkillSource[]
   }>()
   for (const { node, roles } of participation.values()) {
-    const refs = effectiveNodeSkillRefs(typeBindings.get(node.type) ?? [], node.skillBindings)
+    const refs = effectiveNodeSkillRefs(typeBindings.get(node.typeRef.id) ?? [], node.skillBindings)
     for (const ref of refs) {
       const existing = requested.get(ref.skillId)
       if (existing && (existing.ref.revision !== ref.revision
@@ -76,7 +76,7 @@ export async function resolveRunIntentSkills(
       const entry = existing ?? { ref, sources: [] }
       for (const role of roles) {
         if (!entry.sources.some((source) => source.nodeId === node.id && source.role === role)) {
-          entry.sources.push({ kind: 'node', nodeId: node.id, nodeType: node.type, role })
+          entry.sources.push({ kind: 'node', nodeId: node.id, nodeType: node.typeRef.id, role })
         }
       }
       requested.set(ref.skillId, entry)

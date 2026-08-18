@@ -3,7 +3,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { CanvasArtifactViewerRequest } from '@/canvas/artifactViewerContext'
-import type { CanvasNode } from '@/canvas/model'
+import { canvasNodeTypeRef, type CanvasNode } from '@/canvas/model'
 import { registerBuiltinPlugins } from '@/plugins/builtins'
 import CanvasArtifactViewer from './CanvasArtifactViewer'
 
@@ -72,8 +72,11 @@ async function renderViewer(
 function textNodeFixture(payload?: Record<string, unknown>): CanvasNode {
   return {
     id: 'node-1',
-    type: 'text',
-    frame: { x: 0, y: 0, w: 320, h: 200, z: 1 },
+    typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+    parentId: null,
+    orderKey: (1).toString(36).padStart(12, '0'),
+    bounds: { w: 320, h: 200 },
+    transform: { matrix: [1, 0, 0, 1, 0, 0] },
     title: '振奋之言',
     artifactRefs: [],
     origin: { kind: 'user' },
@@ -175,7 +178,7 @@ describe('Canvas artifact viewer', () => {
     const fetchMock = vi.fn(async () => new Response(''))
     vi.stubGlobal('fetch', fetchMock)
     const onNodeAction = vi.fn()
-    const imageNode: CanvasNode = { ...textNodeFixture(), type: 'image' }
+    const imageNode: CanvasNode = { ...textNodeFixture(), typeRef: canvasNodeTypeRef('image') }
     const { host } = await renderViewer(viewerRequest('image'), vi.fn(), {
       node: imageNode,
       nodeActions: ['生成图像', '更换风格', '生成变体', '提高分辨率'],

@@ -20,7 +20,7 @@ import {
   Wrench,
 } from 'lucide-react'
 import { DAEMON_URL } from '@/agent/config'
-import type { CanvasNode } from '@/canvas/model'
+import { canvasNodeGeometry, canvasNodeTypeRef, type CanvasNode } from '@/canvas/model'
 import type { CanvasTaskStatus } from '@/canvas/selectors'
 import CanvasNodeCard from '@/components/canvas/CanvasNodeCard'
 import { NodeDefinitionClient, type NodeDefinitionApi } from '@/node-studio/client'
@@ -527,8 +527,8 @@ function NodeStudioPreview({ manifest, state }: { manifest: CustomNodeManifest; 
   const plugin = useMemo(() => createCustomNodeType(manifest), [manifest])
   const previewNode = useMemo<CanvasNode>(() => ({
     id: 'node-studio-preview',
-    type: plugin.id,
-    frame: { x: 0, y: 0, w: manifest.defaultWidth, h: 300, z: 0 },
+    typeRef: canvasNodeTypeRef(plugin.id, Math.max(1, plugin.revision)),
+    ...canvasNodeGeometry({ x: 0, y: 0, w: manifest.defaultWidth, h: 300, z: 0 }),
     title: manifest.sampleTitle,
     ...(state === 'content' ? { text: manifest.sampleContent } : {}),
     payload: {},
@@ -542,7 +542,7 @@ function NodeStudioPreview({ manifest, state }: { manifest: CustomNodeManifest; 
           outputKey: 'preview',
         }
       : { kind: 'user' },
-  }), [manifest.defaultWidth, manifest.sampleContent, manifest.sampleTitle, plugin.id, state])
+  }), [manifest.defaultWidth, manifest.sampleContent, manifest.sampleTitle, plugin.id, plugin.revision, state])
   const taskStatus = useMemo<CanvasTaskStatus | undefined>(() => {
     if (state === 'running') {
       return { kind: 'generating', label: '生成中', live: 'off' }

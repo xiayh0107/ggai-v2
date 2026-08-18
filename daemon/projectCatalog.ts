@@ -6,6 +6,7 @@ import path from 'node:path'
 import {
   blankProjectCanvasInitializationMarker,
   assertCanvasReady,
+  ensureCanvasReady,
 } from './canvasInitialization.js'
 import {
   parseCanvasEnvelopeSnapshot,
@@ -384,7 +385,7 @@ export class ProjectCatalog {
   async #requireReadyProjectDirectory(record: ProjectCatalogRecord): Promise<string> {
     const expected = path.join(this.projectRoot, ...record.projectDir.split('/'))
     await assertRealDirectory(expected, this.projectsDir)
-    const marker = await assertCanvasReady(expected)
+    const marker = await ensureCanvasReady(expected, record.id)
     assertManagedProjectMarker(record.id, marker)
     return expected
   }
@@ -730,7 +731,7 @@ function assertManagedProjectMarker(
   if (
     !marker
     || !('initializedFrom' in marker)
-    || marker.initializedFrom !== 'blank-project'
+    || (marker.initializedFrom !== 'blank-project' && marker.initializedFrom !== 'schema-reset')
     || marker.projectId !== id
   ) {
     throw new TypeError('Managed project marker identity does not match the catalog')

@@ -43,9 +43,9 @@ export default function CanvasWorkbenchNodes({
     return [...nodes]
       .filter((node) => {
         if (!normalized) return true
-        const plugin = getPlugin(node.type)
+        const plugin = getPlugin(node.typeRef.id)
         const task = node.homeTaskId ? taskById.get(node.homeTaskId) : undefined
-        return [node.title, node.type, plugin.label, task?.title ?? '']
+        return [node.title, node.typeRef.id, plugin.label, task?.title ?? '']
           .some((value) => value.toLocaleLowerCase('zh-CN').includes(normalized))
       })
       .sort((left, right) => left.title.localeCompare(right.title, 'zh-CN'))
@@ -76,7 +76,7 @@ export default function CanvasWorkbenchNodes({
                   <div className="min-w-0">
                     <p className="text-[10px] text-gg-muted">当前节点</p>
                     <p className="mt-0.5 truncate text-[12px] font-medium">
-                      {getPlugin(selectedNode.type).label}
+                      {getPlugin(selectedNode.typeRef.id).label}
                     </p>
                   </div>
                   <span className="rounded-full bg-gg-subtle px-2 py-1 text-[9.5px] text-gg-muted">
@@ -153,7 +153,7 @@ export default function CanvasWorkbenchNodes({
       )}
       <div className="space-y-1" role="list" aria-label="画布节点">
         {visibleNodes.map((node) => {
-          const plugin = getPlugin(node.type)
+          const plugin = getPlugin(node.typeRef.id)
           const Icon = nodeTypeIcon(plugin)
           const task = node.homeTaskId ? taskById.get(node.homeTaskId) : undefined
           const taskNodes = node.homeTaskId

@@ -5,6 +5,7 @@ import {
   taskContextArtifactRefs,
 } from './taskContext'
 import {
+  canvasNodeTypeRef,
   emptyCanvasDocument,
   type CanvasDocument,
   type CanvasEdgeContextRole,
@@ -27,8 +28,11 @@ function task(id: string, goal = `${id} goal`): CanvasTask {
 function node(id: string): CanvasNode {
   return {
     id,
-    type: 'code',
-    frame: { x: 0, y: 0, w: 320, h: 180, z: 1 },
+    typeRef: { id: 'code', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+    parentId: null,
+    orderKey: (1).toString(36).padStart(12, '0'),
+    bounds: { w: 320, h: 180 },
+    transform: { matrix: [1, 0, 0, 1, 0, 0] },
     title: `${id} title`,
     text: `${id} secret text`,
     payload: { source: id, hidden: true },
@@ -66,13 +70,13 @@ describe('Task Context', () => {
   it('declares target output-slot Node types without exposing renderer or layout state', () => {
     const document = documentWithTarget()
     const emptyImage = node('target-image')
-    emptyImage.type = 'image'
+    emptyImage.typeRef = canvasNodeTypeRef('image')
     emptyImage.homeTaskId = 'target'
     delete emptyImage.text
     emptyImage.payload = {}
     emptyImage.artifactRefs = []
     const existingText = node('target-text')
-    existingText.type = 'text'
+    existingText.typeRef = canvasNodeTypeRef('text')
     existingText.homeTaskId = 'target'
     document.nodes.push(emptyImage, existingText)
 
@@ -108,7 +112,7 @@ describe('Task Context', () => {
   it('preserves an installed custom Node runtime id as a target capability', () => {
     const document = documentWithTarget()
     const customSlot = node('target-custom')
-    customSlot.type = '@local/research-card@4'
+    customSlot.typeRef = canvasNodeTypeRef('@local/research-card@4', 4)
     customSlot.homeTaskId = 'target'
     delete customSlot.text
     customSlot.payload = {}

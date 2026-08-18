@@ -79,10 +79,9 @@ export interface CanvasPersistenceOptions<Command extends CanvasCommandLike> {
   decodeCommand?: (value: unknown) => Command | null
 }
 
-// Published browser storage identity. Keep the name stable while product code
-// evolves; renaming it would either orphan the outbox or collide with the
-// retired `ggai-canvas` database, whose stores have a different schema.
-const DATABASE_NAME = 'ggai-canvas-v2'
+const DATABASE_NAME = 'ggai-canvas'
+const DATABASE_VERSION = 3
+const RETIRED_DATABASE_NAME = 'ggai-canvas-v2'
 const VIEW_STORE = 'branch-view-state'
 const OUTBOX_STORE = 'command-outbox'
 const MAX_ID_LENGTH = 256
@@ -433,17 +432,22 @@ function openDatabase(): Promise<IDBDatabase> {
 }
 
 /**
- * Opens whichever published database version already exists. The Canvas stores
- * are additive, so pinning an older version would make a rolling deployment
- * fail before it can read a newer compatible database.
+ * Canvas v3 deliberately clears pre-v3 browser state. It never replays an old
+ * outbox against the destructive daemon cutover.
  */
 export function openCanvasPersistenceDatabase(
   indexedDb: IDBFactory,
 ): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDb.open(DATABASE_NAME)
+    if (typeof indexedDb.deleteDatabase === 'function') {
+      indexedDb.deleteDatabase(RETIRED_DATABASE_NAME)
+    }
+    const request = indexedDb.open(DATABASE_NAME, DATABASE_VERSION)
     request.addEventListener('upgradeneeded', () => {
       const database = request.result
+      if (request.transaction?.db.version === DATABASE_VERSION) {
+        for (const store of [...database.objectStoreNames]) database.deleteObjectStore(store)
+      }
       if (!database.objectStoreNames.contains(VIEW_STORE)) {
         database.createObjectStore(VIEW_STORE, { keyPath: 'key' })
       }
@@ -500,17 +504,13 @@ function decodeOutboxEntry<Command extends CanvasCommandLike>(
   decodeCommand: (value: unknown) => Command | null,
 ): CanvasOutboxEntry<Command> | null {
   if (!isRecord(value)) return null
-  const legacy = hasExactKeys(
-    value,
-    ['branch', 'baseRevision', 'mutationId', 'command', 'createdAt'],
-  )
   const current = hasExactKeys(
     value,
     ['branch', 'baseRevision', 'initialBaseRevision', 'mutationId', 'command', 'createdAt'],
   )
-  if (!legacy && !current) return null
+  if (!current) return null
   const baseRevision = value.baseRevision
-  const initialBaseRevision = current ? value.initialBaseRevision : baseRevision
+  const initialBaseRevision = value.initialBaseRevision
   if (value.branch !== branch
     || !isRevision(baseRevision)
     || !isRevision(initialBaseRevision)

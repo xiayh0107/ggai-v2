@@ -10,7 +10,6 @@ import type {
   CanvasSaveConflictBranchResult,
 } from './daemonClient'
 import { emptyCanvasDocument, type CanvasDocument } from './model'
-import { legacyDeletedViewTaskIds } from './legacyRepairs'
 import {
   CanvasPersistence,
   type CanvasOutboxEntry,
@@ -589,7 +588,6 @@ export class CanvasStore {
           conflict: null,
         },
       }))
-      await this.#queueLegacyDeletedViewRepairs()
       if (entries.length > 0) void this.flushCommands()
     } catch (error) {
       if (backgroundRefresh) {
@@ -603,26 +601,6 @@ export class CanvasStore {
         ...state,
         hydration: { status: 'error', error: errorMessage(error) },
       }))
-    }
-  }
-
-  async #queueLegacyDeletedViewRepairs(): Promise<void> {
-    const taskIds = legacyDeletedViewTaskIds(this.#state.document)
-    for (const taskId of taskIds) {
-      try {
-        await this.dispatchCommand({ type: 'DeleteTask', taskId })
-      } catch (error) {
-        this.#setState((state) => ({
-          ...state,
-          commandSync: {
-            status: 'error',
-            pendingCount: state.commandSync.pendingCount,
-            error: `旧版节点删除残影修复失败：${errorMessage(error)}`,
-            conflict: null,
-          },
-        }))
-        return
-      }
     }
   }
 

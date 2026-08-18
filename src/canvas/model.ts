@@ -4,7 +4,7 @@ import {
 } from '../skills/contracts.js'
 
 export type CanvasEntityRef =
-  | { kind: 'node'; id: string }
+  | { kind: 'node'; id: string; port?: string }
   | { kind: 'task'; id: string }
 
 export interface CanvasPoint {
@@ -16,6 +16,21 @@ export interface CanvasFrame extends CanvasPoint {
   w: number
   h: number
   z: number
+}
+
+export interface CanvasNodeTypeRef {
+  id: string
+  revision: number
+  digest: string
+}
+
+export interface CanvasNodeBounds {
+  w: number
+  h: number
+}
+
+export interface CanvasNodeTransform {
+  matrix: [number, number, number, number, number, number]
 }
 
 export type CanvasTaskOrigin =
@@ -57,14 +72,21 @@ export type CanvasNodeOrigin =
 
 export interface CanvasNode {
   id: string
-  type: string
-  frame: CanvasFrame
+  typeRef: CanvasNodeTypeRef
+  parentId: string | null
+  orderKey: string
+  bounds: CanvasNodeBounds
+  transform: CanvasNodeTransform
+  coordinateSpace?: { unit: 'px' | 'pt' | 'in' | 'normalized'; dpi?: number }
   title: string
   text?: string
   payload?: Record<string, unknown>
   artifactRefs: CanvasArtifactRef[]
   /** Optional instance-level task capabilities; absent means inherit the Node type defaults. */
   skillBindings?: NodeSkillBindings
+  selectedExecutionId?: string
+  bindingId?: string
+  instanceRef?: { definitionId: string; revision: number; digest: string }
   homeTaskId?: string
   collectionId?: string
   origin: CanvasNodeOrigin
@@ -85,6 +107,7 @@ export type CanvasEdgeRelation =
   | 'compares'
   | 'replaces'
   | 'depends-on'
+  | 'data'
 
 export type CanvasEdgeContextRole = 'full' | 'summary' | 'none'
 
@@ -102,6 +125,7 @@ export interface CanvasEdge {
   to: CanvasEntityRef
   relation: CanvasEdgeRelation
   contextRole: CanvasEdgeContextRole
+  orderKey?: string
   origin: CanvasEdgeOrigin
 }
 
@@ -136,7 +160,7 @@ export type CanvasReceipt =
   | CanvasProposalAcceptanceReceipt
 
 export interface CanvasDocument {
-  schemaVersion: 2
+  schemaVersion: 3
   nodes: CanvasNode[]
   tasks: CanvasTask[]
   collections: CanvasCollection[]
@@ -165,8 +189,8 @@ const TYPE_PATTERN = /^@?[A-Za-z0-9][A-Za-z0-9._:@/-]*$/u
 const PLAN_ID_PATTERN = /^plan_[0-9a-f]{64}$/u
 const ARTIFACT_ID_PATTERN = /^artifact_[0-9a-f]{64}$/u
 const RESERVED_CANVAS_ID_PATTERN = /^canvas_(?:node|task|collection|edge)_[0-9a-f]{32}$/u
+const RETIRED_CANVAS_ID_PATTERN = /^cv2_(?:node|task|collection|edge)_[0-9a-f]{32}$/u
 // Read-only compatibility for deterministic entity IDs already persisted before rolling migration.
-const ARCHIVED_RESERVED_CANVAS_ID_PATTERN = /^cv2_(?:node|task|collection|edge)_[0-9a-f]{32}$/u
 const EDGE_RELATIONS = new Set<CanvasEdgeRelation>([
   'source',
   'produced',
@@ -176,11 +200,12 @@ const EDGE_RELATIONS = new Set<CanvasEdgeRelation>([
   'compares',
   'replaces',
   'depends-on',
+  'data',
 ])
 
 export function emptyCanvasDocument(): CanvasDocument {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     nodes: [],
     tasks: [],
     collections: [],
@@ -208,10 +233,64 @@ export function parseEntityKey(value: string): CanvasEntityRef | null {
 
 /** IDs in this namespace are assigned only by trusted reducer operations. */
 export function isReservedCanvasId(value: unknown): value is string {
-  return typeof value === 'string' && (
-    RESERVED_CANVAS_ID_PATTERN.test(value)
-    || ARCHIVED_RESERVED_CANVAS_ID_PATTERN.test(value)
-  )
+  return typeof value === 'string'
+    && (RESERVED_CANVAS_ID_PATTERN.test(value) || RETIRED_CANVAS_ID_PATTERN.test(value))
+}
+
+export function canvasNodeTypeRef(id: string, revision = 1): CanvasNodeTypeRef {
+  if (typeof id !== 'string' || !TYPE_PATTERN.test(id) || id.includes('..') || id.includes('//')) {
+    throw new TypeError('node type id is invalid')
+  }
+  if (!Number.isSafeInteger(revision) || revision < 1) {
+    throw new TypeError('node type revision is invalid')
+  }
+  const value = `${id}\0${revision}`
+  const seeds = [
+    0x811c9dc5, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35,
+    0x27d4eb2f, 0x165667b1, 0xd3a2646c, 0xfd7046c5,
+  ]
+  const digest = seeds.map((seed) => {
+    let hash = seed >>> 0
+    for (const character of value) {
+      hash ^= character.codePointAt(0) ?? 0
+      hash = Math.imul(hash, 0x01000193) >>> 0
+    }
+    return hash.toString(16).padStart(8, '0')
+  }).join('')
+  return { id, revision, digest }
+}
+
+export function canvasNodeFrame(node: CanvasNode): CanvasFrame {
+  return {
+    x: node.transform.matrix[4],
+    y: node.transform.matrix[5],
+    w: node.bounds.w,
+    h: node.bounds.h,
+    z: canvasOrderNumber(node.orderKey),
+  }
+}
+
+export function canvasNodeGeometry(frame: CanvasFrame): Pick<
+  CanvasNode,
+  'parentId' | 'orderKey' | 'bounds' | 'transform'
+> {
+  return {
+    parentId: null,
+    orderKey: canvasOrderKey(Math.max(0, Math.trunc(frame.z))),
+    bounds: { w: frame.w, h: frame.h },
+    transform: { matrix: [1, 0, 0, 1, frame.x, frame.y] },
+  }
+}
+
+export function canvasOrderKey(value: number): string {
+  if (!Number.isSafeInteger(value) || value < 0) throw new TypeError('order value is invalid')
+  return value.toString(36).padStart(12, '0')
+}
+
+export function canvasOrderNumber(value: string): number {
+  if (!/^[0-9a-z]{12}$/u.test(value)) return 0
+  const parsed = Number.parseInt(value, 36)
+  return Number.isSafeInteger(parsed) ? parsed : 0
 }
 
 /** Returns a human-readable reason when a typed edge has impossible endpoints. */
@@ -239,6 +318,17 @@ export function canvasEdgeTopologyIssue(
     return from.kind === 'task' && to.kind === 'task'
       ? null
       : 'depends-on edges must connect two tasks'
+  }
+  if (relation === 'data') {
+    return from.kind === 'node'
+      && to.kind === 'node'
+      && Boolean(from.port)
+      && Boolean(to.port)
+      ? null
+      : 'data edges must connect two named node ports'
+  }
+  if ((from.kind === 'node' && from.port) || (to.kind === 'node' && to.port)) {
+    return 'semantic edges must use entity-level endpoints'
   }
   return null
 }
@@ -269,7 +359,7 @@ export function collectCanvasValidationIssues(value: unknown): CanvasValidationI
     'receipts',
     'everCreated',
   ])) return [{ path: 'document', message: 'has an invalid envelope' }]
-  if (value.schemaVersion !== 2) issue(issues, 'schemaVersion', 'must be 2')
+  if (value.schemaVersion !== 3) issue(issues, 'schemaVersion', 'must be 3')
   if (!Array.isArray(value.nodes)) issue(issues, 'nodes', 'must be an array')
   if (!Array.isArray(value.tasks)) issue(issues, 'tasks', 'must be an array')
   if (!Array.isArray(value.collections)) issue(issues, 'collections', 'must be an array')
@@ -301,13 +391,20 @@ export function collectCanvasValidationIssues(value: unknown): CanvasValidationI
 function validateNode(value: unknown, path: string, issues: CanvasValidationIssue[]): void {
   if (!isRecordWithOnly(value, [
     'id',
-    'type',
-    'frame',
+    'typeRef',
+    'parentId',
+    'orderKey',
+    'bounds',
+    'transform',
+    'coordinateSpace',
     'title',
     'text',
     'payload',
     'artifactRefs',
     'skillBindings',
+    'selectedExecutionId',
+    'bindingId',
+    'instanceRef',
     'homeTaskId',
     'collectionId',
     'origin',
@@ -316,13 +413,14 @@ function validateNode(value: unknown, path: string, issues: CanvasValidationIssu
     return
   }
   validateId(value.id, `${path}.id`, issues)
-  if (typeof value.type !== 'string'
-    || value.type.length === 0
-    || value.type.length > 160
-    || !TYPE_PATTERN.test(value.type)
-    || value.type.includes('..')
-    || value.type.includes('//')) issue(issues, `${path}.type`, 'is invalid')
-  validateFrame(value.frame, `${path}.frame`, issues)
+  validateNodeTypeRef(value.typeRef, `${path}.typeRef`, issues)
+  if (value.parentId !== null) validateId(value.parentId, `${path}.parentId`, issues)
+  validateOrderKey(value.orderKey, `${path}.orderKey`, issues)
+  validateBounds(value.bounds, `${path}.bounds`, issues)
+  validateTransform(value.transform, `${path}.transform`, issues)
+  if (value.coordinateSpace !== undefined) {
+    validateCoordinateSpace(value.coordinateSpace, `${path}.coordinateSpace`, issues)
+  }
   validateString(value.title, `${path}.title`, 1_000, false, issues)
   if (value.text !== undefined) validateString(value.text, `${path}.text`, 1_000_000, true, issues)
   if (value.payload !== undefined) {
@@ -346,6 +444,11 @@ function validateNode(value: unknown, path: string, issues: CanvasValidationIssu
       )
     }
   }
+  if (value.selectedExecutionId !== undefined) {
+    validateId(value.selectedExecutionId, `${path}.selectedExecutionId`, issues)
+  }
+  if (value.bindingId !== undefined) validateId(value.bindingId, `${path}.bindingId`, issues)
+  if (value.instanceRef !== undefined) validateInstanceRef(value.instanceRef, `${path}.instanceRef`, issues)
   if (value.homeTaskId !== undefined) validateId(value.homeTaskId, `${path}.homeTaskId`, issues)
   if (value.collectionId !== undefined) validateId(value.collectionId, `${path}.collectionId`, issues)
   validateNodeOrigin(value.origin, `${path}.origin`, issues)
@@ -379,7 +482,7 @@ function validateCollection(
 }
 
 function validateEdge(value: unknown, path: string, issues: CanvasValidationIssue[]): void {
-  if (!isExactRecord(value, ['id', 'from', 'to', 'relation', 'contextRole', 'origin'])) {
+  if (!isRecordWithOnly(value, ['id', 'from', 'to', 'relation', 'contextRole', 'orderKey', 'origin'])) {
     issue(issues, path, 'has an invalid shape')
     return
   }
@@ -394,6 +497,13 @@ function validateEdge(value: unknown, path: string, issues: CanvasValidationIssu
     && value.contextRole !== 'summary'
     && value.contextRole !== 'none') issue(issues, `${path}.contextRole`, 'is invalid')
   validateEdgeOrigin(value.origin, `${path}.origin`, issues)
+  if (value.orderKey !== undefined) validateOrderKey(value.orderKey, `${path}.orderKey`, issues)
+  if (value.relation === 'data' && value.orderKey === undefined) {
+    issue(issues, `${path}.orderKey`, 'is required for data edges')
+  }
+  if (value.relation === 'data' && value.contextRole !== 'none') {
+    issue(issues, `${path}.contextRole`, 'data edges must not implicitly grant Agent context')
+  }
 }
 
 function validateReceipt(value: unknown, path: string, issues: CanvasValidationIssue[]): void {
@@ -646,7 +756,18 @@ function validateInvariants(
   validateTaskOriginCycles(document.tasks, issues)
 
   const agentOutputs = new Set<string>()
+  const parentByNode = new Map<string, string>()
   for (const [index, node] of document.nodes.entries()) {
+    if (node.parentId !== null) {
+      if (!nodeIds.has(node.parentId)) {
+        issue(issues, `nodes[${index}].parentId`, 'references a missing node')
+      } else {
+        parentByNode.set(node.id, node.parentId)
+      }
+      if (node.homeTaskId || node.collectionId) {
+        issue(issues, `nodes[${index}]`, 'child nodes inherit Task and Collection scope')
+      }
+    }
     if (node.homeTaskId && node.collectionId) {
       issue(issues, `nodes[${index}]`, 'task-internal nodes cannot have collectionId')
     }
@@ -678,6 +799,7 @@ function validateInvariants(
       }
     }
   }
+  validateContainment(parentByNode, document.nodes, issues)
 
   const edgeIds = new Set<string>()
   const edgeSemantics = new Set<string>()
@@ -690,7 +812,14 @@ function validateInvariants(
     if (!entityExists(nodeIds, taskIds, edge.to)) issue(issues, `edges[${index}].to`, 'is missing')
     const topologyIssue = canvasEdgeTopologyIssue(edge)
     if (topologyIssue) issue(issues, `edges[${index}]`, topologyIssue)
-    const semanticKey = JSON.stringify([fromKey, toKey, edge.relation, edge.contextRole])
+    const semanticKey = JSON.stringify([
+      fromKey,
+      edge.from.kind === 'node' ? edge.from.port ?? null : null,
+      toKey,
+      edge.to.kind === 'node' ? edge.to.port ?? null : null,
+      edge.relation,
+      edge.contextRole,
+    ])
     if (edgeSemantics.has(semanticKey)) issue(issues, `edges[${index}]`, 'duplicates a semantic edge')
     edgeSemantics.add(semanticKey)
   }
@@ -715,6 +844,32 @@ function validateTaskOriginCycles(
       current = parents.get(current)
     }
   }
+}
+
+function validateContainment(
+  parentByNode: Map<string, string>,
+  nodes: CanvasNode[],
+  issues: CanvasValidationIssue[],
+): void {
+  for (const [index, node] of nodes.entries()) {
+    const seen = new Set<string>()
+    let current: string | undefined = node.id
+    let depth = 0
+    while (current) {
+      if (seen.has(current)) {
+        issue(issues, `nodes[${index}].parentId`, 'forms a containment cycle')
+        break
+      }
+      seen.add(current)
+      current = parentByNode.get(current)
+      depth += 1
+      if (depth > 32) {
+        issue(issues, `nodes[${index}].parentId`, 'exceeds maximum containment depth 32')
+        break
+      }
+    }
+  }
+
 }
 
 function validateUniqueMappings<T extends Record<string, string>>(
@@ -763,24 +918,98 @@ function validateEntityRef(
   path: string,
   issues: CanvasValidationIssue[],
 ): void {
-  if (!isExactRecord(value, ['kind', 'id'])
-    || (value.kind !== 'node' && value.kind !== 'task')) {
+  if (!isRecord(value) || (value.kind !== 'node' && value.kind !== 'task')) {
     issue(issues, path, 'must be a node or task reference')
     return
   }
+  if (value.kind === 'task' && !isExactRecord(value, ['kind', 'id'])) {
+    issue(issues, path, 'task endpoints cannot name a port')
+    return
+  }
+  if (value.kind === 'node'
+    && !isExactRecord(value, value.port === undefined ? ['kind', 'id'] : ['kind', 'id', 'port'])) {
+    issue(issues, path, 'node endpoint has an invalid shape')
+    return
+  }
   validateId(value.id, `${path}.id`, issues)
+  if (value.kind === 'node' && value.port !== undefined) {
+    if (typeof value.port !== 'string'
+      || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value.port)
+      || value.port.length > 120) issue(issues, `${path}.port`, 'is invalid')
+  }
 }
 
-function validateFrame(value: unknown, path: string, issues: CanvasValidationIssue[]): void {
-  if (!isExactRecord(value, ['x', 'y', 'w', 'h', 'z'])) {
+function validateBounds(value: unknown, path: string, issues: CanvasValidationIssue[]): void {
+  if (!isExactRecord(value, ['w', 'h'])) {
     issue(issues, path, 'has an invalid shape')
     return
   }
-  validateFinite(value.x, `${path}.x`, issues)
-  validateFinite(value.y, `${path}.y`, issues)
   validatePositive(value.w, `${path}.w`, issues)
   validatePositive(value.h, `${path}.h`, issues)
-  validateFinite(value.z, `${path}.z`, issues)
+}
+
+function validateTransform(value: unknown, path: string, issues: CanvasValidationIssue[]): void {
+  if (!isExactRecord(value, ['matrix'])
+    || !Array.isArray(value.matrix)
+    || value.matrix.length !== 6) {
+    issue(issues, path, 'must contain one affine matrix')
+    return
+  }
+  value.matrix.forEach((entry, index) => validateFinite(entry, `${path}.matrix[${index}]`, issues))
+  const [a, b, c, d] = value.matrix
+  if ([a, b, c, d].every((entry) => typeof entry === 'number' && Number.isFinite(entry))
+    && Math.abs((a as number) * (d as number) - (b as number) * (c as number)) < 1e-12) {
+    issue(issues, `${path}.matrix`, 'must be invertible')
+  }
+}
+
+function validateNodeTypeRef(value: unknown, path: string, issues: CanvasValidationIssue[]): void {
+  if (!isExactRecord(value, ['id', 'revision', 'digest'])) {
+    issue(issues, path, 'has an invalid shape')
+    return
+  }
+  if (typeof value.id !== 'string'
+    || value.id.length === 0
+    || value.id.length > 160
+    || !TYPE_PATTERN.test(value.id)
+    || value.id.includes('..')
+    || value.id.includes('//')) issue(issues, `${path}.id`, 'is invalid')
+  if (!Number.isSafeInteger(value.revision) || (value.revision as number) < 1) {
+    issue(issues, `${path}.revision`, 'must be a positive safe integer')
+  }
+  if (typeof value.digest !== 'string' || !/^[0-9a-f]{64}$/u.test(value.digest)) {
+    issue(issues, `${path}.digest`, 'is invalid')
+  }
+}
+
+function validateOrderKey(value: unknown, path: string, issues: CanvasValidationIssue[]): void {
+  if (typeof value !== 'string'
+    || value.length === 0
+    || value.length > 128
+    || !/^[0-9A-Za-z._~-]+$/u.test(value)) issue(issues, path, 'is invalid')
+}
+
+function validateCoordinateSpace(value: unknown, path: string, issues: CanvasValidationIssue[]): void {
+  if (!isRecordWithOnly(value, ['unit', 'dpi'])
+    || !['px', 'pt', 'in', 'normalized'].includes(String(value.unit))) {
+    issue(issues, path, 'is invalid')
+    return
+  }
+  if (value.dpi !== undefined) validatePositive(value.dpi, `${path}.dpi`, issues)
+}
+
+function validateInstanceRef(value: unknown, path: string, issues: CanvasValidationIssue[]): void {
+  if (!isExactRecord(value, ['definitionId', 'revision', 'digest'])) {
+    issue(issues, path, 'is invalid')
+    return
+  }
+  validateId(value.definitionId, `${path}.definitionId`, issues)
+  if (!Number.isSafeInteger(value.revision) || (value.revision as number) < 1) {
+    issue(issues, `${path}.revision`, 'must be a positive safe integer')
+  }
+  if (typeof value.digest !== 'string' || !/^[0-9a-f]{64}$/u.test(value.digest)) {
+    issue(issues, `${path}.digest`, 'is invalid')
+  }
 }
 
 function validatePoint(value: unknown, path: string, issues: CanvasValidationIssue[]): void {

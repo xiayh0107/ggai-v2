@@ -24,7 +24,7 @@ async function temporaryDirectory(): Promise<string> {
 
 test('persists exact task session records using a constructor-owned file path', async () => {
   const directory = await temporaryDirectory()
-  const filePath = join(directory, 'state', 'task-sessions-v2.json')
+  const filePath = join(directory, 'state', 'task-sessions.json')
   let now = 100
   const store = new TaskSessionStore(filePath, { now: () => now })
 

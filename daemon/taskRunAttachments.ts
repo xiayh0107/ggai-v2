@@ -89,7 +89,7 @@ export async function resolveRunIntentAttachments(
     const nodeSnapshot = snapshotExplicitNodeAttachment(
       node,
       contentBudget,
-      nodeContextPolicies.get(node.type),
+      nodeContextPolicies.get(node.typeRef.id),
     )
     nodeArtifactRefCount += nodeSnapshot.artifactRefs.length
     if (nodeArtifactRefCount > MAX_RESOLVED_NODE_ATTACHMENT_ARTIFACT_REFS) {
@@ -206,7 +206,7 @@ function snapshotExplicitNodeAttachment(
   return {
     id: node.id,
     title: node.title,
-    type: node.type,
+    type: node.typeRef.id,
     ...(text?.value === undefined ? {} : { text: text.value }),
     ...(payload?.value === undefined ? {} : { payload: payload.value }),
     artifactRefs: projected.artifactRefs,

@@ -35,12 +35,16 @@ import {
 } from '@/canvas/interaction'
 import { COLLECTION_CHROME_LAYOUT } from '@/canvas/layout'
 import {
+  canvasNodeFrame,
+  canvasNodeGeometry,
+  canvasNodeTypeRef,
   canvasEdgeTopologyIssue,
   type CanvasCollection,
   type CanvasDocument,
   type CanvasEdge,
   type CanvasEntityRef,
   type CanvasNode,
+  type CanvasFrame,
   type CanvasPoint,
   type CanvasTask,
 } from '@/canvas/model'
@@ -163,7 +167,7 @@ type Gesture =
       startX: number
       startY: number
       zoom: number
-      frame: CanvasNode['frame']
+      frame: CanvasFrame
     }
 
 type GesturePreview =
@@ -175,7 +179,7 @@ type GesturePreview =
       dx: number
       dy: number
     }
-  | { kind: 'resize'; id: string; frame: CanvasNode['frame'] }
+  | { kind: 'resize'; id: string; frame: CanvasFrame }
   | null
 
 interface CollectionView {
@@ -601,7 +605,7 @@ export default function CanvasStage() {
       startX: event.clientX,
       startY: event.clientY,
       zoom: stateRef.current.view.camera.zoom,
-      frame: structuredClone(node.frame),
+      frame: structuredClone(canvasNodeFrame(node)),
     }, event.currentTarget)
   }, [beginGesture])
 
@@ -621,11 +625,11 @@ export default function CanvasStage() {
       })
       if (view.presentation === 'collapsed') continue
       for (const node of view.nodes) {
-        values.push({ target: { kind: 'node', id: node.id }, bounds: node.frame })
+        values.push({ target: { kind: 'node', id: node.id }, bounds: canvasNodeFrame(node) })
       }
     }
     for (const node of visibleTopLevelNodes) {
-      values.push({ target: { kind: 'node', id: node.id }, bounds: node.frame })
+      values.push({ target: { kind: 'node', id: node.id }, bounds: canvasNodeFrame(node) })
     }
     return values
   })()
@@ -864,10 +868,10 @@ export default function CanvasStage() {
   if (preview?.kind === 'node') {
     const node = stageDocument.nodes.find((entry) => entry.id === preview.id)
     if (node) nodeFrames.set(node.id, {
-      x: node.frame.x + preview.dx,
-      y: node.frame.y + preview.dy,
-      w: node.frame.w,
-      h: node.frame.h,
+      x: canvasNodeFrame(node).x + preview.dx,
+      y: canvasNodeFrame(node).y + preview.dy,
+      w: canvasNodeFrame(node).w,
+      h: canvasNodeFrame(node).h,
     })
   } else if (preview?.kind === 'resize') {
     nodeFrames.set(preview.id, preview.frame)
@@ -876,10 +880,10 @@ export default function CanvasStage() {
       // Child nodes move through their parent TaskGroup transform.
       if (node.homeTaskId || node.collectionId !== preview.id) continue
       nodeFrames.set(node.id, {
-        x: node.frame.x + preview.dx,
-        y: node.frame.y + preview.dy,
-        w: node.frame.w,
-        h: node.frame.h,
+        x: canvasNodeFrame(node).x + preview.dx,
+        y: canvasNodeFrame(node).y + preview.dy,
+        w: canvasNodeFrame(node).w,
+        h: canvasNodeFrame(node).h,
       })
     }
   } else if (preview?.kind === 'selection') {
@@ -900,10 +904,10 @@ export default function CanvasStage() {
       if (!movingNodeIds.has(node.id)
         && (!node.collectionId || !movingCollectionIds.has(node.collectionId))) continue
       nodeFrames.set(node.id, {
-        x: node.frame.x + preview.dx,
-        y: node.frame.y + preview.dy,
-        w: node.frame.w,
-        h: node.frame.h,
+        x: canvasNodeFrame(node).x + preview.dx,
+        y: canvasNodeFrame(node).y + preview.dy,
+        w: canvasNodeFrame(node).w,
+        h: canvasNodeFrame(node).h,
       })
     }
   }
@@ -914,7 +918,7 @@ export default function CanvasStage() {
         const node = stageDocument.nodes.find((entry) => entry.id === target.id)
         if (!node) return []
         const previewFrame = nodeFrames.get(node.id)
-        const frame = previewFrame ?? node.frame
+        const frame = previewFrame ?? canvasNodeFrame(node)
         const offset = previewFrame
           ? null
           : nodeParentPreviewOffset(node, stageDocument.tasks, preview)
@@ -1313,10 +1317,10 @@ export default function CanvasStage() {
   const selectedNodeMarks = (() => {
     if (!selectedNodeForSurface || selectedNodeControlTask
       || !nodeHasVisibleContent(selectedNodeForSurface)) return []
-    return nodeTypeMarks(getPlugin(selectedNodeForSurface.type), selectedNodeForSurface)
+    return nodeTypeMarks(getPlugin(selectedNodeForSurface.typeRef.id), selectedNodeForSurface)
   })()
   const applyNodeMarkToggle = (node: CanvasNode, markId: string) => {
-    const payload = toggleNodeTypeMark(getPlugin(node.type), node, markId)
+    const payload = toggleNodeTypeMark(getPlugin(node.typeRef.id), node, markId)
     if (!payload) return
     const previousPayload = node.payload ? structuredClone(node.payload) : null
     void store.dispatchCommand({
@@ -1343,7 +1347,7 @@ export default function CanvasStage() {
     if (!selectedNodeForSurface || selectedNodeControlTask
       || !nodeHasVisibleContent(selectedNodeForSurface)
       || selectedNodeMarks.length > 0) return []
-    const plugin = getPlugin(selectedNodeForSurface.type)
+    const plugin = getPlugin(selectedNodeForSurface.typeRef.id)
     return nodeTypeActions(plugin).slice(0, 5)
   })()
   // 产物查看面板（右侧抽屉）的来源节点：为它提供同样的类型专属工具条。
@@ -1358,7 +1362,7 @@ export default function CanvasStage() {
   const sidePanelNodeControlTask = controlOwnerTaskForNode(sidePanelNode)
   const sidePanelNodeActions = (() => {
     if (!sidePanelNode || sidePanelNodeControlTask) return []
-    const plugin = getPlugin(sidePanelNode.type)
+    const plugin = getPlugin(sidePanelNode.typeRef.id)
     if (nodeTypeMarks(plugin, sidePanelNode).length > 0) return []
     return nodeTypeActions(plugin).slice(0, 5)
   })()
@@ -1447,7 +1451,10 @@ export default function CanvasStage() {
   const endpointRectForWire = (endpoint: EdgeEndpoint): CanvasBounds | null => {
     if (endpoint.kind === 'node') {
       return nodeFrames.get(endpoint.id)
-        ?? stageDocument.nodes.find((node) => node.id === endpoint.id)?.frame
+        ?? (() => {
+          const node = stageDocument.nodes.find((candidate) => candidate.id === endpoint.id)
+          return node ? canvasNodeFrame(node) : undefined
+        })()
         ?? null
     }
     if (endpoint.kind === 'task') {
@@ -1575,7 +1582,7 @@ export default function CanvasStage() {
     const plugin = getPlugin(pluginId)
     const world = menu?.world ?? contextComposerAnchor()
     const cascade = menu?.cascade ? (stageDocument.nodes.length % 8) * 24 : 0
-    const maxZ = stageDocument.nodes.reduce((z, node) => Math.max(z, node.frame.z), 0)
+    const maxZ = stageDocument.nodes.reduce((z, node) => Math.max(z, canvasNodeFrame(node).z), 0)
     const id = clientCanvasId('node')
     const sourceEndpoint = menu?.source?.endpoint
     const sourceFrame = sourceEndpoint ? endpointRectForWire(sourceEndpoint) : undefined
@@ -1599,8 +1606,8 @@ export default function CanvasStage() {
     frame.z = maxZ + 1
     const node: CanvasNode = {
       id,
-      type: plugin.id,
-      frame,
+      typeRef: canvasNodeTypeRef(plugin.id, plugin.revision),
+      ...canvasNodeGeometry(frame),
       title: plugin.label,
       payload: nodeTypeInitialPayload(plugin),
       artifactRefs: [],
@@ -2107,7 +2114,10 @@ function entityBounds(
   taskViewsById: ReadonlyMap<string, CanvasTaskView>,
   ref: CanvasEntityRef,
 ): CanvasBounds | null {
-  if (ref.kind === 'node') return document.nodes.find((node) => node.id === ref.id)?.frame ?? null
+  if (ref.kind === 'node') {
+    const node = document.nodes.find((candidate) => candidate.id === ref.id)
+    return node ? canvasNodeFrame(node) : null
+  }
   const view = taskViewsById.get(ref.id)
   return view ? taskInteractionBounds(view) : null
 }

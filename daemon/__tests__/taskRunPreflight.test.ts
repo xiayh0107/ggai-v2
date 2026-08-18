@@ -81,9 +81,12 @@ test('preflight validates Node attachments and effective Skills against the exac
   const digest = 'a'.repeat(64)
   const target: CanvasNode = {
     id: 'node-target',
-    type: 'text',
+    typeRef: { id: 'text', revision: 1, digest: '0'.repeat(64) },
+    parentId: null,
+    orderKey: '000000000001',
+    bounds: { w: 320, h: 240 },
+    transform: { matrix: [1, 0, 0, 1, 0, 0] },
     title: 'Target',
-    frame: { x: 0, y: 0, w: 320, h: 240, z: 1 },
     artifactRefs: [],
     homeTaskId: REQUEST.taskId,
     origin: { kind: 'user' },
@@ -111,7 +114,7 @@ interface ServiceOverrides {
 
 function service(overrides: ServiceOverrides = {}): TaskRunPreflightService {
   const document: CanvasDocument = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     tasks: [{
       id: REQUEST.taskId,
       title: 'Task',

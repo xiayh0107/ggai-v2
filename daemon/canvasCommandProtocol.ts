@@ -13,10 +13,11 @@ import {
 } from '../src/canvas/commands.js'
 import {
   collectCanvasValidationIssues,
+  canvasNodeGeometry,
+  canvasNodeTypeRef,
   emptyCanvasDocument,
   entityKey,
   isReservedCanvasId,
-  parseEntityKey,
   type CanvasCollection,
   type CanvasEdgeContextRole,
   type CanvasEdgeRelation,
@@ -175,6 +176,7 @@ export function parseCanvasCommandWire(value: unknown): CanvasCommandWire {
     case 'UpdateNodeSkillBindings':
       return parseUpdateNodeSkillBindings(value)
     case 'ResizeNode':
+    case 'SetNodeBounds':
       assertCommandKeys(value, ['type', 'nodeId', 'w', 'h'], ['type', 'nodeId', 'w', 'h'])
       return {
         type: value.type,
@@ -182,6 +184,37 @@ export function parseCanvasCommandWire(value: unknown): CanvasCommandWire {
         w: parsePositiveFinite(value.w, 'command.w'),
         h: parsePositiveFinite(value.h, 'command.h'),
       }
+    case 'SetNodeTransform': {
+      assertCommandKeys(value, ['type', 'nodeId', 'matrix'], ['type', 'nodeId', 'matrix'])
+      if (!Array.isArray(value.matrix) || value.matrix.length !== 6) {
+        throw new ProtocolError('command.matrix must contain six numbers')
+      }
+      return {
+        type: value.type,
+        nodeId: parseIdentifier(value.nodeId, 'command.nodeId'),
+        matrix: value.matrix.map((entry, index) =>
+          parseFinite(entry, `command.matrix[${index}]`)) as [number, number, number, number, number, number],
+      }
+    }
+    case 'ReparentNodes': {
+      assertCommandKeys(
+        value,
+        ['type', 'nodeIds', 'parentId', 'beforeOrderKey'],
+        ['type', 'nodeIds', 'parentId'],
+      )
+      return {
+        type: value.type,
+        nodeIds: parseIdentifierArray(value.nodeIds, 'command.nodeIds', true),
+        parentId: value.parentId === null
+          ? null
+          : parseIdentifier(value.parentId, 'command.parentId'),
+        ...(value.beforeOrderKey === undefined
+          ? {}
+          : { beforeOrderKey: parseOrderKey(value.beforeOrderKey, 'command.beforeOrderKey') }),
+      }
+    }
+    case 'ReorderChildren':
+      return parseReorderChildren(value)
     case 'DeleteNode':
       assertCommandKeys(value, ['type', 'nodeId'], ['type', 'nodeId'])
       return {
@@ -193,6 +226,12 @@ export function parseCanvasCommandWire(value: unknown): CanvasCommandWire {
     case 'CreateEdge':
       assertCommandKeys(value, ['type', 'edge'], ['type', 'edge'])
       return { type: value.type, edge: parseUserEdge(value.edge, 'command.edge') }
+    case 'CreatePortEdge': {
+      assertCommandKeys(value, ['type', 'edge'], ['type', 'edge'])
+      const edge = parseUserEdge(value.edge, 'command.edge')
+      if (edge.relation !== 'data') throw new ProtocolError('CreatePortEdge requires data relation')
+      return { type: value.type, edge }
+    }
     case 'CreateEdges':
       assertCommandKeys(value, ['type', 'edges'], ['type', 'edges'])
       return { type: value.type, edges: parseUserEdges(value.edges) }
@@ -209,6 +248,22 @@ export function parseCanvasCommandWire(value: unknown): CanvasCommandWire {
       return {
         type: value.type,
         edgeIds: parseIdentifierArray(value.edgeIds, 'command.edgeIds', true),
+      }
+    case 'SelectNodeExecution':
+      assertCommandKeys(value, ['type', 'nodeId', 'executionId'], ['type', 'nodeId', 'executionId'])
+      return {
+        type: value.type,
+        nodeId: parseIdentifier(value.nodeId, 'command.nodeId'),
+        executionId: value.executionId === null
+          ? null
+          : parseIdentifier(value.executionId, 'command.executionId'),
+      }
+    case 'BindNodeToFilesystem':
+      assertCommandKeys(value, ['type', 'nodeId', 'bindingId'], ['type', 'nodeId', 'bindingId'])
+      return {
+        type: value.type,
+        nodeId: parseIdentifier(value.nodeId, 'command.nodeId'),
+        bindingId: parseIdentifier(value.bindingId, 'command.bindingId'),
       }
     case 'DetachNodeFromTask':
       assertCommandKeys(value, ['type', 'nodeId'], ['type', 'nodeId'])
@@ -337,6 +392,36 @@ function parseMoveEntities(
   }
 }
 
+function parseReorderChildren(
+  value: Record<string, unknown>,
+): Extract<OrdinaryCanvasCommand, { type: 'ReorderChildren' }> {
+  assertCommandKeys(value, ['type', 'parentId', 'moves'], ['type', 'parentId', 'moves'])
+  if (!Array.isArray(value.moves)
+    || value.moves.length === 0
+    || value.moves.length > MAX_CANVAS_COMMAND_ENTITIES) {
+    throw new ProtocolError('command.moves must be a bounded non-empty array')
+  }
+  const moves = value.moves.map((candidate, index) => {
+    if (!isExactRecord(candidate, ['nodeId', 'orderKey'])) {
+      throw new ProtocolError(`command.moves[${index}] has an invalid shape`)
+    }
+    return {
+      nodeId: parseIdentifier(candidate.nodeId, `command.moves[${index}].nodeId`),
+      orderKey: parseOrderKey(candidate.orderKey, `command.moves[${index}].orderKey`),
+    }
+  })
+  if (new Set(moves.map((move) => move.nodeId)).size !== moves.length) {
+    throw new ProtocolError('command.moves contains duplicate nodes')
+  }
+  return {
+    type: 'ReorderChildren',
+    parentId: value.parentId === null
+      ? null
+      : parseIdentifier(value.parentId, 'command.parentId'),
+    moves,
+  }
+}
+
 function parseUpdateNodeContent(
   value: Record<string, unknown>,
 ): Extract<OrdinaryCanvasCommand, { type: 'UpdateNodeContent' }> {
@@ -424,7 +509,10 @@ function parseUserEdge(
   label: string,
   validateFragment = true,
 ): CanvasEdge {
-  if (!isExactRecord(value, ['id', 'from', 'to', 'relation', 'contextRole', 'origin'])
+  if (!isRecord(value)
+    || !isExactRecord(value, value.orderKey === undefined
+      ? ['id', 'from', 'to', 'relation', 'contextRole', 'origin']
+      : ['id', 'from', 'to', 'relation', 'contextRole', 'orderKey', 'origin'])
     || !isExactRecord(value.origin, ['kind'])
     || value.origin.kind !== 'user') {
     throw new ProtocolError(`${label} must be a user-origin edge`)
@@ -435,6 +523,9 @@ function parseUserEdge(
     to: parseEntityRef(value.to, `${label}.to`),
     relation: parseEdgeRelation(value.relation, `${label}.relation`),
     contextRole: parseContextRole(value.contextRole, `${label}.contextRole`),
+    ...(value.orderKey === undefined
+      ? {}
+      : { orderKey: parseOrderKey(value.orderKey, `${label}.orderKey`) }),
     origin: { kind: 'user' },
   }
   if (validateFragment) assertEdgeFragments([edge], label)
@@ -617,8 +708,8 @@ function parseJsonPayload(value: unknown, label: string): Record<string, unknown
   const document = emptyCanvasDocument()
   document.nodes = [{
     id: 'validation-node',
-    type: 'validation',
-    frame: { x: 0, y: 0, w: 1, h: 1, z: 0 },
+    typeRef: canvasNodeTypeRef('validation'),
+    ...canvasNodeGeometry({ x: 0, y: 0, w: 1, h: 1, z: 0 }),
     title: 'Validation',
     payload: structuredClone(value),
     artifactRefs: [],
@@ -646,8 +737,8 @@ function assertEdgeFragments(edges: CanvasEdge[], label: string): void {
 function placeholderNode(id: string): CanvasNode {
   return {
     id,
-    type: 'validation',
-    frame: { x: 0, y: 0, w: 1, h: 1, z: 0 },
+    typeRef: canvasNodeTypeRef('validation'),
+    ...canvasNodeGeometry({ x: 0, y: 0, w: 1, h: 1, z: 0 }),
     title: 'Validation',
     artifactRefs: [],
     origin: { kind: 'user' },
@@ -696,14 +787,23 @@ function parseEntityRefs(value: unknown, label: string, requireNonEmpty: boolean
 }
 
 function parseEntityRef(value: unknown, label: string): CanvasEntityRef {
-  if (!isExactRecord(value, ['kind', 'id'])
-    || (value.kind !== 'node' && value.kind !== 'task')
-    || typeof value.id !== 'string') {
+  if (!isRecord(value) || (value.kind !== 'node' && value.kind !== 'task')) {
     throw new ProtocolError(`${label} is invalid`)
   }
-  const parsed = parseEntityKey(`${value.kind}:${value.id}`)
-  if (!parsed) throw new ProtocolError(`${label} is invalid`)
-  return parsed
+  if (value.kind === 'task') {
+    if (!isExactRecord(value, ['kind', 'id'])) throw new ProtocolError(`${label} is invalid`)
+    return { kind: 'task', id: parseIdentifier(value.id, `${label}.id`) }
+  }
+  if (!isExactRecord(value, value.port === undefined ? ['kind', 'id'] : ['kind', 'id', 'port'])) {
+    throw new ProtocolError(`${label} is invalid`)
+  }
+  return {
+    kind: 'node',
+    id: parseIdentifier(value.id, `${label}.id`),
+    ...(value.port === undefined
+      ? {}
+      : { port: parseStableKey(value.port, `${label}.port`) }),
+  }
 }
 
 function parseIdentifierArray(value: unknown, label: string, requireNonEmpty: boolean): string[] {
@@ -845,6 +945,16 @@ function parseStableKey(value: unknown, label: string): string {
   return value
 }
 
+function parseOrderKey(value: unknown, label: string): string {
+  if (typeof value !== 'string'
+    || value.length === 0
+    || value.length > 128
+    || !/^[0-9A-Za-z._~-]+$/u.test(value)) {
+    throw new ProtocolError(`${label} is invalid`)
+  }
+  return value
+}
+
 function parseString(
   value: unknown,
   label: string,
@@ -898,7 +1008,8 @@ function parseEdgeRelation(value: unknown, label: string): CanvasEdgeRelation {
     && value !== 'references'
     && value !== 'compares'
     && value !== 'replaces'
-    && value !== 'depends-on') throw new ProtocolError(`${label} is invalid`)
+    && value !== 'depends-on'
+    && value !== 'data') throw new ProtocolError(`${label} is invalid`)
   return value
 }
 

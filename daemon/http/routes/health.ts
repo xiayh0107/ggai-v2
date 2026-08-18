@@ -18,7 +18,7 @@ export function createHealthRoute(): HttpRoute {
         nodeSkills: true,
       },
       canvas: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         initializationRequired: false,
       },
       projectRoot: context.projectRoot,

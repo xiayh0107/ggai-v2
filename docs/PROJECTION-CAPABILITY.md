@@ -38,5 +38,5 @@ v3。正式 Run 在 acceptance reservation 内用当前 Workspace registry 重�
 影响新 Run，已接受 Run 的 context pack、Capability Receipt 与 ProjectionPlan 始终使用自身固定快照。
 
 生产默认 runtime registry 为空时，artifact 分类、Node context 与 unknown file fallback 和升级前
-一致。`.gg/runtime/plugin-capabilities-v2` 不再写入或用于 live Run，只为历史 interrupted Run
-提供只读恢复；新 Run 写 `.gg/runtime/plugin-capabilities-v3`。UI 不展示 provider 或输出来源选择器。
+一致。新 Run 与 interrupted recovery 只读取 `.gg/runtime/plugin-capabilities` 当前格式；旧目录
+完全忽略。UI 不展示 provider 或输出来源选择器。

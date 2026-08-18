@@ -69,7 +69,7 @@ describe('Canvas daemon client', () => {
       expect(init?.method).toBe('GET')
       return json({
         capabilities: { canvas: true },
-        canvas: { schemaVersion: 2, initializationRequired: false },
+        canvas: { schemaVersion: 3, initializationRequired: false },
       })
     })
     const client = new CanvasDaemonClient({
@@ -79,7 +79,7 @@ describe('Canvas daemon client', () => {
 
     await expect(client.getCapabilities()).resolves.toEqual({
       canvas: true,
-      schemaVersion: 2,
+      schemaVersion: 3,
       initializationRequired: false,
     })
   })
@@ -89,7 +89,7 @@ describe('Canvas daemon client', () => {
       if (this !== globalThis) throw new TypeError('Illegal invocation')
       return Promise.resolve(json({
         capabilities: { canvas: true },
-        canvas: { schemaVersion: 2, initializationRequired: false },
+        canvas: { schemaVersion: 3, initializationRequired: false },
       }))
     })
     vi.stubGlobal('fetch', receiverFetch)

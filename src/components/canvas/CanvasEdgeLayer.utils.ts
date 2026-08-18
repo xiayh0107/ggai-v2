@@ -23,6 +23,7 @@ export function relationLabel(relation: CanvasEdgeRelation): string {
     compares: '比较',
     replaces: '替代',
     'depends-on': '依赖',
+    data: '数据',
   }
   return labels[relation]
 }

@@ -81,7 +81,7 @@ project/
 带 provenance 的 v3：
 
 ```text
-.gg/runtime/plugin-capabilities-v3/<digest>.json
+.gg/runtime/plugin-capabilities/<digest>.json
 ```
 
 每项来源是 builtin version、runtime provider ID/version 或 browser-community。Run 接受时重新
@@ -89,7 +89,7 @@ project/
 `plugin-capabilities.json`。Agent outcome 的 `pluginId` 必须属于该 registry，且 artifact path/MIME
 必须满足 claim；Node 输入则按同一快照中的 `nodeContext` 做确定性正文裁剪、payload 字段选择与
 artifact identity 过滤。每个输入携带 `contextProjection` receipt。这样插件热更新不会改变已经
-运行或正在恢复的 Run 的分类与上下文语义。历史 `plugin-capabilities-v2` 只在 crash recovery
+运行或正在恢复的 Run 的分类与上下文语义。缺失或损坏的 capability snapshot 在 recovery 中
 中读取；新 Run 不会接受或写入 v2。
 
 ## 四、固定 Node Skills
@@ -142,7 +142,7 @@ attachment；进入授权集合的任一 artifactRef 无法复验时，整次 Ru
 
 ## 七、会话、并发与取消
 
-Task 会话保存在 `.gg/runtime/task-sessions-v2.json`，键为 `canvasBranch + taskId + agentId`。同一 Task 的继续运行可以 resume；已有 Node 上的新提示先创建派生 Task，因此不会误复用原 Task session。
+Task 会话保存在 `.gg/runtime/task-sessions.json`，键为 `canvasBranch + taskId + agentId`。同一 Task 的继续运行可以 resume；已有 Node 上的新提示先创建派生 Task，因此不会误复用原 Task session。
 
 daemon 对 `(project, branch, taskId)` 强制单活跃 Run，不同 Task 可以并发。UI 取消请求等待 Run 进入终态后才完成；刷新或组件卸载只断开 SSE，不取消 Agent。daemon 重启会把未完成记录恢复为 `interrupted`，保留永久 JSONL，并为已经验证的 artifact 生成 partial 计划。
 

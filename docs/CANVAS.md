@@ -34,11 +34,11 @@ Canvas 把旧节点承担的内容、提示、运行状态、会话与产物职�
 
 ```ts
 type CanvasEntityRef =
-  | { kind: 'node'; id: string }
+  | { kind: 'node'; id: string; port?: string }
   | { kind: 'task'; id: string }
 
 interface CanvasDocument {
-  schemaVersion: 2
+  schemaVersion: 3
   nodes: CanvasNode[]
   tasks: CanvasTask[]
   collections: CanvasCollection[]
@@ -60,8 +60,12 @@ interface CanvasTask {
 
 interface CanvasNode {
   id: string
-  type: string
-  frame: { x: number; y: number; w: number; h: number; z: number }
+  typeRef: { id: string; revision: number; digest: string }
+  parentId: string | null
+  orderKey: string
+  bounds: { w: number; h: number }
+  transform: { matrix: [number, number, number, number, number, number] }
+  coordinateSpace?: { unit: 'px' | 'pt' | 'in' | 'normalized'; dpi?: number }
   title: string
   text?: string
   payload?: Record<string, unknown>
@@ -70,6 +74,9 @@ interface CanvasNode {
     inheritType: boolean
     skills: Array<{ skillId: string; revision: number; digest: string }>
   }
+  selectedExecutionId?: string
+  bindingId?: string
+  instanceRef?: { definitionId: string; revision: number; digest: string }
   homeTaskId?: string
   collectionId?: string
   origin:
@@ -97,7 +104,9 @@ interface CanvasEdge {
     | 'compares'
     | 'replaces'
     | 'depends-on'
+    | 'data'
   contextRole: 'full' | 'summary' | 'none'
+  orderKey?: string
   origin:
     | { kind: 'user' }
     | { kind: 'agent'; runId: string; planId: string }
@@ -223,7 +232,7 @@ daemon 将 raw outcome、ArtifactManifest 与序列化插件 artifact claim 求�
 - error/cancelled/interrupted plan 标记 `partial`，保留合法 artifact，但丢弃全部 task proposal；
 - plan 记录 Task/Run、manifest digest、output key、artifactRefs、derivedFrom 与 proposal DAG，不含 Canvas ID 或坐标。
 
-插件契约必须可序列化并声明 artifact claim；React 投影 hook 保持纯函数。浏览器启动 Run 前把启用的 community data-only claims 注册到 `PUT /plugin-capabilities`。daemon 将不可覆盖的 builtins、受信 runtime contributions 和 community claims 合并为带 provenance 的 v3，按 digest 保存到 `.gg/runtime/plugin-capabilities-v3/<digest>.json`，并把这个 digest 与快照固定到 Run、Capability Receipt、上下文包和恢复摘要。只有 built-in `file` 可以声明 unknown fallback；同一 plugin claim 冲突会拒绝，跨 plugin 的匹配继续按 priority、具体度、稳定 plugin ID 排序。Provider 热更新只影响尚未接受的新 Run；历史 v2 快照仅只读恢复。Agent 的 output `pluginId` 只能引用该 Run 的固定 registry。
+节点类型必须可序列化并声明 artifact claim。浏览器启动 Run 前把启用的 community data-only claims 注册到 `PUT /plugin-capabilities`。daemon 将不可覆盖的 builtins、受信 runtime contributions 和 community claims 合并为带 provenance 的当前快照，按 digest 保存到 `.gg/runtime/plugin-capabilities/<digest>.json`，并把 digest 与快照固定到 Run、Capability Receipt、上下文包和恢复摘要。只有 built-in `file` 可以声明 unknown fallback；Provider 热更新只影响尚未接受的新 Run，旧格式不参与恢复。
 
 ## 7. 交互语义
 
@@ -276,7 +285,7 @@ daemon 将 raw outcome、ArtifactManifest 与序列化插件 artifact claim 求�
 
 ## 8. 版本历史与 reset
 
-Canvas Git 位于 `.gg/canvas-state-v2/`，受管 worktree 位于 `.gg/canvas-worktrees-v2/`。规范化树为：
+Canvas Git 位于 `.gg/canvas/`，受管 worktree 位于 `.gg/canvas-worktrees/`。规范化树为：
 
 ```text
 tasks/<stable-key>.json
@@ -289,12 +298,10 @@ meta.json
 
 写 checkpoint、恢复与 merge commit 前均运行完整语义校验，拒绝 dangling ref、Task/Collection 嵌套、重复 origin key 与无 receipt 的重复 materialization。runtime、selection、camera、SSE cursor 和原始日志永不进入 Git。
 
-当前应用不提供已归档格式的在线迁移或查看器。显式初始化脚本必须：
-
-1. 要求 daemon 已停止并验证目标是合法项目根；
-2. 将旧 `.gg/runtime`、`.gg/canvas-state` 和 `artifacts` 移入 `.gg/legacy-v1/<UTC timestamp>/`；
-3. 初始化全新 runtime；
-4. 不触碰源码 Git、`app/.git`、tracked file 或用户源码 worktree。
+当前应用不读取或迁移旧格式。首次发现 schema-1 project marker 时，daemon 在项目 lease 下检查
+realpath、symlink 与 source-control 边界，使用 reset journal 删除旧 Canvas、Run、session、artifact
+和 versioned Canvas Git 目录，再写 schema-3 marker。reset 不创建 archive；目标含 tracked file 或
+不安全路径时启动失败，不触碰项目 catalog、Skills 或用户源码。
 
 当前 `/canvas` 应用入口与 daemon 只挂载这一套 Canvas。前端在 hydration 前必须验证 `/health` 的 `capabilities.canvas=true`、持久化 schema 与初始化 marker；不一致时显示阻断页。daemon 不提供已废弃的整文档 snapshot、Node Run、source-binding 或按路径 artifact fallback。
 

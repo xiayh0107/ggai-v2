@@ -1,10 +1,11 @@
 import {
+  canvasNodeFrame,
   type CanvasCollection,
   type CanvasDocument,
   type CanvasEdgeContextRole,
   type CanvasEdgeRelation,
   type CanvasEntityRef,
-  type CanvasNode,
+  type CanvasFrame,
 } from '@/canvas/model'
 import type { CanvasBounds, CanvasTaskView } from '@/canvas/selectors'
 import {
@@ -29,7 +30,7 @@ export type CanvasEdgePreview =
       dx: number
       dy: number
     }
-  | { kind: 'resize'; id: string; frame: CanvasNode['frame'] }
+  | { kind: 'resize'; id: string; frame: CanvasFrame }
   | null
 
 export interface CanvasEdgeCollectionView {
@@ -177,7 +178,7 @@ export default function CanvasEdgeLayer({
     }
     const node = nodeById.get(ref.id)
     if (!node) return null
-    const frame = nodeFrames.get(node.id) ?? node.frame
+    const frame = nodeFrames.get(node.id) ?? canvasNodeFrame(node)
     return translatedBounds(frame, nodeFrames.has(node.id) ? { dx: 0, dy: 0 } : offset)
   }
 

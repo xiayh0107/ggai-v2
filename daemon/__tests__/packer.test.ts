@@ -175,11 +175,14 @@ test('Task Run packs bounded full-edge outputs with daemon-verified artifact pat
   const artifactId = `artifact_${'a'.repeat(64)}`
   const digest = 'b'.repeat(64)
   const document: CanvasDocument = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     nodes: [{
       id: 'node-prior-output',
-      type: 'image',
-      frame: { x: 20, y: 20, w: 320, h: 240, z: 1 },
+      typeRef: { id: 'image', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (1).toString(36).padStart(12, '0'),
+      bounds: { w: 320, h: 240 },
+      transform: { matrix: [1, 0, 0, 1, 20, 20] },
       title: 'Prior plot',
       text: 'User-selected plot notes',
       payload: { palette: 'viridis' },

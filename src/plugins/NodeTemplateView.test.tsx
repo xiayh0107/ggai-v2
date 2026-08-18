@@ -42,8 +42,11 @@ function render(node: React.ReactNode) {
 function makeNode(text: string): CanvasNode {
   return {
     id: 'node-template-test',
-    type: '@tests/template',
-    frame: { x: 0, y: 0, w: 320, h: 240, z: 0 },
+    typeRef: { id: '@tests/template', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+    parentId: null,
+    orderKey: (0).toString(36).padStart(12, '0'),
+    bounds: { w: 320, h: 240 },
+    transform: { matrix: [1, 0, 0, 1, 0, 0] },
     title: 'Template test',
     text,
     payload: {},

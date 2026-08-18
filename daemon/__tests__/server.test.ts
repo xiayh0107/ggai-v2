@@ -408,7 +408,7 @@ test('plugin capability handshake pins strict data before accepting a Run', asyn
       fixture.root,
       '.gg',
       'runtime',
-      'plugin-capabilities-v3',
+      'plugin-capabilities',
       `${refreshedSummary?.pluginCapabilityDigest}.json`,
     ), 'utf8')) as {
       plugins: Array<{ source: { kind: string; providerVersion?: string } }>
@@ -439,7 +439,7 @@ test('plugin capability handshake pins strict data before accepting a Run', asyn
       fixture.root,
       '.gg',
       'runtime',
-      'plugin-capabilities-v3',
+      'plugin-capabilities',
       `${capability.digest}.json`,
     )
     await writeFile(snapshotPath, '{damaged snapshot\n', 'utf8')
@@ -627,7 +627,7 @@ test('RunIntent executes only against the exact persisted Canvas revision', asyn
     let materializedCanvas: {
       revision: number
       document: {
-        nodes: Array<{ type: string; artifactRefs: Array<{ artifactId: string }> }>
+        nodes: Array<{ typeRef: { id: string }; artifactRefs: Array<{ artifactId: string }> }>
         receipts: Array<{ kind: string; planId: string }>
       }
     } | undefined
@@ -642,7 +642,7 @@ test('RunIntent executes only against the exact persisted Canvas revision', asyn
     assert.ok(materializedCanvas)
     assert.equal(materializedCanvas.revision, 2)
     assert.equal(materializedCanvas.document.nodes.length, 1)
-    assert.equal(materializedCanvas.document.nodes[0]?.type, 'text')
+    assert.equal(materializedCanvas.document.nodes[0]?.typeRef.id, 'text')
     assert.equal(
       materializedCanvas.document.nodes[0]?.artifactRefs[0]?.artifactId,
       close.artifactManifest.entries[0]?.artifactId,
@@ -821,8 +821,11 @@ test('Run context applies one pinned Node policy to edges and explicit attachmen
       type: 'CreateNode',
       node: {
         id: 'node-context-policy-source',
-        type: '@community/semantic',
-        frame: { x: 100, y: 100, w: 320, h: 180, z: 1 },
+        typeRef: { id: '@community/semantic', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+        parentId: null,
+        orderKey: (1).toString(36).padStart(12, '0'),
+        bounds: { w: 320, h: 180 },
+        transform: { matrix: [1, 0, 0, 1, 100, 100] },
         title: 'Semantic source',
         text: 'abcdef',
         payload: { visible: 'keep', secret: 'omit' },
@@ -1083,8 +1086,11 @@ test('RunIntent resolves readable artifacts from pinned full edges only', async 
       type: 'CreateNode',
       node: {
         id: outputSlotNodeId,
-        type: '@community/review',
-        frame: { x: 460, y: 100, w: 320, h: 220, z: 2 },
+        typeRef: { id: '@community/review', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+        parentId: null,
+        orderKey: (2).toString(36).padStart(12, '0'),
+        bounds: { w: 320, h: 220 },
+        transform: { matrix: [1, 0, 0, 1, 460, 100] },
         title: 'Community review slot',
         payload: {},
         artifactRefs: [],

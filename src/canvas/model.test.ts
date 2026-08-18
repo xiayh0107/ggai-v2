@@ -3,6 +3,7 @@ import {
   CanvasValidationError,
   collectCanvasValidationIssues,
   emptyCanvasDocument,
+  canvasNodeTypeRef,
   parseCanvasDocument,
   parseEntityKey,
   type CanvasNode,
@@ -22,8 +23,11 @@ function task(id: string): CanvasTask {
 function node(id: string): CanvasNode {
   return {
     id,
-    type: 'text',
-    frame: { x: 120, y: 220, w: 320, h: 180, z: 1 },
+    typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+    parentId: null,
+    orderKey: (1).toString(36).padStart(12, '0'),
+    bounds: { w: 320, h: 180 },
+    transform: { matrix: [1, 0, 0, 1, 120, 220] },
     title: 'Prompt',
     artifactRefs: [],
     homeTaskId: 'task-1',
@@ -32,6 +36,45 @@ function node(id: string): CanvasNode {
 }
 
 describe('Canvas model', () => {
+  it('validates containment as a single parentId tree with inherited root scope', () => {
+    const input = emptyCanvasDocument()
+    input.tasks.push(task('task-1'))
+    const parent = node('parent')
+    const child: CanvasNode = { ...node('child'), parentId: parent.id }
+    delete child.homeTaskId
+    parent.parentId = child.id
+    input.nodes.push(parent, child)
+    expect(collectCanvasValidationIssues(input)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'nodes[0].parentId', message: 'forms a containment cycle' }),
+    ]))
+
+    parent.parentId = null
+    child.homeTaskId = 'task-1'
+    expect(collectCanvasValidationIssues(input)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'nodes[1]' }),
+    ]))
+  })
+
+  it('requires data edges to connect named ports without granting context', () => {
+    const input = emptyCanvasDocument()
+    input.tasks.push(task('task-1'))
+    input.nodes.push(node('source'), { ...node('target'), orderKey: '000000000002' })
+    input.edges.push({
+      id: 'edge-data',
+      from: { kind: 'node', id: 'source', port: 'out' },
+      to: { kind: 'node', id: 'target', port: 'in' },
+      relation: 'data',
+      contextRole: 'none',
+      orderKey: '000000000001',
+      origin: { kind: 'user' },
+    })
+    expect(collectCanvasValidationIssues(input)).toEqual([])
+    input.edges[0]!.contextRole = 'full'
+    expect(collectCanvasValidationIssues(input)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'edges[0].contextRole' }),
+    ]))
+  })
+
   it('parses the exact domain envelope without persisting run/session state', () => {
     const input = emptyCanvasDocument()
     input.tasks.push(task('task-1'))
@@ -83,7 +126,7 @@ describe('Canvas model', () => {
     input.tasks.push(task('task-1'))
     input.nodes.push({
       ...node('node-output'),
-      type: 'image',
+      typeRef: canvasNodeTypeRef('image'),
       artifactRefs: [{
         runId: 'run-1',
         artifactId: `artifact_${'a'.repeat(64)}`,
@@ -142,7 +185,7 @@ describe('Canvas model', () => {
     input.nodes.push({
       ...node('node-output'),
       homeTaskId: undefined,
-      type: 'image',
+      typeRef: canvasNodeTypeRef('image'),
       artifactRefs: [{
         runId: 'run-1',
         artifactId: `artifact_${'a'.repeat(64)}`,

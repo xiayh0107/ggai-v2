@@ -76,8 +76,11 @@ describe('CanvasNodeCard artifact projection', () => {
     try {
       await renderNode({
         id: 'node-notebook',
-        type: plugin.id,
-        frame: { x: 0, y: 0, w: 320, h: 220, z: 1 },
+        typeRef: { id: plugin.id, revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+        parentId: null,
+        orderKey: (1).toString(36).padStart(12, '0'),
+        bounds: { w: 320, h: 220 },
+        transform: { matrix: [1, 0, 0, 1, 0, 0] },
         title: 'Analysis notebook',
         artifactRefs: [{ runId: 'run-notebook', artifactId }],
         origin: { kind: 'user' },
@@ -105,8 +108,11 @@ describe('CanvasNodeCard artifact projection', () => {
 
     await renderNode({
       id: 'node-file',
-      type: 'file',
-      frame: { x: 0, y: 0, w: 320, h: 220, z: 1 },
+      typeRef: { id: 'file', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (1).toString(36).padStart(12, '0'),
+      bounds: { w: 320, h: 220 },
+      transform: { matrix: [1, 0, 0, 1, 0, 0] },
       title: 'unknown.bin',
       artifactRefs: [{ runId: 'run-file', artifactId }],
       origin: { kind: 'user' },
@@ -139,8 +145,11 @@ describe('CanvasNodeCard artifact projection', () => {
 
     await renderNode({
       id: 'node-r-source',
-      type: 'code',
-      frame: { x: 0, y: 0, w: 360, h: 260, z: 1 },
+      typeRef: { id: 'code', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (1).toString(36).padStart(12, '0'),
+      bounds: { w: 360, h: 260 },
+      transform: { matrix: [1, 0, 0, 1, 0, 0] },
       title: 'classic_scatter_plot.R',
       artifactRefs: [{ runId: 'run-r-source', artifactId }],
       origin: { kind: 'user' },
@@ -156,8 +165,11 @@ describe('CanvasNodeCard artifact projection', () => {
     const onDragStart = vi.fn()
     await renderNode({
       id: 'node-clickable-body',
-      type: 'text',
-      frame: { x: 0, y: 0, w: 320, h: 220, z: 1 },
+      typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (1).toString(36).padStart(12, '0'),
+      bounds: { w: 320, h: 220 },
+      transform: { matrix: [1, 0, 0, 1, 0, 0] },
       title: 'Clickable body',
       text: 'Clicking this content opens its node-local prompt surface.',
       artifactRefs: [],
@@ -197,8 +209,11 @@ describe('CanvasNodeCard 即时预览与活动记录', () => {
 
   const textNode: CanvasNode = {
     id: 'node-text',
-    type: 'text',
-    frame: { x: 0, y: 0, w: 360, h: 260, z: 1 },
+    typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+    parentId: null,
+    orderKey: (1).toString(36).padStart(12, '0'),
+    bounds: { w: 360, h: 260 },
+    transform: { matrix: [1, 0, 0, 1, 0, 0] },
     title: '振奋之言',
     artifactRefs: [{ runId: 'run-text', artifactId: textArtifactId }],
     origin: {
@@ -364,8 +379,11 @@ describe('CanvasNodeCard 即时预览与活动记录', () => {
     const openRunLog = vi.fn()
     const outputSlot: CanvasNode = {
       id: 'node-owned-slot',
-      type: 'text',
-      frame: { x: 0, y: 0, w: 360, h: 260, z: 1 },
+      typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+      parentId: null,
+      orderKey: (1).toString(36).padStart(12, '0'),
+      bounds: { w: 360, h: 260 },
+      transform: { matrix: [1, 0, 0, 1, 0, 0] },
       title: '等待生成的文本',
       artifactRefs: [],
       homeTaskId: 'task-owned-slot',
@@ -522,8 +540,11 @@ describe('CanvasNodeCard 多产物链接条', () => {
 
   const multiNode: CanvasNode = {
     id: 'node-multi',
-    type: 'file',
-    frame: { x: 0, y: 0, w: 320, h: 220, z: 1 },
+    typeRef: { id: 'file', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+    parentId: null,
+    orderKey: (1).toString(36).padStart(12, '0'),
+    bounds: { w: 320, h: 220 },
+    transform: { matrix: [1, 0, 0, 1, 0, 0] },
     title: '双产物',
     artifactRefs: [
       { runId: 'run-multi', artifactId: multiArtifactA },
@@ -595,8 +616,11 @@ describe('CanvasNodeCard 外壳按钮降噪', () => {
         <CanvasNodeCard
           node={{
             id: 'node-quiet',
-            type: 'text',
-            frame: { x: 0, y: 0, w: 320, h: 200, z: 1 },
+            typeRef: { id: 'text', revision: 1, digest: '0000000000000000000000000000000000000000000000000000000000000000' },
+            parentId: null,
+            orderKey: (1).toString(36).padStart(12, '0'),
+            bounds: { w: 320, h: 200 },
+            transform: { matrix: [1, 0, 0, 1, 0, 0] },
             title: '静心',
             text: '正文',
             artifactRefs: [],
