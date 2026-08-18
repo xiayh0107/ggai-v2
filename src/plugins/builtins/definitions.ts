@@ -194,6 +194,18 @@ export const BUILTIN_NODE_TYPE_DEFINITIONS: readonly NodeTypeDefinition[] = [
     artifactClaims: [],
   }),
   builtin({
+    id: 'instance', label: '实例', description: '固定 immutable NodeTreeDefinition revision 的复用实例', icon: 'card',
+    creatable: false,
+    defaultWidth: 480,
+    initialPayloadSchema: 'ggai://schema/payload/instance',
+    initialPayload: { overrides: {} },
+    ui: defineNodeUi('card'),
+    instruction: { placeholder: '通过允许的覆盖项定制这个实例…', actions: [], marks: [] },
+    exporters: ['instance-resolver'],
+    nodeContext: nodeContextPolicyForBuiltin('smart'),
+    artifactClaims: [],
+  }),
+  builtin({
     id: 'asset-assembly', label: '素材组合', description: '组合可编辑素材并生成确定性 PNG / SVG', icon: 'graphic',
     defaultWidth: 480,
     initialPayloadSchema: 'ggai://schema/payload/asset-assembly',
