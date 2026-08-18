@@ -34,7 +34,7 @@ export function createHttpRouter(routes: readonly HttpRoute[]): HttpRoute {
   }
 }
 
-/** Applies the exact security and CORS contract used by the legacy adapter. */
+/** Applies the shared security and CORS contract before a bounded route responds. */
 export function prepareHttpRoute(
   request: IncomingMessage,
   response: ServerResponse,
