@@ -15,6 +15,7 @@ export default function CanvasLooseNodeLayer({
   children,
   nodeFrames,
   projectDir,
+  canvasBranch,
   selectedNodeIds,
   compoundSelectedNodeIds,
   compoundSelection,
@@ -26,6 +27,7 @@ export default function CanvasLooseNodeLayer({
   onResizeStart,
   onMenuAction,
   onOpenIsolation,
+  onSelectExecution,
   registerFocusable,
 }: {
   document: CanvasDocument
@@ -33,6 +35,7 @@ export default function CanvasLooseNodeLayer({
   children: CanvasNode[]
   nodeFrames: ReadonlyMap<string, CanvasBounds>
   projectDir: string
+  canvasBranch: string
   selectedNodeIds: ReadonlySet<string>
   compoundSelectedNodeIds: ReadonlySet<string>
   compoundSelection: boolean
@@ -44,6 +47,7 @@ export default function CanvasLooseNodeLayer({
   onResizeStart: (event: PointerEvent<HTMLButtonElement>, node: CanvasNode) => void
   onMenuAction: (node: CanvasNode, action: string) => void
   onOpenIsolation: (node: CanvasNode) => void
+  onSelectExecution: (nodeId: string, executionId: string | null) => void
   registerFocusable: (key: string, element: HTMLButtonElement | null) => void
 }) {
   return <>{[...roots, ...children].map((node) => {
@@ -57,6 +61,7 @@ export default function CanvasLooseNodeLayer({
         node={node}
         frame={nodeFrames.get(node.id) ?? canvasNodeWorldFrame(document, node)}
         projectDir={projectDir}
+        canvasBranch={canvasBranch}
         selected={selectedNodeIds.has(node.id)}
         compoundSelected={compoundSelection && compoundSelectedNodeIds.has(node.id)}
         taskStatus={taskId ? deriveTaskStatus(runtimeByTaskId[taskId]) : undefined}
@@ -70,6 +75,7 @@ export default function CanvasLooseNodeLayer({
         onOpenIsolation={getPlugin(node.typeRef.id).containment.canHaveChildren
           ? onOpenIsolation
           : undefined}
+        onSelectExecution={onSelectExecution}
         registerFocusable={(element) => registerFocusable(key, element)}
       />
     )

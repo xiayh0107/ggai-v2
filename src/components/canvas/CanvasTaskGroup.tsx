@@ -30,6 +30,7 @@ import { canvasTaskChromeState } from './CanvasTaskChrome'
 export interface CanvasTaskGroupProps {
   view: CanvasTaskView
   projectDir: string
+  canvasBranch?: string
   selectedTask: boolean
   /** 任务当前/最近一次 Run 的 id，随任务状态一起透传给节点活动记录条。 */
   taskRunId?: string
@@ -57,6 +58,7 @@ export interface CanvasTaskGroupProps {
   activeConnectionKey?: string | null
   onTaskMenuAction?: (task: CanvasTask, action: string) => void
   onNodeMenuAction?: (node: CanvasNode, action: string) => void
+  onSelectNodeExecution?: (nodeId: string, executionId: string | null) => void
   onEntityFocus: (key: string) => void
   onEntityKeyDown: (key: string, event: KeyboardEvent<HTMLButtonElement>) => void
   registerFocusable: (key: string, element: HTMLButtonElement | null) => void
@@ -65,6 +67,7 @@ export interface CanvasTaskGroupProps {
 export default function CanvasTaskGroup({
   view,
   projectDir,
+  canvasBranch = 'main',
   selectedTask,
   taskRunId,
   compoundSelectedTask = false,
@@ -88,6 +91,7 @@ export default function CanvasTaskGroup({
   activeConnectionKey,
   onTaskMenuAction,
   onNodeMenuAction,
+  onSelectNodeExecution,
   onEntityFocus,
   onEntityKeyDown,
   registerFocusable,
@@ -336,6 +340,7 @@ export default function CanvasTaskGroup({
               node={node}
               frame={nodeFrames?.get(node.id)}
               projectDir={projectDir}
+              canvasBranch={canvasBranch}
               selected={selectedNodeIds.has(node.id)}
               compoundSelected={compoundSelection && compoundSelectedNodeIds.has(node.id)}
               compact={compact}
@@ -353,6 +358,7 @@ export default function CanvasTaskGroup({
               onMenuAction={liteTaskChrome
                 ? handleChromelessNodeMenuAction
                 : onNodeMenuAction}
+              onSelectExecution={onSelectNodeExecution}
               registerFocusable={(element) => registerFocusable(`node:${node.id}`, element)}
             />
           ))}

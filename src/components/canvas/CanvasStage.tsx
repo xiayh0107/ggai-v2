@@ -364,7 +364,6 @@ export default function CanvasStage() {
       replacement.focus({ preventScroll: true })
     }
   })
-
   const selectTarget = useCallback((
     target: CanvasSelectionTarget,
     additive: boolean,
@@ -377,15 +376,12 @@ export default function CanvasStage() {
     }))
     setRovingKey(selectionKey(target))
   }, [store])
-
   const selectTask = useCallback((task: CanvasTask, additive: boolean) => {
     selectTarget({ kind: 'task', id: task.id }, additive)
   }, [selectTarget])
-
   const selectCollection = useCallback((collection: CanvasCollection, additive: boolean) => {
     selectTarget({ kind: 'collection', id: collection.id }, additive)
   }, [selectTarget])
-
   const viewportRect = useCallback((): CanvasViewportRect => {
     const rect = stageRef.current?.getBoundingClientRect()
     return {
@@ -395,7 +391,6 @@ export default function CanvasStage() {
       height: rect?.height ?? 0,
     }
   }, [])
-
   const beginGesture = useCallback((gesture: Gesture, target: HTMLElement) => {
     gestureRef.current = gesture
     setPreview(null)
@@ -405,7 +400,6 @@ export default function CanvasStage() {
       // jsdom and older embedded browsers may not implement pointer capture.
     }
   }, [])
-
   const beginSelectionDrag = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 0) return false
     const current = stateRef.current
@@ -426,7 +420,6 @@ export default function CanvasStage() {
     }, event.currentTarget)
     return true
   }, [beginGesture])
-
   const beginTaskDrag = useCallback((
     event: ReactPointerEvent<HTMLElement>,
     task: CanvasTask,
@@ -459,7 +452,6 @@ export default function CanvasStage() {
       zoom: stateRef.current.view.camera.zoom,
     }, event.currentTarget)
   }, [beginGesture, beginSelectionDrag, selectTask])
-
   const beginNodeDrag = useCallback((
     event: ReactPointerEvent<HTMLElement>,
     node: CanvasNode,
@@ -1849,6 +1841,7 @@ export default function CanvasStage() {
             key={view.task.id}
             view={view}
             projectDir={state.scope.projectDir}
+            canvasBranch={state.scope.branch}
             selectedTask={selectedTaskIds.has(view.task.id)}
             taskRunId={state.runtimeByTaskId[view.task.id]?.runId}
             compoundSelectedTask={compoundSelection
@@ -1888,6 +1881,10 @@ export default function CanvasStage() {
               : null}
             onTaskMenuAction={onTaskMenuAction}
             onNodeMenuAction={onNodeMenuAction}
+            onSelectNodeExecution={(nodeId, executionId) => {
+              void store.dispatchCommand({ type: 'SelectNodeExecution', nodeId, executionId })
+                .catch((error: unknown) => setNotice(errorMessage(error)))
+            }}
             onEntityFocus={setRovingKey}
             onEntityKeyDown={onEntityKeyDown}
             registerFocusable={registerFocusable}
@@ -1899,6 +1896,7 @@ export default function CanvasStage() {
           children={visibleChildNodes}
           nodeFrames={nodeFrames}
           projectDir={state.scope.projectDir}
+          canvasBranch={state.scope.branch}
           selectedNodeIds={selectedNodeIds}
           compoundSelectedNodeIds={compoundSelectedNodeIds}
           compoundSelection={compoundSelection}
@@ -1910,6 +1908,10 @@ export default function CanvasStage() {
           onResizeStart={beginNodeResize}
           onMenuAction={onNodeMenuAction}
           onOpenIsolation={openNodeIsolation}
+          onSelectExecution={(nodeId, executionId) => {
+            void store.dispatchCommand({ type: 'SelectNodeExecution', nodeId, executionId })
+              .catch((error: unknown) => setNotice(errorMessage(error)))
+          }}
           registerFocusable={registerFocusable}
         />
         {marquee && (

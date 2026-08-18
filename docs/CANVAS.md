@@ -149,6 +149,9 @@ POST /canvas/commands
 - `DuplicateNode`、`DuplicateTaskAsDraft`、`DuplicateCollection`
 - `MaterializeProjectionPlan`、`AcceptTaskProposals`、`DismissPlan`
 
+Node execution 的独立状态机、output/cache 限制与 provenance API 见
+[`NODE-EXECUTIONS.md`](./NODE-EXECUTIONS.md)。
+
 浏览器先把 command、base revision 与不可变 `initialBaseRevision` 写入 IndexedDB outbox，再乐观执行同一 reducer。daemon 在分支锁内读取当前 revision、重放 reducer、校验不变量，并以单个 `mutationId` 原子写入。runtime snapshot 持久保存 `mutationId → command digest + committed revision`；因此成功响应丢失、后续 revision 已前进或 daemon 重启后，相同 mutation 的重试仍只返回当前规范 envelope，不重复副作用。复用 mutationId 提交不同 command 会被拒绝。
 
 每个语义 revision 同时归档在 `.gg/runtime/canvas/<branch-hash>/revisions/<revision>.json`，包含 document digest。CAS 冲突时浏览器只允许 refetch 后重放一次；若再次冲突或前置条件失效，必须进入显式冲突分支流程，禁止静默覆盖。`POST /canvas/conflicts` 只接受 `sourceBranch/newBranch/baseRevision` 和最多 500 条原始 mutation journal；daemon 从自己的历史 revision 读取基底并纯重放到新分支，浏览器不能上传 Canvas snapshot。相同恢复可幂等重试，同名分支已有不同内容则失败。
