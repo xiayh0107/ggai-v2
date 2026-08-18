@@ -297,7 +297,7 @@ export const BUILTIN_ARTIFACT_PLUGIN_IDS: ReadonlySet<string> = new Set(
   BUILTIN_ARTIFACT_CLAIM_REGISTRY.map(({ id }) => id),
 )
 
-/** Returns a mutable copy suitable for one browser-side NodePlugin declaration. */
+/** Returns a mutable copy suitable for one browser-side NodeTypeDefinition. */
 export function artifactClaimsForBuiltin(
   id: BuiltinArtifactPluginId,
 ): ArtifactClaimRule[] {

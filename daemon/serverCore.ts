@@ -1493,8 +1493,15 @@ function nodeStudioAgentPrompt(
     contentKind: current.contentKind,
     icon: current.icon,
     defaultWidth: current.defaultWidth,
+    initialPayloadSchema: current.initialPayloadSchema,
+    initialPayload: current.initialPayload,
     placeholder: current.placeholder,
     actions: current.actions,
+    containment: current.containment,
+    ports: current.ports,
+    ...(current.execution ? { execution: current.execution } : {}),
+    exporters: current.exporters,
+    agent: current.agent,
     emptyTitle: current.emptyTitle,
     emptyDescription: current.emptyDescription,
     sampleTitle: current.sampleTitle,
@@ -1502,10 +1509,11 @@ function nodeStudioAgentPrompt(
   }
   return [
     '你是 GGAI 节点设计 Agent。请把用户需求转换为安全的声明式节点定义。',
-    '只设计节点的内容模板、文案、默认宽度和快捷指令；平台拥有外壳、Task、Run、Edge 与权限。',
+    '只设计节点的声明式内容模板、端口、子节点策略、执行/导出 capability 和快捷指令；平台拥有外壳、Task、Run、Edge 与权限。',
     '禁止生成或建议执行 JavaScript、TypeScript、TSX、HTML、CSS、shell、外部 URL 或 Canvas command。',
     '最终必须在本次 artifact 目录根部写入 node-definition.json，UTF-8 JSON，且只能包含示例中的字段。',
-    'contentKind 与 icon 只能是 text、image、table、card；defaultWidth 必须是 280–640 的整数；actions 最多 6 个。',
+    'contentKind 与 icon 只能是 text、image、table、card；defaultWidth 必须是 280–640 的整数；actions 最多 6 个；所有 schema id 必须使用 ggai://。',
+    'execution 只能声明 capability/policy 名称，不能包含命令、镜像、路径、环境变量或 secrets。',
     'id 必须是 @local/kebab-case，不能使用内置节点 id。不要写 revision、installed、updatedAt。',
     '',
     '当前定义：',
@@ -1619,7 +1627,9 @@ function parseNodeStudioCandidate(value: unknown): Omit<
   const body = requestObject(value)
   const keys = [
     'schemaVersion', 'id', 'label', 'description', 'contentKind', 'icon', 'defaultWidth',
-    'placeholder', 'actions', 'emptyTitle', 'emptyDescription', 'sampleTitle', 'sampleContent',
+    'initialPayloadSchema', 'initialPayload', 'placeholder', 'actions', 'containment', 'ports',
+    'exporters', 'agent', 'emptyTitle', 'emptyDescription', 'sampleTitle', 'sampleContent',
+    ...(body.execution === undefined ? [] : ['execution']),
   ] as const
   if (!hasExactBodyKeys(body, keys)) throw new Error('Agent 返回的节点定义包含未知字段')
   if (body.schemaVersion !== CUSTOM_NODE_MANIFEST_SCHEMA_VERSION) {
@@ -1631,8 +1641,11 @@ function parseNodeStudioCandidate(value: unknown): Omit<
     || !['text', 'image', 'table', 'card'].includes(String(icon))) {
     throw new Error('Agent 返回了不支持的内容模板')
   }
-  if (!Array.isArray(body.actions) || !body.actions.every((action) => typeof action === 'string')) {
-    throw new Error('Agent 返回的快捷指令无效')
+  if (!Array.isArray(body.actions) || !body.actions.every((action) => typeof action === 'string')
+    || !Array.isArray(body.ports)
+    || !Array.isArray(body.exporters)
+    || !body.exporters.every((exporter) => typeof exporter === 'string')) {
+    throw new Error('Agent 返回的数组字段无效')
   }
   return {
     schemaVersion: CUSTOM_NODE_MANIFEST_SCHEMA_VERSION,
@@ -1642,8 +1655,17 @@ function parseNodeStudioCandidate(value: unknown): Omit<
     contentKind: contentKind as CustomNodeManifest['contentKind'],
     icon: icon as CustomNodeManifest['icon'],
     defaultWidth: requiredBodySafeInteger(body, 'defaultWidth', { min: 280, max: 640 }),
+    initialPayloadSchema: requiredBodyString(body, 'initialPayloadSchema', 240),
+    initialPayload: structuredClone(requestObject(body.initialPayload)),
     placeholder: requiredBodyString(body, 'placeholder', 500),
     actions: [...body.actions],
+    containment: structuredClone(requestObject(body.containment)) as unknown as CustomNodeManifest['containment'],
+    ports: structuredClone(body.ports) as CustomNodeManifest['ports'],
+    ...(body.execution === undefined
+      ? {}
+      : { execution: structuredClone(requestObject(body.execution)) as unknown as NonNullable<CustomNodeManifest['execution']> }),
+    exporters: [...body.exporters],
+    agent: structuredClone(requestObject(body.agent)) as unknown as CustomNodeManifest['agent'],
     emptyTitle: requiredBodyString(body, 'emptyTitle', 120),
     emptyDescription: requiredBodyString(body, 'emptyDescription', 240),
     sampleTitle: requiredBodyString(body, 'sampleTitle', 120),

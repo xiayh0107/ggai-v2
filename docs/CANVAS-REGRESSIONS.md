@@ -16,7 +16,7 @@
 
 - **现象**：选中文本节点，浮动工具条显示「改写 / 缩短」等指令，旧版的粗体 / 斜体 / 标题 1 / 标题 2 不见了。
 - **根因**：把本应留在输入区的指令搬上了工具条，违背旧版分工——**格式标记在工具条，指令在输入区**。
-- **修复**：`marksFor` / `toggleMark`（`app/src/plugins/builtins/index.tsx`），样式存节点 payload，带按下态高亮、标题互斥、可撤销。
+- **修复**：`NodeTypeDefinition.instruction.marks` 声明 payload key/value 与互斥组，平台统一计算按下态和可撤销 patch。
 - **回归测试**：标记切换与互斥。
 
 ### 3. 格式标记不生效（斜体点了没反应）

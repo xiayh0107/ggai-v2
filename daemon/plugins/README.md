@@ -1,7 +1,7 @@
 # Daemon runtime plugins
 
 `daemon/plugins/` 保存可信、进程内的 Capability Runtime 插件。它与浏览器中的
-`src/plugins/NodePlugin` 不是同一种扩展：前者贡献后端 provider，后者是受限、data-only 的节点
+`src/plugins/NodeTypeDefinition` 不是同一种扩展：前者贡献后端 provider，后者是受限、data-only 的节点
 展示与上下文声明。两者不得通过导入 React renderer 或 UI 状态耦合。
 
 ## 插件可以做什么

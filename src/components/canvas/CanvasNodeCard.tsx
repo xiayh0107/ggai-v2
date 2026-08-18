@@ -23,7 +23,10 @@ import {
 } from '@/canvas/artifactViewerContext'
 import {
   getPlugin,
-  type NodePlugin,
+  NodeTypeIconView,
+  nodeTypeIcon,
+  nodeTypeIsEmpty,
+  type NodeTypeDefinition,
   type TrustedArtifactProjection,
 } from '@/plugins/types'
 import NodeArtifactTemplateView from '@/plugins/NodeArtifactTemplateView'
@@ -46,7 +49,7 @@ const NODE_ACTION_ICONS: Record<string, LucideIcon> = {
 export interface CanvasNodeCardProps {
   node: CanvasNode
   /** Node Studio preview only; production cards always resolve the registered plugin. */
-  pluginOverride?: NodePlugin
+  pluginOverride?: NodeTypeDefinition
   frame?: CanvasBounds
   projectDir: string
   selected: boolean
@@ -95,7 +98,7 @@ export default function CanvasNodeCard({
   registerFocusable,
 }: CanvasNodeCardProps) {
   const plugin = pluginOverride ?? getPlugin(node.type)
-  const Icon = plugin.icon
+  const Icon = nodeTypeIcon(plugin)
   const label = `${plugin.label}节点：${node.title || plugin.label}`
   const showActivityStrip = !compact && (
     node.origin.kind === 'agent-output'
@@ -222,12 +225,11 @@ function CanvasNodeContent({
   taskStatus,
 }: {
   node: CanvasNode
-  plugin: NodePlugin
+  plugin: NodeTypeDefinition
   projectDir: string
   compact: boolean
   taskStatus?: CanvasTaskStatus
 }) {
-  const Icon = plugin.icon
   const generating = taskStatus?.kind === 'queued' || taskStatus?.kind === 'generating'
   const primaryArtifact = node.artifactRefs[0]
   const artifactKey = primaryArtifact
@@ -273,7 +275,7 @@ function CanvasNodeContent({
   if (compact) {
     return (
       <div className="flex h-full items-center justify-center gap-2 rounded-[10px] bg-gg-subtle text-[11px] text-gg-muted">
-        <Icon size={18} strokeWidth={1.5} />
+        <NodeTypeIconView definition={plugin} size={18} strokeWidth={1.5} />
         <span>{node.artifactRefs.length > 0 ? `${node.artifactRefs.length} 个产物` : '内容节点'}</span>
       </div>
     )
@@ -292,7 +294,7 @@ function CanvasNodeContent({
         </div>
       ) : primaryArtifact && artifactState?.key !== artifactKey ? (
           <CanvasGeneratingSurface label="正在验证生成内容" />
-      ) : !plugin.isEmpty(node) ? (
+      ) : !nodeTypeIsEmpty(plugin, node) ? (
         <div className="min-h-0 flex-1">
           <NodeTemplateView node={node} template={plugin.ui.template} />
         </div>

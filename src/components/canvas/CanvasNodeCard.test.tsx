@@ -2,7 +2,6 @@
 import { act } from 'react'
 import type { ComponentProps } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { FileQuestion } from 'lucide-react'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { CanvasNode } from '@/canvas/model'
 import { CanvasArtifactViewerContext } from '@/canvas/artifactViewerContext'
@@ -12,7 +11,7 @@ import {
   getPlugin,
   listCreatablePlugins,
   registerPlugin,
-  type NodePlugin,
+  type NodeTypeDefinition,
   unregisterPlugin,
 } from '@/plugins/types'
 import { LEGACY_NODE_CONTEXT_POLICY } from '@/plugins/contextContracts'
@@ -44,16 +43,23 @@ afterAll(() => {
 
 describe('CanvasNodeCard artifact projection', () => {
   it('renders community artifacts through the platform-owned template', async () => {
-    const plugin: NodePlugin = {
+    const plugin: NodeTypeDefinition = {
+      schemaVersion: 2,
       id: '@tests/notebook-view',
+      revision: 1,
       label: 'Notebook',
-      desc: 'Notebook artifact view',
-      icon: FileQuestion,
+      description: 'Notebook artifact view',
+      creatable: true,
+      icon: 'file',
       defaultWidth: 320,
-      initialPayload: () => ({}),
-      isEmpty: () => false,
+      initialPayloadSchema: 'ggai://schema/payload/open',
+      initialPayload: {},
       ui: defineNodeUi('file'),
-      instr: { placeholder: 'Use notebook', actions: [] },
+      instruction: { placeholder: 'Use notebook', actions: [], marks: [] },
+      containment: { canHaveChildren: false, allowedChildTypes: [], maxDepth: 0 },
+      ports: [],
+      exporters: [],
+      agent: { constructible: true, writableInitSchema: 'ggai://schema/payload/open' },
       nodeContext: structuredClone(LEGACY_NODE_CONTEXT_POLICY),
       artifactClaims: [{ extensions: ['.ipynb'] }],
     }

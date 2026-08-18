@@ -5,23 +5,24 @@
 
 ## 第一阶段边界
 
-工作台保存的是严格 JSON 清单，不执行动态代码。清单只允许：身份、受限内容模板、默认
-宽度、空态文案、示例内容、提示词占位与快捷指令。节点外壳、Task、Run、Edge、文件权限、
-连接端口和命令通道始终由平台控制。
+工作台保存的是严格 JSON 清单，不执行动态代码。manifest schema 2 允许身份、受限内容模板、
+默认宽度、初始 payload schema、子节点策略、typed ports、daemon capability 引用、示例内容、
+提示词占位与快捷指令。节点外壳、Task、Run、Edge、文件权限、端口交互和命令通道始终由平台控制。
 
 定义由 daemon 持久化在 `.gg/workspace/node-definitions.json`。每次保存追加一个不可变
 revision；Canvas Node 使用 `@local/package@revision` 作为运行时类型，避免新版本改变历史
 节点。已安装版本不能物理删除。
 
 Studio 的预览直接使用真实 `CanvasNodeCard`，并按空节点、生成中、已完成、失败展示平台拥有的
-生命周期。每个状态明确列出控制归属、节点只表达的内容和下一层披露位置；普通内容通过 `NodePlugin.ui` 选择平台白名单
+生命周期。每个状态明确列出控制归属、节点只表达的内容和下一层披露位置；普通内容通过 `NodeTypeDefinition.ui` 选择平台白名单
 模板，由 `NodeTemplateView` 统一渲染。定义不能携带 React 组件、CSS class、节点外壳、空态或
 运行态。端口、选择、生成动画、活动条与 Composer 始终由 Canvas 平台负责，因此预览与真实
 画布不会再维护两套视觉实现。
 
-工作台不允许把所有后端能力变成节点配置项。节点定义只控制内容模板、默认宽度、内容示例、
-提示词占位与最多 6 个快捷指令；空白内容面、运行、权限、重试、Skills 绑定与过程 / 日志侧栏
-属于平台。Studio 会展示这些边界，但不会让自定义节点覆盖它们。
+工作台不允许把后端实现变成节点配置项。`execution`、`exporters` 与
+`agent.writableInitSchema` 只能引用 daemon-owned capability/schema；不能包含命令、镜像、路径、
+环境变量、secret、JS/TSX 或 CSS。空白内容面、运行、权限、重试、Skills 绑定与过程 / 日志侧栏
+属于平台。
 
 ## Agent 边界
 

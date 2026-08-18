@@ -19,7 +19,7 @@ import {
   type CanvasTaskStatus,
   type CanvasTaskView,
 } from '@/canvas/selectors'
-import { getPlugin } from '@/plugins/types'
+import { getPlugin, NodeTypeIconView } from '@/plugins/types'
 import CanvasConnectionPort from './CanvasConnectionPort'
 import CanvasEntityMenu, { type CanvasMenuItem } from './CanvasEntityMenu'
 import CanvasNodeCard from './CanvasNodeCard'
@@ -581,7 +581,7 @@ function TaskSummary({
     <div className="flex shrink-0 items-center gap-2 text-[10px] text-gg-muted">
       <div className="flex -space-x-1" aria-hidden="true">
         {previews.map((preview) => {
-          const Icon = getPlugin(preview.type).icon
+          const definition = getPlugin(preview.type)
           return (
             <span
               key={preview.key}
@@ -589,7 +589,7 @@ function TaskSummary({
                 preview.pending ? 'opacity-65' : ''
               }`}
             >
-              <Icon size={12} />
+              <NodeTypeIconView definition={definition} size={12} />
             </span>
           )
         })}
@@ -614,7 +614,6 @@ function CanvasGhostCard({
   status: CanvasTaskStatus
 }) {
   const plugin = getPlugin(ghost.pluginId ?? 'file')
-  const Icon = ghost.provisional ? Sparkles : plugin.icon
   const title = ghost.provisional ? task.title : ghost.title
   return (
     <article
@@ -636,7 +635,9 @@ function CanvasGhostCard({
           data-testid="canvas-ghost-node-header"
           className="flex h-10 shrink-0 items-center gap-2 px-3 text-[12px] text-gg-ink"
         >
-          <Icon size={14} className="shrink-0 text-gg-muted" strokeWidth={1.8} />
+          {ghost.provisional
+            ? <Sparkles size={14} className="shrink-0 text-gg-muted" strokeWidth={1.8} />
+            : <NodeTypeIconView definition={plugin} size={14} className="shrink-0 text-gg-muted" strokeWidth={1.8} />}
           <span className="truncate font-medium">{title}</span>
         </header>
         <div

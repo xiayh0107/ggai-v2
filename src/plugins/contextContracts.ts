@@ -265,7 +265,7 @@ export const BUILTIN_NODE_CONTEXT_PLUGIN_IDS: ReadonlySet<string> = new Set(
   BUILTIN_NODE_CONTEXT_POLICY_REGISTRY.map(({ id }) => id),
 )
 
-/** Returns a mutable declaration suitable for one browser NodePlugin. */
+/** Returns a mutable declaration suitable for one browser NodeTypeDefinition. */
 export function nodeContextPolicyForBuiltin(id: BuiltinNodeContextPluginId): NodeContextPolicy {
   const registration = BUILTIN_NODE_CONTEXT_POLICY_REGISTRY.find((candidate) => candidate.id === id)
   if (!registration) throw new TypeError(`unknown built-in node context policy: ${id}`)

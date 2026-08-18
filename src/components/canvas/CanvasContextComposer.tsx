@@ -31,7 +31,7 @@ import { CanvasTaskRunContext } from '@/canvas/runHooks'
 import type { CanvasTaskRunSummary } from '@/canvas/runController'
 import type { CanvasBounds } from '@/canvas/selectors'
 import { taskComposerDraftKey } from '@/canvas/taskRunUi'
-import { getPlugin } from '@/plugins/types'
+import { getPlugin, nodeTypeActions, nodeTypeIcon } from '@/plugins/types'
 import {
   ProjectArtifactCatalogClient,
   type ProjectArtifactCatalogApi,
@@ -173,15 +173,14 @@ export default function CanvasContextComposer({
 
   const context = describeContext()
   const plugin = selectedNode ? getPlugin(selectedNode.type) : null
-  const sourceNodes = selectedNode ? selectSourceNodes(state.document.nodes, state.document.edges, selectedNode) : []
+  const sourceNodes = selectedNode
+    ? selectSourceNodes(state.document.nodes, state.document.edges, selectedNode)
+    : []
   const suggestedActions = selectedNode
     ? (provenanceOrigin ? lifecycle.getSuggestedActions(provenanceOrigin.taskId) : [])
     : []
   const pluginPrompts = selectedNode && plugin
-    ? [
-        ...plugin.instr.actions,
-        ...(plugin.instr.actionsFor?.(selectedNode, sourceNodes) ?? []),
-      ]
+    ? nodeTypeActions(plugin)
     : []
   const actionPrompts = suggestedActions.length > 0
     ? suggestedActions.map((action) => ({ id: action.id, label: action.label, prompt: action.prompt }))
@@ -343,7 +342,7 @@ export default function CanvasContextComposer({
               <div className="mb-1.5 flex flex-wrap gap-1 px-1" aria-label="任务来源节点">
                 {sourceNodes.slice(0, 6).map((node) => {
                   const sourcePlugin = getPlugin(node.type)
-                  const SourceIcon = sourcePlugin.icon
+                  const SourceIcon = nodeTypeIcon(sourcePlugin)
                   return (
                     <span
                       key={node.id}
@@ -421,7 +420,7 @@ export default function CanvasContextComposer({
             maxLength={250_000}
             disabled={submitting}
             aria-label={provenanceOrigin ? '历史会话与派生任务输入' : '任务提示词'}
-            placeholder={plugin?.instr.placeholder ?? context.placeholder}
+            placeholder={plugin?.instruction.placeholder ?? context.placeholder}
             onChange={(event) => store.setComposerDraft(draftKey, event.target.value)}
             onKeyDown={onKeyDown}
             className="max-h-28 min-h-11 min-w-0 flex-1 resize-none bg-transparent px-1 py-1.5 text-[12px] leading-5 text-gg-ink outline-none placeholder:text-[#98A2B3] disabled:opacity-65"

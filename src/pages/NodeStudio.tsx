@@ -32,7 +32,8 @@ import {
   type CustomNodeContentKind,
   type CustomNodeManifest,
 } from '@/node-studio/model'
-import { createCustomNodePlugin, registerCustomNodePlugins } from '@/node-studio/runtime'
+import { createCustomNodeType, registerCustomNodeTypes } from '@/node-studio/runtime'
+import type { PortDefinition } from '@/plugins/nodeTypeContracts'
 
 type PreviewState = 'empty' | 'content' | 'running' | 'error'
 
@@ -220,7 +221,7 @@ export default function NodeStudio({ api: injectedApi }: { api?: NodeDefinitionA
       const nextDefinitions = [...definitions, saved]
       setDefinitions(nextDefinitions)
       setDraft(saved)
-      if (install) registerCustomNodePlugins(nextDefinitions)
+      if (install) registerCustomNodeTypes(nextDefinitions)
       setNotice(install
         ? `已安装 ${saved.label} ${customNodeRuntimeId(saved)}，可在画布创建菜单中使用。`
         : `草稿已保存为修订 ${saved.revision}。`)
@@ -421,6 +422,29 @@ export default function NodeStudio({ api: injectedApi }: { api?: NodeDefinitionA
             <Field label="示例内容"><textarea value={draft.sampleContent} onChange={(event) => patchDraft({ sampleContent: event.target.value })} rows={4} /></Field>
           </Section>
 
+          <Section title="组合与端口">
+            <label className="flex items-center gap-2 text-[10.5px] text-gg-muted">
+              <input type="checkbox" checked={draft.containment.canHaveChildren} onChange={(event) => patchDraft({ containment: event.target.checked ? { ...draft.containment, canHaveChildren: true, maxDepth: Math.max(1, draft.containment.maxDepth) } : { canHaveChildren: false, allowedChildTypes: [], maxDepth: 0 } })} />
+              允许包含子节点
+            </label>
+            {draft.containment.canHaveChildren && <>
+              <Field label={`最大深度 · ${draft.containment.maxDepth}`}><input type="range" min="1" max="32" value={draft.containment.maxDepth} onChange={(event) => patchDraft({ containment: { ...draft.containment, maxDepth: Number(event.target.value) } })} /></Field>
+              <Field label="允许的 child type（每行一个）"><textarea value={draft.containment.allowedChildTypes.join('\n')} onChange={(event) => patchDraft({ containment: { ...draft.containment, allowedChildTypes: lines(event.target.value, 128) } })} rows={3} /></Field>
+            </>}
+            <Field label="端口：方向 key schema cardinality materialization"><textarea value={renderPorts(draft.ports)} onChange={(event) => patchDraft({ ports: parsePorts(event.target.value) })} rows={5} className="font-mono" /></Field>
+          </Section>
+
+          <Section title="执行与导出">
+            <Field label="执行 capability"><input value={draft.execution?.capability ?? ''} onChange={(event) => patchDraft({ execution: executionField(draft.execution, 'capability', event.target.value) })} placeholder="留空表示不可执行" className="font-mono" /></Field>
+            <Field label="执行 policy"><input value={draft.execution?.policy ?? ''} onChange={(event) => patchDraft({ execution: executionField(draft.execution, 'policy', event.target.value) })} placeholder="例如 sandboxed" className="font-mono" /></Field>
+            <Field label="Exporter capability（每行一个）"><textarea value={draft.exporters.join('\n')} onChange={(event) => patchDraft({ exporters: lines(event.target.value, 64) })} rows={3} className="font-mono" /></Field>
+            <label className="flex items-center gap-2 text-[10.5px] text-gg-muted">
+              <input type="checkbox" checked={draft.agent.constructible} onChange={(event) => patchDraft({ agent: event.target.checked ? { constructible: true, writableInitSchema: draft.agent.writableInitSchema ?? draft.initialPayloadSchema } : { constructible: false } })} />
+              Agent 可以在 GraphProposal 中创建
+            </label>
+            {draft.agent.constructible && <Field label="Agent writable init schema"><input value={draft.agent.writableInitSchema ?? ''} onChange={(event) => patchDraft({ agent: { constructible: true, writableInitSchema: event.target.value } })} className="font-mono" /></Field>}
+          </Section>
+
           <Section title="提示词与操作">
             <Field label="输入占位"><textarea value={draft.placeholder} onChange={(event) => patchDraft({ placeholder: event.target.value })} rows={2} /></Field>
             <Field label="快捷指令（每行一个）"><textarea value={draft.actions.join('\n')} onChange={(event) => patchDraft({ actions: event.target.value.split('\n').map((item) => item.trim()).filter(Boolean).slice(0, 6) })} rows={4} /></Field>
@@ -452,8 +476,55 @@ export default function NodeStudio({ api: injectedApi }: { api?: NodeDefinitionA
   )
 }
 
+function lines(value: string, limit: number): string[] {
+  return [...new Set(value.split('\n').map((item) => item.trim()).filter(Boolean))].slice(0, limit)
+}
+
+function renderPorts(ports: readonly PortDefinition[]): string {
+  return ports.map((port) => [
+    port.direction,
+    port.key,
+    port.schema,
+    port.cardinality,
+    port.materialization ?? '',
+  ].filter(Boolean).join(' ')).join('\n')
+}
+
+function parsePorts(value: string): PortDefinition[] {
+  return lines(value, 128).flatMap((line) => {
+    const [direction, key, schema, cardinality, materialization] = line.split(/\s+/u)
+    if ((direction !== 'input' && direction !== 'output')
+      || !key || !schema
+      || (cardinality !== 'one' && cardinality !== 'many')
+      || (materialization !== undefined
+        && !['inline', 'tray', 'child-node', 'canvas-node'].includes(materialization))) return []
+    return [{
+      direction,
+      key,
+      schema,
+      cardinality,
+      ...(materialization
+        ? { materialization: materialization as PortDefinition['materialization'] }
+        : {}),
+    }]
+  })
+}
+
+function executionField(
+  current: CustomNodeManifest['execution'],
+  key: 'capability' | 'policy',
+  value: string,
+): CustomNodeManifest['execution'] {
+  const next = {
+    capability: current?.capability ?? '',
+    policy: current?.policy ?? '',
+    [key]: value.trim(),
+  }
+  return next.capability || next.policy ? next : undefined
+}
+
 function NodeStudioPreview({ manifest, state }: { manifest: CustomNodeManifest; state: PreviewState }) {
-  const plugin = useMemo(() => createCustomNodePlugin(manifest), [manifest])
+  const plugin = useMemo(() => createCustomNodeType(manifest), [manifest])
   const previewNode = useMemo<CanvasNode>(() => ({
     id: 'node-studio-preview',
     type: plugin.id,

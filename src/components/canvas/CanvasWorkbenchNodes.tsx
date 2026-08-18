@@ -3,7 +3,7 @@ import { ExternalLink, LocateFixed, Search } from 'lucide-react'
 import { Link } from 'react-router'
 import type { CanvasNode, CanvasTask } from '@/canvas/model'
 import { deriveTaskStatus, type CanvasTaskRuntime } from '@/canvas/selectors'
-import { getPlugin } from '@/plugins/types'
+import { getPlugin, nodeTypeIcon } from '@/plugins/types'
 
 interface CanvasWorkbenchNodesProps {
   mode: 'search' | 'nodes'
@@ -154,7 +154,7 @@ export default function CanvasWorkbenchNodes({
       <div className="space-y-1" role="list" aria-label="画布节点">
         {visibleNodes.map((node) => {
           const plugin = getPlugin(node.type)
-          const Icon = plugin.icon
+          const Icon = nodeTypeIcon(plugin)
           const task = node.homeTaskId ? taskById.get(node.homeTaskId) : undefined
           const taskNodes = node.homeTaskId
             ? nodes.filter((candidate) => candidate.homeTaskId === node.homeTaskId)

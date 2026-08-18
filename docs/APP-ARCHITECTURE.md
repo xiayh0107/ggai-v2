@@ -31,14 +31,14 @@ The daemon's operational indices use the separate `MetadataStore` authority docu
 ```text
 Node definition / built-in declaration / Agent candidate (strict data)
                     ↓ exact validation
-              NodePlugin.ui template
+          NodeTypeDefinition.ui template
                     ↓
           NodeTemplateView (content only)
                     ↓
      CanvasNodeCard (one platform-owned shell)
 ```
 
-- `NodePlugin.ui` is an exact, serializable contract. A plugin selects one platform template; it
+- `NodeTypeDefinition.ui` is an exact, serializable contract. A definition selects one platform template; it
   cannot provide JSX, CSS, empty/running states, action chrome or layout.
 - `CanvasNodeCard` is the only Node shell. It owns header, content-state arbitration, activity,
   selection, ports, actions and resize. Node Studio previews this component directly.

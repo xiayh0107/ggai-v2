@@ -4,7 +4,7 @@ import { useArtifactText } from '@/canvas/artifactText'
 import type { CanvasArtifactViewerRequest } from '@/canvas/artifactViewerContext'
 import type { CanvasNode } from '@/canvas/model'
 import { MarkdownView } from '@/plugins/markdown'
-import { getPlugin } from '@/plugins/types'
+import { getPlugin, nodeTypeMarks } from '@/plugins/types'
 import CanvasRightDrawer from './CanvasRightDrawer'
 
 const MAX_VIEWER_TEXT_BYTES = 2 * 1024 * 1024
@@ -43,7 +43,7 @@ export default function CanvasArtifactViewer({
 }) {
   const closeRef = useRef<HTMLButtonElement>(null)
   const { artifact, title } = request
-  const marks = node ? getPlugin(node.type).instr.marksFor?.(node) ?? [] : []
+  const marks = node ? nodeTypeMarks(getPlugin(node.type), node) : []
   // 与选择工具条同一规则：有标记按钮的类型（文本）不再重复显示指令 chips。
   const showActions = marks.length === 0 && nodeActions.length > 0 && Boolean(onNodeAction)
 
