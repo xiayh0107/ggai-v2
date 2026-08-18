@@ -1,6 +1,11 @@
 import type { NodeExecution, ValueRef } from '../src/execution/contracts.js'
+import type {
+  FilesystemBinding,
+  FilesystemConflict,
+  WorkspaceRoot,
+} from '../src/filesystem/contracts.js'
 
-export const METADATA_SCHEMA_VERSION = 3 as const
+export const METADATA_SCHEMA_VERSION = 4 as const
 export const MINIMUM_SQLITE_VERSION = '3.51.3'
 
 export interface MetadataDiagnostics {
@@ -48,6 +53,16 @@ export type MetadataWorkerOperation =
       environmentDigest: string
       approvedAt: string
     }
+  | { operation: 'workspace-root-create'; root: StoredWorkspaceRoot }
+  | { operation: 'workspace-root-list'; projectId: string }
+  | { operation: 'workspace-root-get'; rootId: string }
+  | { operation: 'filesystem-binding-create'; binding: StoredFilesystemBinding }
+  | { operation: 'filesystem-binding-get'; bindingId: string }
+  | { operation: 'filesystem-binding-list-root'; rootId: string }
+  | { operation: 'filesystem-binding-delete'; bindingId: string }
+  | { operation: 'filesystem-binding-update'; bindingId: string; patch: FilesystemBindingUpdate }
+  | { operation: 'filesystem-conflict-create'; conflict: FilesystemConflict }
+  | { operation: 'filesystem-conflict-list'; projectId: string; openOnly: boolean }
   | { operation: 'provenance-append'; records: ProvenanceRecord[] }
   | { operation: 'provenance-query'; projectId: string; identity: string; limit: number }
   | { operation: 'close' }
@@ -60,6 +75,12 @@ export type MetadataWorkerResult =
   | NodeExecution
   | NodeExecution[]
   | ProvenanceRecord[]
+  | StoredWorkspaceRoot
+  | StoredWorkspaceRoot[]
+  | StoredFilesystemBinding
+  | StoredFilesystemBinding[]
+  | FilesystemConflict
+  | FilesystemConflict[]
   | boolean
   | null
 
@@ -70,6 +91,28 @@ export interface ProvenanceRecord {
   objectId: string
   attributes: Record<string, unknown>
 }
+
+export interface StoredWorkspaceRoot extends WorkspaceRoot {
+  canonicalPath: string
+}
+
+export interface StoredFilesystemBinding extends FilesystemBinding {
+  canvasProjectDir: string
+  fileIdentity: string | null
+  echoToken: string | null
+}
+
+export type FilesystemBindingUpdate = Partial<Pick<
+  StoredFilesystemBinding,
+  | 'relativePath'
+  | 'baseDigest'
+  | 'canvasDigest'
+  | 'diskDigest'
+  | 'state'
+  | 'fileIdentity'
+  | 'echoToken'
+  | 'updatedAt'
+>>
 
 export type MetadataWorkerResponse =
   | { id: number; ok: true; result: MetadataWorkerResult }

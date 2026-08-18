@@ -107,6 +107,8 @@ import { MetadataStore } from './metadataStore.js'
 import { NodeExecutionError, NodeExecutionService } from './nodeExecutions.js'
 import { AssetAssemblyExecutor } from './assetRasterizer.js'
 import { ComputeExecutor } from './computeExecutor.js'
+import { FilesystemService, FilesystemServiceError } from './filesystemService.js'
+import { MAX_FILESYSTEM_TREE_PAGE } from '../src/filesystem/contracts.js'
 import {
   createHttpRouter,
   type HttpRoute,
@@ -157,6 +159,7 @@ export interface DaemonServer {
   workspaceCapabilities: ServiceReader
   executions: NodeExecutionService
   compute: ComputeExecutor
+  filesystem: FilesystemService
   close(): Promise<void>
 }
 
@@ -210,6 +213,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
   if (options.workspaceVersionManager && versions.canvases !== canvas) {
     throw new TypeError('workspaceVersionManager and canvasCommandStoreManager must share a store')
   }
+  const filesystem = new FilesystemService(metadata, canvas)
   const projectionCanvases = workspaceProjectionCommitter(versions)
   const runs = options.runManager ?? new RunManager({
     projectRoot: options.projectRoot,
@@ -274,6 +278,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
       taskRunPreflight,
       executions,
       compute,
+      filesystem,
     }, domainRouter)
       .catch((error: unknown) => writeError(response, error))
   })
@@ -294,8 +299,9 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     workspaceCapabilities,
     executions,
     compute,
+    filesystem,
     close() {
-      closePromise ??= closeDaemonServer(
+      closePromise ??= filesystem.close().then(() => closeDaemonServer(
         server,
         sockets,
         runs,
@@ -309,7 +315,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
         ownsCapabilityExecutionScopes,
         metadata,
         ownsMetadata,
-      )
+      ))
       return closePromise
     },
   }
@@ -331,6 +337,7 @@ interface RouteContext extends HttpRouteContext {
   lifecycle: { closing: boolean }
   executions: NodeExecutionService
   compute: ComputeExecutor
+  filesystem: FilesystemService
 }
 
 async function route(
@@ -386,6 +393,143 @@ async function route(
       schemaVersion: 1,
       ...await context.compute.diagnostics(),
       presets: ['python-3.13', 'node-24'],
+    })
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/workspace/roots') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    writeJson(response, 200, {
+      schemaVersion: 1,
+      roots: await context.filesystem.listRoots(operationalProjectId(projectDir)),
+    })
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/workspace/roots') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const body = requestObject(await readJson(request))
+    if (!hasExactBodyKeys(body, ['displayName', 'path'])) {
+      throw new ProtocolError('workspace root body is invalid', 'invalid_workspace_root', 400)
+    }
+    writeJson(response, 201, {
+      schemaVersion: 1,
+      root: await context.filesystem.createRoot({
+        projectId: operationalProjectId(projectDir),
+        displayName: requiredBodyString(body, 'displayName', 120),
+        requestedPath: requiredBodyString(body, 'path', 4_096),
+      }),
+    })
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/filesystem/tree') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const rootId = singleQueryParameter(url, 'rootId')
+    if (!rootId) throw new ProtocolError('rootId is required', 'invalid_workspace_root', 400)
+    writeJson(response, 200, {
+      schemaVersion: 1,
+      ...await context.filesystem.tree({
+        projectId: operationalProjectId(projectDir),
+        rootId,
+        relativePath: singleQueryParameter(url, 'relativePath') ?? '',
+        cursor: singleQueryParameter(url, 'cursor'),
+        limit: optionalIntegerQuery(url, 'limit', { min: 1, max: MAX_FILESYSTEM_TREE_PAGE }),
+      }),
+    })
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/filesystem/bindings') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const body = requestObject(await readJson(request))
+    if (!hasExactBodyKeys(body, [
+      'branch', 'baseRevision', 'mutationId', 'nodeId', 'rootId', 'relativePath', 'kind', 'mode',
+    ])) throw new ProtocolError('filesystem binding body is invalid', 'invalid_filesystem_binding', 400)
+    const branch = parseCanvasBranch(requiredBodyString(body, 'branch', 200))
+    const baseRevision = requiredBodySafeInteger(body, 'baseRevision', {
+      min: 0, max: Number.MAX_SAFE_INTEGER,
+    })
+    const mutationId = requiredBodyString(body, 'mutationId', 200)
+    const nodeId = parseTaskId(requiredBodyString(body, 'nodeId', 200))
+    const latest = (await context.versions.getCanvas(projectDir, branch)).canvas
+    const leasedProjectDir = await context.canvas.acquireProjectLease(projectDir)
+    const created = await context.filesystem.createBinding({
+      projectId: operationalProjectId(projectDir),
+      canvasProjectDir: leasedProjectDir,
+      canvasBranch: branch,
+      document: latest.document,
+      nodeId,
+      rootId: requiredBodyString(body, 'rootId', 200),
+      relativePath: requiredBodyString(body, 'relativePath', 4_096),
+      kind: body.kind === 'file' || body.kind === 'directory'
+        ? body.kind : (() => { throw new ProtocolError('binding kind is invalid') })(),
+      mode: body.mode === 'fs-authoritative'
+        || body.mode === 'canvas-authoritative'
+        || body.mode === 'bidirectional'
+        ? body.mode : (() => { throw new ProtocolError('binding mode is invalid') })(),
+    })
+    let committed
+    try {
+      const parsed = parseCanvasCommandRequest({
+        branch, baseRevision, mutationId, command: created.command,
+      })
+      committed = (await context.versions.commitCanvas(
+        projectDir, parsed.branch, parsed.baseRevision, parsed.mutationId,
+        parsed.command as OrdinaryCanvasCommand,
+      )).canvas
+    } catch (error) {
+      await context.filesystem.deleteBinding(created.binding.bindingId).catch(() => undefined)
+      throw error
+    }
+    const binding = await context.filesystem.reconcile(
+      created.binding.bindingId,
+      operationalProjectId(projectDir),
+    ).catch(() => created.binding)
+    const reconciledCanvas = (await context.versions.getCanvas(projectDir, branch)).canvas
+    writeJson(response, 201, {
+      schemaVersion: 1,
+      binding,
+      canvas: reconciledCanvas.revision >= committed.revision ? reconciledCanvas : committed,
+    })
+    return
+  }
+
+  const filesystemSaveMatch = pathname.match(/^\/filesystem\/bindings\/([^/]+)\/save$/u)
+  if (filesystemSaveMatch && request.method === 'POST') {
+    const bindingId = parseTaskId(decodeURIComponent(filesystemSaveMatch[1]!))
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const branch = parseCanvasBranch(singleQueryParameter(url, 'branch') ?? 'main')
+    const body = requestObject(await readJson(request))
+    if (!hasExactBodyKeys(body, [])) throw new ProtocolError('filesystem save body must be empty')
+    const document = (await context.versions.getCanvas(projectDir, branch)).canvas.document
+    writeJson(response, 200, {
+      schemaVersion: 1,
+      binding: await context.filesystem.save({
+        projectId: operationalProjectId(projectDir), bindingId, document,
+      }),
+    })
+    return
+  }
+
+  const filesystemBindingMatch = pathname.match(/^\/filesystem\/bindings\/([^/]+)$/u)
+  if (filesystemBindingMatch && request.method === 'GET') {
+    const bindingId = parseTaskId(decodeURIComponent(filesystemBindingMatch[1]!))
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    writeJson(response, 200, {
+      schemaVersion: 1,
+      binding: await context.filesystem.getBinding(
+        bindingId, operationalProjectId(projectDir),
+      ),
+    })
+    return
+  }
+
+  if (request.method === 'GET' && pathname === '/filesystem/conflicts') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    writeJson(response, 200, {
+      schemaVersion: 1,
+      conflicts: await context.filesystem.listConflicts(operationalProjectId(projectDir)),
     })
     return
   }
@@ -2245,6 +2389,12 @@ function writeError(response: ServerResponse, error: unknown): void {
     return
   }
   if (error instanceof NodeExecutionError) {
+    writeJson(response, error.status, {
+      error: { code: error.code, message: error.message },
+    })
+    return
+  }
+  if (error instanceof FilesystemServiceError) {
     writeJson(response, error.status, {
       error: { code: error.code, message: error.message },
     })

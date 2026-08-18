@@ -10,9 +10,13 @@ import {
   type MetadataWorkerResponse,
   type MetadataWorkerResult,
   type ProvenanceRecord,
+  type FilesystemBindingUpdate,
+  type StoredFilesystemBinding,
+  type StoredWorkspaceRoot,
 } from './metadataProtocol.js'
 import { canonicalizePotentialPath, isPathWithin } from './permissions.js'
 import type { NodeExecution, ValueRef } from '../src/execution/contracts.js'
+import type { FilesystemConflict } from '../src/filesystem/contracts.js'
 
 export class MetadataStoreError extends Error {
   constructor(message: string, cause?: unknown) {
@@ -151,6 +155,77 @@ export class MetadataStore {
     await this.open()
     const result = await this.#request({ operation: 'compute-approval-grant', ...input })
     if (result !== true) throw new MetadataStoreError('Metadata worker rejected compute approval')
+  }
+
+  async createWorkspaceRoot(root: StoredWorkspaceRoot): Promise<StoredWorkspaceRoot> {
+    await this.open()
+    return requireStoredWorkspaceRoot(await this.#request({ operation: 'workspace-root-create', root }))
+  }
+
+  async listWorkspaceRoots(projectId: string): Promise<StoredWorkspaceRoot[]> {
+    await this.open()
+    const result = await this.#request({ operation: 'workspace-root-list', projectId })
+    if (!Array.isArray(result)) throw new MetadataStoreError('Metadata worker returned invalid roots')
+    return result.map((entry) => requireStoredWorkspaceRoot(entry as MetadataWorkerResult))
+  }
+
+  async getWorkspaceRoot(rootId: string): Promise<StoredWorkspaceRoot | null> {
+    await this.open()
+    const result = await this.#request({ operation: 'workspace-root-get', rootId })
+    return result === null ? null : requireStoredWorkspaceRoot(result)
+  }
+
+  async createFilesystemBinding(binding: StoredFilesystemBinding): Promise<StoredFilesystemBinding> {
+    await this.open()
+    return requireStoredFilesystemBinding(await this.#request({
+      operation: 'filesystem-binding-create', binding,
+    }))
+  }
+
+  async getFilesystemBinding(bindingId: string): Promise<StoredFilesystemBinding | null> {
+    await this.open()
+    const result = await this.#request({ operation: 'filesystem-binding-get', bindingId })
+    return result === null ? null : requireStoredFilesystemBinding(result)
+  }
+
+  async listFilesystemBindingsForRoot(rootId: string): Promise<StoredFilesystemBinding[]> {
+    await this.open()
+    const result = await this.#request({ operation: 'filesystem-binding-list-root', rootId })
+    if (!Array.isArray(result)) throw new MetadataStoreError('Metadata worker returned invalid bindings')
+    return result.map((entry) => requireStoredFilesystemBinding(entry as MetadataWorkerResult))
+  }
+
+  async deleteFilesystemBinding(bindingId: string): Promise<boolean> {
+    await this.open()
+    const result = await this.#request({ operation: 'filesystem-binding-delete', bindingId })
+    if (typeof result !== 'boolean') throw new MetadataStoreError('Metadata worker returned invalid deletion')
+    return result
+  }
+
+  async updateFilesystemBinding(
+    bindingId: string,
+    patch: FilesystemBindingUpdate,
+  ): Promise<StoredFilesystemBinding> {
+    await this.open()
+    return requireStoredFilesystemBinding(await this.#request({
+      operation: 'filesystem-binding-update', bindingId, patch,
+    }))
+  }
+
+  async createFilesystemConflict(conflict: FilesystemConflict): Promise<FilesystemConflict> {
+    await this.open()
+    return requireFilesystemConflict(await this.#request({
+      operation: 'filesystem-conflict-create', conflict,
+    }))
+  }
+
+  async listFilesystemConflicts(projectId: string, openOnly = true): Promise<FilesystemConflict[]> {
+    await this.open()
+    const result = await this.#request({
+      operation: 'filesystem-conflict-list', projectId, openOnly,
+    })
+    if (!Array.isArray(result)) throw new MetadataStoreError('Metadata worker returned invalid conflicts')
+    return result.map((entry) => requireFilesystemConflict(entry as MetadataWorkerResult))
   }
 
   async appendProvenance(records: ProvenanceRecord[]): Promise<void> {
@@ -311,4 +386,25 @@ function requireExecution(value: MetadataWorkerResult): NodeExecution {
     throw new MetadataStoreError('Metadata worker returned an invalid execution')
   }
   return structuredClone(value) as NodeExecution
+}
+
+function requireStoredWorkspaceRoot(value: MetadataWorkerResult): StoredWorkspaceRoot {
+  if (!value || Array.isArray(value) || typeof value !== 'object' || !('rootId' in value)) {
+    throw new MetadataStoreError('Metadata worker returned an invalid workspace root')
+  }
+  return structuredClone(value) as StoredWorkspaceRoot
+}
+
+function requireStoredFilesystemBinding(value: MetadataWorkerResult): StoredFilesystemBinding {
+  if (!value || Array.isArray(value) || typeof value !== 'object' || !('bindingId' in value)) {
+    throw new MetadataStoreError('Metadata worker returned an invalid filesystem binding')
+  }
+  return structuredClone(value) as StoredFilesystemBinding
+}
+
+function requireFilesystemConflict(value: MetadataWorkerResult): FilesystemConflict {
+  if (!value || Array.isArray(value) || typeof value !== 'object' || !('conflictId' in value)) {
+    throw new MetadataStoreError('Metadata worker returned an invalid filesystem conflict')
+  }
+  return structuredClone(value) as FilesystemConflict
 }

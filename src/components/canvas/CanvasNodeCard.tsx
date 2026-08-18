@@ -35,6 +35,7 @@ import { type CanvasMenuItem } from './CanvasEntityMenu'
 import CanvasNodeActivityStrip from './CanvasNodeActivity'
 import CanvasNodeShell from './CanvasNodeShell'
 import CanvasNodeExecutionTray from './CanvasNodeExecutionTray'
+import CanvasFilesystemBindingStatus from './CanvasFilesystemBindingStatus'
 
 /** 节点右上角水平图标条的动作图标：与旧版 ⋯ 菜单同一套动作 id。 */
 const NODE_ACTION_ICONS: Record<string, LucideIcon> = {
@@ -234,6 +235,13 @@ export default function CanvasNodeCard({
           branch={canvasBranch}
           executable={Boolean(plugin.execution)}
           onSelect={(executionId) => onSelectExecution?.(node.id, executionId)}
+        />
+      )}
+      {selected && node.bindingId && (
+        <CanvasFilesystemBindingStatus
+          bindingId={node.bindingId}
+          projectDir={projectDir}
+          branch={canvasBranch}
         />
       )}
     </CanvasNodeShell>

@@ -8,12 +8,16 @@ import {
   type MetadataWorkerResponse,
   type MetadataWorkerResult,
   type ProvenanceRecord,
+  type FilesystemBindingUpdate,
+  type StoredFilesystemBinding,
+  type StoredWorkspaceRoot,
 } from './metadataProtocol.js'
 import {
   validateExecutionOutputs,
   type NodeExecution,
   type ValueRef,
 } from '../src/execution/contracts.js'
+import type { FilesystemConflict } from '../src/filesystem/contracts.js'
 
 interface MetadataWorkerData {
   databasePath: string
@@ -86,6 +90,29 @@ async function execute(request: MetadataWorkerRequest): Promise<MetadataWorkerRe
     case 'compute-approval-grant':
       grantComputeApproval(requireDatabase(), request)
       return true
+    case 'workspace-root-create':
+      createWorkspaceRoot(requireDatabase(), request.root)
+      return structuredClone(request.root)
+    case 'workspace-root-list':
+      return listWorkspaceRoots(requireDatabase(), request.projectId)
+    case 'workspace-root-get':
+      return getWorkspaceRoot(requireDatabase(), request.rootId)
+    case 'filesystem-binding-create':
+      createFilesystemBinding(requireDatabase(), request.binding)
+      return structuredClone(request.binding)
+    case 'filesystem-binding-get':
+      return getFilesystemBinding(requireDatabase(), request.bindingId)
+    case 'filesystem-binding-list-root':
+      return listFilesystemBindingsForRoot(requireDatabase(), request.rootId)
+    case 'filesystem-binding-delete':
+      return deleteFilesystemBinding(requireDatabase(), request.bindingId)
+    case 'filesystem-binding-update':
+      return updateFilesystemBinding(requireDatabase(), request.bindingId, request.patch)
+    case 'filesystem-conflict-create':
+      createFilesystemConflict(requireDatabase(), request.conflict)
+      return structuredClone(request.conflict)
+    case 'filesystem-conflict-list':
+      return listFilesystemConflicts(requireDatabase(), request.projectId, request.openOnly)
     case 'provenance-append':
       appendProvenance(requireDatabase(), request.records)
       return request.records.map((record) => structuredClone(record))
@@ -100,6 +127,149 @@ async function execute(request: MetadataWorkerRequest): Promise<MetadataWorkerRe
       request satisfies never
       throw new Error('Unsupported metadata worker operation')
   }
+}
+
+function createWorkspaceRoot(subject: DatabaseSync, root: StoredWorkspaceRoot): void {
+  subject.prepare(`
+    INSERT INTO workspace_roots (
+      root_id, project_id, display_name, canonical_path, platform_provider, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `).run(root.rootId, root.projectId, root.displayName, root.canonicalPath, root.platformProvider, root.createdAt)
+}
+
+function listWorkspaceRoots(subject: DatabaseSync, projectId: string): StoredWorkspaceRoot[] {
+  return subject.prepare(`
+    SELECT * FROM workspace_roots WHERE project_id = ? ORDER BY display_name, root_id
+  `).all(projectId).map(storedWorkspaceRoot)
+}
+
+function getWorkspaceRoot(subject: DatabaseSync, rootId: string): StoredWorkspaceRoot | null {
+  const row = subject.prepare('SELECT * FROM workspace_roots WHERE root_id = ?').get(rootId)
+  return row ? storedWorkspaceRoot(row) : null
+}
+
+function storedWorkspaceRoot(row: Record<string, unknown>): StoredWorkspaceRoot {
+  return {
+    rootId: String(row.root_id),
+    projectId: String(row.project_id),
+    displayName: String(row.display_name),
+    canonicalPath: String(row.canonical_path),
+    platformProvider: String(row.platform_provider) as 'macos',
+    createdAt: String(row.created_at),
+  }
+}
+
+function createFilesystemBinding(subject: DatabaseSync, binding: StoredFilesystemBinding): void {
+  subject.prepare(`
+    INSERT INTO node_bindings (
+      binding_id, project_id, canvas_branch, canvas_project_dir, node_id, root_id,
+      relative_path, kind, mode, base_digest, canvas_digest, disk_digest, state,
+      file_identity, echo_token, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    binding.bindingId, binding.projectId, binding.canvasBranch, binding.canvasProjectDir,
+    binding.nodeId, binding.rootId, binding.relativePath, binding.kind, binding.mode,
+    binding.baseDigest, binding.canvasDigest, binding.diskDigest, binding.state,
+    binding.fileIdentity, binding.echoToken, binding.updatedAt,
+  )
+}
+
+function getFilesystemBinding(subject: DatabaseSync, bindingId: string): StoredFilesystemBinding | null {
+  const row = subject.prepare('SELECT * FROM node_bindings WHERE binding_id = ?').get(bindingId)
+  return row ? storedFilesystemBinding(row) : null
+}
+
+function listFilesystemBindingsForRoot(
+  subject: DatabaseSync,
+  rootId: string,
+): StoredFilesystemBinding[] {
+  return subject.prepare(`
+    SELECT * FROM node_bindings WHERE root_id = ? ORDER BY relative_path, binding_id
+  `).all(rootId).map(storedFilesystemBinding)
+}
+
+function deleteFilesystemBinding(subject: DatabaseSync, bindingId: string): boolean {
+  return subject.prepare('DELETE FROM node_bindings WHERE binding_id = ?').run(bindingId).changes === 1
+}
+
+function storedFilesystemBinding(row: Record<string, unknown>): StoredFilesystemBinding {
+  return {
+    bindingId: String(row.binding_id),
+    projectId: String(row.project_id),
+    canvasBranch: String(row.canvas_branch),
+    canvasProjectDir: String(row.canvas_project_dir),
+    nodeId: String(row.node_id),
+    rootId: String(row.root_id),
+    relativePath: String(row.relative_path),
+    kind: String(row.kind) as StoredFilesystemBinding['kind'],
+    mode: String(row.mode) as StoredFilesystemBinding['mode'],
+    baseDigest: row.base_digest === null ? null : String(row.base_digest),
+    canvasDigest: row.canvas_digest === null ? null : String(row.canvas_digest),
+    diskDigest: row.disk_digest === null ? null : String(row.disk_digest),
+    state: String(row.state) as StoredFilesystemBinding['state'],
+    fileIdentity: row.file_identity === null ? null : String(row.file_identity),
+    echoToken: row.echo_token === null ? null : String(row.echo_token),
+    updatedAt: String(row.updated_at),
+  }
+}
+
+function updateFilesystemBinding(
+  subject: DatabaseSync,
+  bindingId: string,
+  patch: FilesystemBindingUpdate,
+): StoredFilesystemBinding {
+  const columns: Record<keyof FilesystemBindingUpdate, string> = {
+    relativePath: 'relative_path', baseDigest: 'base_digest', canvasDigest: 'canvas_digest',
+    diskDigest: 'disk_digest', state: 'state', fileIdentity: 'file_identity',
+    echoToken: 'echo_token', updatedAt: 'updated_at',
+  }
+  const entries = Object.entries(patch) as Array<[keyof FilesystemBindingUpdate, unknown]>
+  if (entries.length === 0 || entries.some(([key]) => !columns[key])) {
+    throw new TypeError('filesystem binding update is invalid')
+  }
+  const assignments = entries.map(([key]) => `${columns[key]} = ?`).join(', ')
+  const values = entries.map(([, value]) => {
+    if (value === null || typeof value === 'string') return value
+    throw new TypeError('filesystem binding update value is invalid')
+  })
+  const result = subject.prepare(`UPDATE node_bindings SET ${assignments} WHERE binding_id = ?`)
+    .run(...values, bindingId)
+  if (result.changes !== 1) throw new Error('filesystem binding does not exist')
+  const updated = getFilesystemBinding(subject, bindingId)
+  if (!updated) throw new Error('filesystem binding disappeared')
+  return updated
+}
+
+function createFilesystemConflict(subject: DatabaseSync, conflict: FilesystemConflict): void {
+  subject.prepare(`
+    INSERT INTO sync_conflicts (
+      conflict_id, binding_id, base_digest, canvas_digest, disk_digest,
+      state, created_at, resolved_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    conflict.conflictId, conflict.bindingId, conflict.baseDigest, conflict.canvasDigest,
+    conflict.diskDigest, conflict.state, conflict.createdAt, conflict.resolvedAt,
+  )
+}
+
+function listFilesystemConflicts(
+  subject: DatabaseSync,
+  projectId: string,
+  openOnly: boolean,
+): FilesystemConflict[] {
+  return subject.prepare(`
+    SELECT c.* FROM sync_conflicts c
+    JOIN node_bindings b ON b.binding_id = c.binding_id
+    WHERE b.project_id = ? ${openOnly ? "AND c.state = 'open'" : ''}
+    ORDER BY c.created_at DESC, c.conflict_id DESC
+  `).all(projectId).map((row) => ({
+    conflictId: String(row.conflict_id), bindingId: String(row.binding_id),
+    baseDigest: row.base_digest === null ? null : String(row.base_digest),
+    canvasDigest: String(row.canvas_digest), diskDigest: String(row.disk_digest),
+    state: String(row.state) as FilesystemConflict['state'],
+    createdAt: String(row.created_at),
+    resolvedAt: row.resolved_at === null ? null : String(row.resolved_at),
+  }))
 }
 
 function markExecutionRunning(subject: DatabaseSync, executionId: string): NodeExecution {
@@ -378,7 +548,7 @@ function migrate(subject: DatabaseSync): void {
   }
   if (version === METADATA_SCHEMA_VERSION) return
 
-  if (version === 1 || version === 2) {
+  if (version === 1 || version === 2 || version === 3) {
     subject.exec('BEGIN IMMEDIATE')
     try {
       subject.exec(`
@@ -388,14 +558,18 @@ function migrate(subject: DatabaseSync): void {
             ON node_executions(project_id, canvas_branch, node_id, cache_key, finished_at DESC)
             WHERE status = 'succeeded';
         ` : ''}
-        CREATE TABLE compute_approvals (
+        ${version <= 2 ? `CREATE TABLE compute_approvals (
           project_id TEXT NOT NULL,
           node_id TEXT NOT NULL,
           code_digest TEXT NOT NULL,
           environment_digest TEXT NOT NULL,
           approved_at TEXT NOT NULL,
           PRIMARY KEY (project_id, node_id, code_digest, environment_digest)
-        );
+        );` : ''}
+        ${hasTableColumn(subject, 'node_bindings', 'canvas_project_dir')
+          ? '' : "ALTER TABLE node_bindings ADD COLUMN canvas_project_dir TEXT NOT NULL DEFAULT '.';"}
+        ${hasTableColumn(subject, 'node_bindings', 'file_identity')
+          ? '' : 'ALTER TABLE node_bindings ADD COLUMN file_identity TEXT;'}
         PRAGMA user_version = ${METADATA_SCHEMA_VERSION};
       `)
       subject.exec('COMMIT')
@@ -468,6 +642,7 @@ function migrate(subject: DatabaseSync): void {
         binding_id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL,
         canvas_branch TEXT NOT NULL,
+        canvas_project_dir TEXT NOT NULL,
         node_id TEXT NOT NULL,
         root_id TEXT NOT NULL REFERENCES workspace_roots(root_id) ON DELETE RESTRICT,
         relative_path TEXT NOT NULL,
@@ -477,6 +652,7 @@ function migrate(subject: DatabaseSync): void {
         canvas_digest TEXT,
         disk_digest TEXT,
         state TEXT NOT NULL CHECK (state IN ('clean', 'canvas-dirty', 'disk-dirty', 'conflict', 'missing')),
+        file_identity TEXT,
         echo_token TEXT,
         updated_at TEXT NOT NULL,
         UNIQUE (project_id, canvas_branch, node_id),
@@ -579,6 +755,11 @@ function scalarNumber(subject: DatabaseSync, sql: string): number {
   const field = Object.values(value)[0]
   if (typeof field !== 'number') throw new Error(`SQLite query returned a non-number value: ${sql}`)
   return field
+}
+
+function hasTableColumn(subject: DatabaseSync, table: string, column: string): boolean {
+  return subject.prepare(`PRAGMA table_info(${table})`).all()
+    .some((row) => row.name === column)
 }
 
 function compareVersions(left: string, right: string): number {
