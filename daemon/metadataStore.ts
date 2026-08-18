@@ -124,6 +124,35 @@ export class MetadataStore {
     return requireExecution(await this.#request({ operation: 'execution-complete', ...input }))
   }
 
+  async markExecutionRunning(executionId: string): Promise<NodeExecution> {
+    await this.open()
+    return requireExecution(await this.#request({ operation: 'execution-mark-running', executionId }))
+  }
+
+  async hasComputeApproval(input: {
+    projectId: string
+    nodeId: string
+    codeDigest: string
+    environmentDigest: string
+  }): Promise<boolean> {
+    await this.open()
+    const result = await this.#request({ operation: 'compute-approval-check', ...input })
+    if (typeof result !== 'boolean') throw new MetadataStoreError('Metadata worker returned invalid approval')
+    return result
+  }
+
+  async grantComputeApproval(input: {
+    projectId: string
+    nodeId: string
+    codeDigest: string
+    environmentDigest: string
+    approvedAt: string
+  }): Promise<void> {
+    await this.open()
+    const result = await this.#request({ operation: 'compute-approval-grant', ...input })
+    if (result !== true) throw new MetadataStoreError('Metadata worker rejected compute approval')
+  }
+
   async appendProvenance(records: ProvenanceRecord[]): Promise<void> {
     await this.open()
     await this.#request({ operation: 'provenance-append', records })

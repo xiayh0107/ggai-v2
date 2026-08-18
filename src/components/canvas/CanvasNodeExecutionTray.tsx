@@ -1,4 +1,4 @@
-import { Play, RefreshCw } from 'lucide-react'
+import { Play, RefreshCw, ShieldCheck } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { DAEMON_URL } from '@/agent/config'
 import type { CanvasNode } from '@/canvas/model'
@@ -47,6 +47,18 @@ export default function CanvasNodeExecutionTray({
     }
   }
   const latest = history[0]
+  const approve = async () => {
+    if (!latest || latest.status !== 'awaiting-approval') return
+    setBusy(true)
+    try {
+      await client.approve({ projectDir, branch, executionId: latest.executionId })
+      await refresh()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '计算审批失败')
+    } finally {
+      setBusy(false)
+    }
+  }
   return (
     <div data-node-execution-tray className="mt-2 flex items-center gap-2 border-t border-gg-line pt-2 text-[9.5px] text-gg-muted">
       {executable && (
@@ -55,6 +67,11 @@ export default function CanvasNodeExecutionTray({
         </button>
       )}
       <button type="button" aria-label="刷新执行历史" onClick={() => void refresh()} className="flex h-6 w-6 items-center justify-center rounded-[7px] hover:bg-gg-subtle"><RefreshCw size={10} /></button>
+      {latest?.status === 'awaiting-approval' && (
+        <button type="button" disabled={busy} onClick={() => void approve()} className="flex h-6 items-center gap-1 rounded-[7px] bg-amber-50 px-2 text-amber-800 disabled:opacity-50">
+          <ShieldCheck size={10} /> 批准此代码与环境
+        </button>
+      )}
       {latest ? (
         <button type="button" onClick={() => onSelect?.(latest.executionId)} className="truncate hover:text-gg-primary">
           {latest.status} · {Object.values(latest.outputs).reduce((count, values) => count + values.length, 0)} outputs

@@ -1,6 +1,6 @@
 import type { NodeExecution, ValueRef } from '../src/execution/contracts.js'
 
-export const METADATA_SCHEMA_VERSION = 2 as const
+export const METADATA_SCHEMA_VERSION = 3 as const
 export const MINIMUM_SQLITE_VERSION = '3.51.3'
 
 export interface MetadataDiagnostics {
@@ -32,6 +32,22 @@ export type MetadataWorkerOperation =
       finishedAt: string
       error?: { code: string; message: string }
     }
+  | { operation: 'execution-mark-running'; executionId: string }
+  | {
+      operation: 'compute-approval-check'
+      projectId: string
+      nodeId: string
+      codeDigest: string
+      environmentDigest: string
+    }
+  | {
+      operation: 'compute-approval-grant'
+      projectId: string
+      nodeId: string
+      codeDigest: string
+      environmentDigest: string
+      approvedAt: string
+    }
   | { operation: 'provenance-append'; records: ProvenanceRecord[] }
   | { operation: 'provenance-query'; projectId: string; identity: string; limit: number }
   | { operation: 'close' }
@@ -44,6 +60,7 @@ export type MetadataWorkerResult =
   | NodeExecution
   | NodeExecution[]
   | ProvenanceRecord[]
+  | boolean
   | null
 
 export interface ProvenanceRecord {
