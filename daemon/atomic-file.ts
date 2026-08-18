@@ -10,6 +10,11 @@ export interface FileQuarantine {
 
 /** Durably replaces a UTF-8 file without exposing a partially-written result. */
 export async function atomicWriteText(filePath: string, contents: string): Promise<void> {
+  await atomicWriteBytes(filePath, Buffer.from(contents, 'utf8'))
+}
+
+/** Durably replaces a binary file without exposing a partially-written result. */
+export async function atomicWriteBytes(filePath: string, contents: Uint8Array): Promise<void> {
   const directory = dirname(filePath)
   await mkdir(directory, { recursive: true, mode: 0o700 })
   const temporaryPath = join(
@@ -20,7 +25,7 @@ export async function atomicWriteText(filePath: string, contents: string): Promi
 
   try {
     handle = await open(temporaryPath, 'wx', 0o600)
-    await handle.writeFile(contents, 'utf8')
+    await handle.writeFile(contents)
     await handle.sync()
     await handle.close()
     handle = undefined

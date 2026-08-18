@@ -1,5 +1,8 @@
 # Task-Centric Canvas
 
+相关运行时契约另见 [Node executions](./NODE-EXECUTIONS.md) 与
+[editable asset assembly](./ASSET-ASSEMBLY.md)。
+
 本文是 Canvas 的规范性架构文档。实现、测试与协议若和本文冲突，以本文定义的信任边界与不变量为准。节点、社区插件与 Agent 上下文的映射另见 [`PLUGIN-CONTEXT-CONTRACT.md`](./PLUGIN-CONTEXT-CONTRACT.md)。仓库只维护一套当前实现；已归档格式不能和当前 daemon 交叉写入同一分支。
 
 ## 1. 稳定领域边界

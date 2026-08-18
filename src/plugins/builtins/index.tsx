@@ -110,6 +110,49 @@ const builtinPlugins: readonly NodeTypeDefinition[] = [
     artifactClaims: [],
   }),
   builtin({
+    id: 'asset-assembly', label: '素材组合', description: '组合可编辑素材并生成确定性 PNG / SVG', icon: 'graphic',
+    defaultWidth: 480,
+    initialPayloadSchema: 'ggai://schema/payload/asset-assembly',
+    initialPayload: { background: '#ffffff00', density: 144 },
+    ui: defineNodeUi('card'),
+    instruction: { placeholder: '添加素材部件和形状，组合新的视觉素材…', actions: [], marks: [] },
+    containment: { canHaveChildren: true, allowedChildTypes: ['asset-part', 'shape'], maxDepth: 32 },
+    execution: { capability: 'asset-assembly', policy: 'trusted-provider' },
+    ports: [
+      { key: 'png', direction: 'output', schema: 'ggai://value/image', cardinality: 'one', materialization: 'tray' },
+      { key: 'svg', direction: 'output', schema: 'ggai://value/image', cardinality: 'one', materialization: 'tray' },
+    ],
+    exporters: ['rasterizer'],
+    nodeContext: nodeContextPolicyForBuiltin('smart'),
+    artifactClaims: [],
+  }),
+  builtin({
+    id: 'asset-part', label: '素材部件', description: '引用单一可信素材的可编辑图层', icon: 'image',
+    defaultWidth: 300,
+    initialPayloadSchema: 'ggai://schema/payload/asset-part',
+    initialPayload: {
+      sourceRect: { x: 0, y: 0, w: 300, h: 200 },
+      pivot: { x: 0, y: 0 }, opacity: 1, blend: 'normal', alt: '',
+    },
+    ui: defineNodeUi('media'),
+    instruction: { placeholder: '描述这个素材部件的用途…', actions: [], marks: [] },
+    nodeContext: nodeContextPolicyForBuiltin('image'),
+    artifactClaims: artifactClaimsForBuiltin('image'),
+  }),
+  builtin({
+    id: 'shape', label: '形状', description: '素材组合中的声明式可编辑形状', icon: 'graphic',
+    defaultWidth: 300,
+    initialPayloadSchema: 'ggai://schema/payload/shape',
+    initialPayload: {
+      kind: 'rectangle', fill: '#d9e5ff', stroke: 'transparent', strokeWidth: 0, cornerRadius: 12,
+    },
+    ui: defineNodeUi('card'),
+    instruction: { placeholder: '设置形状的外观…', actions: [], marks: [] },
+    exporters: ['rasterizer'],
+    nodeContext: nodeContextPolicyForBuiltin('graphic'),
+    artifactClaims: [],
+  }),
+  builtin({
     id: 'file', label: '文件', description: '未识别产物的安全通用视图', icon: 'file',
     creatable: false, defaultWidth: 320,
     ui: defineNodeUi('file'),
@@ -136,6 +179,9 @@ function builtin(
     containment?: NodeTypeDefinition['containment']
     ports?: NodeTypeDefinition['ports']
     execution?: NodeTypeDefinition['execution']
+    exporters?: NodeTypeDefinition['exporters']
+    initialPayloadSchema?: NodeTypeDefinition['initialPayloadSchema']
+    initialPayload?: NodeTypeDefinition['initialPayload']
   },
 ): NodeTypeDefinition {
   const creatable = input.creatable ?? true
@@ -143,8 +189,8 @@ function builtin(
     schemaVersion: NODE_TYPE_DEFINITION_SCHEMA_VERSION,
     revision: 1,
     creatable,
-    initialPayloadSchema: 'ggai://schema/payload/open',
-    initialPayload: {},
+    initialPayloadSchema: input.initialPayloadSchema ?? 'ggai://schema/payload/open',
+    initialPayload: input.initialPayload ?? {},
     containment: { canHaveChildren: false, allowedChildTypes: [], maxDepth: 0 },
     ports: [],
     exporters: [],
