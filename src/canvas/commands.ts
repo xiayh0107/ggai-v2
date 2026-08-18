@@ -28,6 +28,7 @@ import {
 import { taskOutputFrame } from './layout.js'
 import { isContextBearingEdge, promotedTaskInputsForOutputSlot } from './contextEdges.js'
 import type { NodeTypeSnapshot } from '../plugins/nodeTypeContracts.js'
+import type { PdfMaterializationPlan } from '../pdf/contracts.js'
 
 export type TrustedProjectionOutputRole = 'primary' | 'supporting' | 'auxiliary'
 
@@ -214,6 +215,10 @@ export type CanvasCommand =
       type: 'MaterializeGraphPlan'
       plan: TrustedGraphMaterializationPlanInput
     }
+  | {
+      type: 'MaterializeDecompositionPlan'
+      plan: PdfMaterializationPlan
+    }
 
 export class CanvasCommandError extends Error {
   readonly code: string
@@ -358,6 +363,9 @@ export function applyCanvasCommand(
       break
     case 'MaterializeGraphPlan':
       materializeGraphPlan(next, command.plan)
+      break
+    case 'MaterializeDecompositionPlan':
+      materializeDecompositionPlan(next, command.plan)
       break
     default:
       command satisfies never
@@ -1394,6 +1402,60 @@ function materializeGraphPlan(
   document.everCreated = true
 }
 
+function materializeDecompositionPlan(
+  document: CanvasDocument,
+  plan: PdfMaterializationPlan,
+): void {
+  requireTask(document, plan.taskId)
+  if (plan.nodes.length < 1 || plan.nodes.length > 256) {
+    throw new CanvasCommandError('invalid-decomposition-plan', 'PDF decomposition plan exceeds bounds')
+  }
+  const plannedIds = new Set(plan.nodes.map((entry) => entry.node.id))
+  if (plannedIds.size !== plan.nodes.length) {
+    throw new CanvasCommandError('invalid-decomposition-plan', 'PDF decomposition plan duplicates nodes')
+  }
+  if (plan.kind === 'document') {
+    if (plan.nodes.length !== 1 || plan.nodes[0]?.node.id !== plan.documentNodeId
+      || plan.nodes[0]?.node.typeRef.id !== 'pdf-document') {
+      throw new CanvasCommandError('invalid-decomposition-plan', 'PDF document plan is invalid')
+    }
+  } else {
+    const documentNode = requireNode(document, plan.documentNodeId)
+    if (documentNode.typeRef.id !== 'pdf-document'
+      || documentNode.payload?.sourcePdfDigest !== plan.sourcePdfDigest) {
+      throw new CanvasCommandError('invalid-decomposition-plan', 'PDF source document does not match')
+    }
+  }
+  for (const entry of plan.nodes) {
+    ensureEntityIdAvailable(document, entry.node.id)
+    if (entry.node.origin.kind !== 'agent-output'
+      || entry.node.origin.planId !== plan.planId
+      || entry.node.origin.runId !== plan.activityRunId
+      || entry.node.origin.taskId !== plan.taskId
+      || entry.node.origin.outputKey !== entry.logicalKey) {
+      throw new CanvasCommandError('invalid-decomposition-plan', 'PDF node origin is invalid')
+    }
+    const parentId = entry.node.parentId
+    if (plan.kind === 'document') {
+      if (parentId !== null || entry.node.homeTaskId !== plan.taskId) {
+        throw new CanvasCommandError('invalid-decomposition-plan', 'PDF document ownership is invalid')
+      }
+    } else if (parentId !== plan.documentNodeId && !plannedIds.has(parentId ?? '')) {
+      throw new CanvasCommandError('invalid-decomposition-plan', 'PDF child parent is outside the plan')
+    }
+  }
+  document.nodes.push(...plan.nodes.map((entry) => structuredClone(entry.node)))
+  document.receipts.push({
+    kind: 'decomposition-materialization',
+    planId: plan.planId,
+    runId: plan.activityRunId,
+    taskId: plan.taskId,
+    importId: plan.importId,
+    nodes: plan.nodes.map((entry) => ({ logicalKey: entry.logicalKey, nodeId: entry.node.id })),
+  })
+  document.everCreated = true
+}
+
 function acceptTaskProposals(
   document: CanvasDocument,
   command: Extract<CanvasCommand, { type: 'AcceptTaskProposals' }>,
@@ -1888,6 +1950,15 @@ function isIdempotentReplay(document: CanvasDocument, command: CanvasCommand): b
       document, command.plan.planId, command.plan.runId, command.plan.taskId,
     )
     return Boolean(findReceipt(document, 'graph-materialization', command.plan.planId))
+  }
+  if (command.type === 'MaterializeDecompositionPlan') {
+    ensurePlanReceiptIdentity(
+      document,
+      command.plan.planId,
+      command.plan.activityRunId,
+      command.plan.taskId,
+    )
+    return Boolean(findReceipt(document, 'decomposition-materialization', command.plan.planId))
   }
   if (command.type === 'MaterializeProjectionPlan') {
     ensurePlanReceiptIdentity(

@@ -162,11 +162,21 @@ export interface CanvasGraphMaterializationReceipt {
   nodes: Array<{ logicalKey: string; nodeId: string }>
 }
 
+export interface CanvasDecompositionMaterializationReceipt {
+  kind: 'decomposition-materialization'
+  planId: string
+  runId: string
+  taskId: string
+  importId: string
+  nodes: Array<{ logicalKey: string; nodeId: string }>
+}
+
 export type CanvasReceipt =
   | CanvasMaterializationReceipt
   | CanvasPlanDismissalReceipt
   | CanvasProposalAcceptanceReceipt
   | CanvasGraphMaterializationReceipt
+  | CanvasDecompositionMaterializationReceipt
 
 export interface CanvasDocument {
   schemaVersion: 3
@@ -640,6 +650,16 @@ function validateReceipt(value: unknown, path: string, issues: CanvasValidationI
     validateMappingArray(value.nodes, `${path}.nodes`, 'logicalKey', 'nodeId', issues)
     return
   }
+  if (value.kind === 'decomposition-materialization') {
+    if (!hasOnlyKeys(value, ['kind', 'planId', 'runId', 'taskId', 'importId', 'nodes'])) {
+      issue(issues, path, 'has unsupported fields')
+      return
+    }
+    validateReceiptIdentity(value, path, issues)
+    validateId(value.importId, `${path}.importId`, issues)
+    validateMappingArray(value.nodes, `${path}.nodes`, 'logicalKey', 'nodeId', issues)
+    return
+  }
   issue(issues, `${path}.kind`, 'is invalid')
 }
 
@@ -824,6 +844,11 @@ function validateInvariants(
           `${receipt.planId}\0${proposalKey}`,
           `receipts[${index}].proposalKeys[${proposalIndex}]`,
         )
+      }
+    } else if (receipt.kind === 'graph-materialization') {
+      validateUniqueMappings(receipt.nodes, 'logicalKey', 'nodeId', `receipts[${index}].nodes`, issues)
+      for (const node of receipt.nodes) {
+        materializationByOutput.set(`${receipt.planId}\0${node.logicalKey}`, node.nodeId)
       }
     } else {
       validateUniqueMappings(receipt.nodes, 'logicalKey', 'nodeId', `receipts[${index}].nodes`, issues)

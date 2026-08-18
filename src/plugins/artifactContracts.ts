@@ -49,7 +49,7 @@ export type ArtifactClaimRegistryInspection =
 export type BuiltinArtifactPluginId =
   | 'code'
   | 'image'
-  | 'pdf'
+  | 'pdf-document'
   | 'table'
   | 'text'
   | 'file'
@@ -258,7 +258,7 @@ export const BUILTIN_ARTIFACT_CLAIM_REGISTRY = defineArtifactClaimRegistry([
     }],
   },
   {
-    id: 'pdf',
+    id: 'pdf-document',
     artifactClaims: [{
       extensions: ['.pdf'],
       mediaTypes: ['application/pdf'],

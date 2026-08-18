@@ -361,6 +361,11 @@ test('plan operations remain opaque discriminated wire commands', () => {
   }), { type: 'MaterializeGraphPlan', planId })
 
   assert.deepEqual(parseCanvasCommandWire({
+    type: 'MaterializeDecompositionPlan',
+    planId,
+  }), { type: 'MaterializeDecompositionPlan', planId })
+
+  assert.deepEqual(parseCanvasCommandWire({
     type: 'AcceptTaskProposals',
     planId,
     proposalKeys: ['explain', 'publish'],

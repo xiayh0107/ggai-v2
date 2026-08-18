@@ -90,10 +90,84 @@ export const BUILTIN_PAYLOAD_SCHEMAS: readonly AnySchema[] = [
     },
     additionalProperties: false,
   },
+  {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    $id: 'ggai://schema/payload/pdf-document',
+    type: 'object', required: ['importId', 'sourcePdfDigest', 'pageCount', 'metadata'],
+    properties: {
+      importId: { type: 'string', pattern: '^pdf_import_[A-Za-z0-9-]+$' },
+      sourcePdfDigest: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+      pageCount: { type: 'integer', minimum: 1, maximum: 10_000 },
+      metadata: { type: 'object', additionalProperties: { type: 'string', nullable: true } },
+    }, additionalProperties: false,
+  },
+  {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    $id: 'ggai://schema/payload/pdf-page',
+    type: 'object', required: ['sourcePdfDigest', 'pageNumber', 'width', 'height', 'rotation'],
+    properties: {
+      sourcePdfDigest: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+      pageNumber: { type: 'integer', minimum: 1, maximum: 10_000 },
+      width: { type: 'number', exclusiveMinimum: 0, maximum: 100_000 },
+      height: { type: 'number', exclusiveMinimum: 0, maximum: 100_000 },
+      rotation: { type: 'integer', enum: [0, 90, 180, 270] },
+    }, additionalProperties: false,
+  },
+  ...['pdf-text-block', 'pdf-annotation'].map((kind): AnySchema => ({
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    $id: `ggai://schema/payload/${kind}`,
+    type: 'object',
+    required: kind === 'pdf-text-block'
+      ? ['pageNumber', 'bbox', 'text']
+      : ['pageNumber', 'bbox', 'subtype', 'contents'],
+    properties: {
+      pageNumber: { type: 'integer', minimum: 1, maximum: 10_000 },
+      bbox: { $ref: '#/$defs/bbox' },
+      ...(kind === 'pdf-text-block'
+        ? { text: { type: 'string', maxLength: 250_000 } }
+        : {
+            subtype: { type: 'string', minLength: 1, maxLength: 120 },
+            contents: { type: 'string', maxLength: 100_000 },
+          }),
+    },
+    $defs: { bbox: bboxSchema() },
+    additionalProperties: false,
+  })),
+  {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    $id: 'ggai://schema/payload/pdf-image',
+    type: 'object', required: ['pageNumber', 'bbox', 'artifactRef', 'alt'],
+    properties: {
+      pageNumber: { type: 'integer', minimum: 1, maximum: 10_000 },
+      bbox: { $ref: '#/$defs/bbox' },
+      artifactRef: {
+        type: 'object', required: ['runId', 'artifactId'],
+        properties: {
+          runId: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:@-]*$' },
+          artifactId: { type: 'string', pattern: '^artifact_[0-9a-f]{64}$' },
+        }, additionalProperties: false,
+      },
+      alt: { type: 'string', maxLength: 1_000 },
+    },
+    $defs: { bbox: bboxSchema() },
+    additionalProperties: false,
+  },
 ]
 
 export function createBuiltinPayloadSchemaRegistry(): NodePayloadSchemaRegistry {
   const registry = new NodePayloadSchemaRegistry()
   for (const schema of BUILTIN_PAYLOAD_SCHEMAS) registry.add(schema)
   return registry
+}
+
+function bboxSchema(): AnySchema {
+  return {
+    type: 'object', required: ['x', 'y', 'w', 'h'],
+    properties: {
+      x: { type: 'number', minimum: 0, maximum: 100_000 },
+      y: { type: 'number', minimum: 0, maximum: 100_000 },
+      w: { type: 'number', exclusiveMinimum: 0, maximum: 100_000 },
+      h: { type: 'number', exclusiveMinimum: 0, maximum: 100_000 },
+    }, additionalProperties: false,
+  }
 }

@@ -110,6 +110,8 @@ import { ComputeExecutor } from './computeExecutor.js'
 import { FilesystemService, FilesystemServiceError } from './filesystemService.js'
 import { MAX_FILESYSTEM_TREE_PAGE } from '../src/filesystem/contracts.js'
 import { builtinNodeTypeSnapshots } from './nodeTypeSnapshots.js'
+import { PdfImportError, PdfImportService } from './pdfImportService.js'
+import { inspectGraphProposal } from '../src/agent/graphProposal.js'
 import {
   createHttpRouter,
   type HttpRoute,
@@ -146,6 +148,7 @@ export interface DaemonServerOptions {
   metadataStore?: MetadataStore
   nodeExecutionService?: NodeExecutionService
   computeExecutor?: ComputeExecutor
+  pdfImportService?: PdfImportService
 }
 
 export interface DaemonServer {
@@ -161,6 +164,7 @@ export interface DaemonServer {
   executions: NodeExecutionService
   compute: ComputeExecutor
   filesystem: FilesystemService
+  pdfImports: PdfImportService
   close(): Promise<void>
 }
 
@@ -215,6 +219,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     throw new TypeError('workspaceVersionManager and canvasCommandStoreManager must share a store')
   }
   const filesystem = new FilesystemService(metadata, canvas)
+  const pdfImports = options.pdfImportService ?? new PdfImportService()
   const projectionCanvases = workspaceProjectionCommitter(versions)
   const runs = options.runManager ?? new RunManager({
     projectRoot: options.projectRoot,
@@ -291,6 +296,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
       compute,
       filesystem,
       metadata,
+      pdfImports,
     }, domainRouter)
       .catch((error: unknown) => writeError(response, error))
   })
@@ -312,6 +318,7 @@ export function createDaemonServer(options: DaemonServerOptions): DaemonServer {
     executions,
     compute,
     filesystem,
+    pdfImports,
     close() {
       closePromise ??= filesystem.close().then(() => closeDaemonServer(
         server,
@@ -351,6 +358,7 @@ interface RouteContext extends HttpRouteContext {
   compute: ComputeExecutor
   filesystem: FilesystemService
   metadata: MetadataStore
+  pdfImports: PdfImportService
 }
 
 async function route(
@@ -561,6 +569,75 @@ async function route(
       graphPlan: record.plan.graphPlan,
       state: record.state,
     })
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/imports/pdf') {
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const body = requestObject(await readJson(request))
+    if (!hasExactBodyKeys(body, ['branch', 'taskId', 'runId', 'artifactId', 'title'])) {
+      throw new ProtocolError('PDF import body is invalid', 'invalid_pdf_import', 400)
+    }
+    const branch = parseCanvasBranch(requiredBodyString(body, 'branch', 200))
+    const taskId = parseTaskId(requiredBodyString(body, 'taskId', 200))
+    const canvas = (await context.versions.getCanvas(projectDir, branch)).canvas
+    if (!canvas.document.tasks.some((task) => task.id === taskId)) {
+      throw new PdfImportError('pdf_task_not_found', 'PDF import Task does not exist', 404)
+    }
+    const leasedProjectDir = await context.canvas.acquireProjectLease(projectDir)
+    const imported = await context.pdfImports.createImport({
+      projectId: operationalProjectId(projectDir),
+      projectDir: leasedProjectDir,
+      canvasBranch: branch,
+      taskId,
+      sourceRunId: parseRunId(requiredBodyString(body, 'runId', 200)),
+      sourceArtifactId: artifactIdFromPath(requiredBodyString(body, 'artifactId', 200)),
+      title: requiredBodyString(body, 'title', 240),
+    })
+    writeJson(response, 201, { schemaVersion: 1, ...imported })
+    return
+  }
+
+  const pdfImportPlanMatch = pathname.match(/^\/imports\/([^/]+)\/plan$/u)
+  if (pdfImportPlanMatch && request.method === 'GET') {
+    const importId = parseTaskId(decodeURIComponent(pdfImportPlanMatch[1]!))
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const leasedProjectDir = await context.canvas.acquireProjectLease(projectDir)
+    const pageNumber = optionalIntegerQuery(url, 'page', { min: 1, max: 10_000 })
+    if (pageNumber !== undefined) {
+      writeJson(response, 200, {
+        schemaVersion: 1,
+        page: await context.pdfImports.pageBaseline({
+          projectDir: leasedProjectDir, importId, pageNumber,
+        }),
+      })
+      return
+    }
+    const imported = await context.pdfImports.getImport(leasedProjectDir, importId)
+    writeJson(response, 200, { schemaVersion: 1, ...imported })
+    return
+  }
+
+  const pdfDecompositionMatch = pathname.match(/^\/imports\/([^/]+)\/decomposition$/u)
+  if (pdfDecompositionMatch && request.method === 'POST') {
+    const importId = parseTaskId(decodeURIComponent(pdfDecompositionMatch[1]!))
+    const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
+    const body = requestObject(await readJson(request))
+    if (!hasExactBodyKeys(body, ['toolRunId', 'graphProposal'])) {
+      throw new ProtocolError('PDF decomposition body is invalid', 'invalid_pdf_decomposition', 400)
+    }
+    const inspection = inspectGraphProposal(body.graphProposal)
+    if (inspection.status !== 'valid') {
+      throw new ProtocolError(inspection.reason, 'invalid_pdf_decomposition', 400)
+    }
+    const leasedProjectDir = await context.canvas.acquireProjectLease(projectDir)
+    const plan = await context.pdfImports.createDecomposition({
+      projectDir: leasedProjectDir,
+      importId,
+      toolRunId: parseRunId(requiredBodyString(body, 'toolRunId', 200)),
+      proposal: inspection.proposal,
+    })
+    writeJson(response, 201, { schemaVersion: 1, plan })
     return
   }
 
@@ -952,6 +1029,43 @@ async function route(
   if (request.method === 'POST' && pathname === '/canvas/commands') {
     const projectDir = singleQueryParameter(url, 'projectDir') ?? '.'
     const parsed = parseCanvasCommandRequest(await readJson(request))
+    if (parsed.command.type === 'MaterializeDecompositionPlan') {
+      const leasedProjectDir = await context.canvas.acquireProjectLease(projectDir)
+      const plan = await context.pdfImports.getPlan(leasedProjectDir, parsed.command.planId)
+      if (plan.projectId !== operationalProjectId(projectDir)
+        || plan.canvasBranch !== parsed.branch) {
+        throw new PdfImportError('pdf_plan_scope_mismatch', 'PDF plan belongs to another Canvas scope', 403)
+      }
+      const current = (await context.versions.getCanvas(projectDir, parsed.branch)).canvas
+      const existing = current.document.receipts.find((receipt) =>
+        receipt.kind === 'decomposition-materialization' && receipt.planId === plan.planId)
+      const committed = existing ? current : (await context.versions.commitCanvas(
+        projectDir,
+        parsed.branch,
+        parsed.baseRevision,
+        parsed.mutationId,
+        { type: 'MaterializeDecompositionPlan', plan },
+      )).canvas
+      const receipt = committed.document.receipts.find((candidate) =>
+        candidate.kind === 'decomposition-materialization' && candidate.planId === plan.planId)
+      if (receipt?.kind === 'decomposition-materialization') {
+        await context.metadata.appendProvenance([{
+          projectId: operationalProjectId(projectDir),
+          relationKind: 'had-plan',
+          subjectId: `task:${receipt.taskId}`,
+          objectId: `plan:${receipt.planId}`,
+          attributes: { kind: 'pdf-decomposition', importId: receipt.importId },
+        }, ...receipt.nodes.map((node) => ({
+          projectId: operationalProjectId(projectDir),
+          relationKind: 'was-generated-by' as const,
+          subjectId: `node:${node.nodeId}`,
+          objectId: `plan:${receipt.planId}`,
+          attributes: { logicalKey: node.logicalKey },
+        }))]).catch(() => undefined)
+      }
+      writeJson(response, 200, committed)
+      return
+    }
     if (isTrustedPlanWireCommand(parsed.command)) {
       const committed = await commitProjectionPlanCommand({
         canvases: context.projectionCanvases,
@@ -1036,6 +1150,18 @@ async function route(
     const settledPlanIds = new Set<string>()
     const mutations: Array<{ mutationId: string; command: CanvasCommand }> = []
     for (const mutation of parsed.mutations) {
+      if (mutation.command.type === 'MaterializeDecompositionPlan') {
+        const leasedProjectDir = await context.canvas.acquireProjectLease(projectDir)
+        const plan = await context.pdfImports.getPlan(leasedProjectDir, mutation.command.planId)
+        if (plan.canvasBranch !== parsed.sourceBranch) {
+          throw new PdfImportError('pdf_plan_scope_mismatch', 'PDF plan belongs to another branch', 403)
+        }
+        mutations.push({
+          mutationId: mutation.mutationId,
+          command: { type: 'MaterializeDecompositionPlan', plan },
+        })
+        continue
+      }
       if (!isTrustedPlanWireCommand(mutation.command)) {
         mutations.push({
           mutationId: mutation.mutationId,
@@ -2458,6 +2584,12 @@ function writeError(response: ServerResponse, error: unknown): void {
     return
   }
   if (error instanceof FilesystemServiceError) {
+    writeJson(response, error.status, {
+      error: { code: error.code, message: error.message },
+    })
+    return
+  }
+  if (error instanceof PdfImportError) {
     writeJson(response, error.status, {
       error: { code: error.code, message: error.message },
     })
