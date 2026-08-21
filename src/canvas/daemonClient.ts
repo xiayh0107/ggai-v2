@@ -122,6 +122,17 @@ export class CanvasProtocolError extends CanvasClientError {
   }
 }
 
+export class CanvasSchemaMismatchError extends CanvasProtocolError {
+  readonly expected = 3 as const
+  readonly actual: unknown
+
+  constructor(actual: unknown) {
+    super(`Daemon Canvas schema is ${String(actual)}, expected 3`)
+    this.name = 'CanvasSchemaMismatchError'
+    this.actual = actual
+  }
+}
+
 export class CanvasHttpError extends CanvasClientError {
   readonly status: number
   readonly code: string
@@ -181,13 +192,10 @@ export class CanvasDaemonClient {
     const canvas = value.capabilities.canvas
     const schemaVersion = value.canvas.schemaVersion
     const initializationRequired = value.canvas.initializationRequired
-    if (
-      canvas !== true
-      || schemaVersion !== 3
-      || typeof initializationRequired !== 'boolean'
-    ) {
+    if (canvas !== true || typeof initializationRequired !== 'boolean') {
       throw new CanvasProtocolError('Daemon Canvas capabilities are inconsistent')
     }
+    if (schemaVersion !== 3) throw new CanvasSchemaMismatchError(schemaVersion)
     return { canvas, schemaVersion, initializationRequired }
   }
 

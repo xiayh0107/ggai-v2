@@ -313,6 +313,8 @@ async function daemonHealth(
     || value.capabilities.canvas !== true
     || !isRecord(value.canvas)
     || !Number.isSafeInteger(value.canvas.schemaVersion)
+    || value.canvas.schemaVersion !== 3
+    || value.canvas.initializationRequired !== false
     || typeof value.projectRoot !== 'string'
     || !value.projectRoot) {
     throw new WorkspaceProjectProtocolError('daemon health response is invalid')

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import test from 'node:test'
 import {
+  parseDaemonPort,
   parseViteServerOptions,
   resolveCodexCommand,
   viteBrowserOrigins,
@@ -14,6 +15,7 @@ test('uses the configured Vite defaults', () => {
     'http://127.0.0.1:3000',
     'http://[::1]:3000',
   ])
+  assert.equal(parseDaemonPort({}), 7380)
 })
 
 test('derives exact loopback origins from either Vite port syntax', () => {

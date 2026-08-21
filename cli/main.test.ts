@@ -14,12 +14,12 @@ describe('gg CLI foundation', () => {
       status: 'ok',
       version: 1,
       capabilities: { canvas: true },
-      canvas: { schemaVersion: 2, initializationRequired: false },
+      canvas: { schemaVersion: 3, initializationRequired: false },
       projectRoot: '/workspace',
     }))
 
     await expect(runCli(['doctor'], { io: output, fetch, environment: {} })).resolves.toBe(0)
-    expect(output.stdout.mock.calls.flat().join('')).toContain('Canvas schema 2')
+    expect(output.stdout.mock.calls.flat().join('')).toContain('Canvas schema 3')
     expect(new URL(String(fetch.mock.calls[0]?.[0])).pathname).toBe('/health')
   })
 
@@ -29,7 +29,7 @@ describe('gg CLI foundation', () => {
     const fetch = vi.fn(async () => json({
       status: 'ok',
       capabilities: { canvas: true },
-      canvas: { schemaVersion: 2 },
+      canvas: { schemaVersion: 3, initializationRequired: false },
       projectRoot: '/workspace',
     }))
     await runCli(['doctor'], { io: output, fetch, environment: {}, ensureDaemon })
@@ -92,6 +92,20 @@ describe('gg CLI foundation', () => {
       environment: {},
     })).resolves.toBe(3)
     expect(unavailable.stderr.mock.calls[0]![0]).toContain('daemon_unavailable')
+
+    const stale = io()
+    await expect(runCli(['doctor'], {
+      io: stale,
+      fetch: async () => json({
+        status: 'ok',
+        version: 1,
+        capabilities: { canvas: true },
+        canvas: { schemaVersion: 2, initializationRequired: false },
+        projectRoot: '/workspace',
+      }),
+      environment: {},
+    })).resolves.toBe(4)
+    expect(stale.stderr.mock.calls[0]![0]).toContain('protocol_error')
 
     const malformed = io()
     await expect(runCli(['--json', '--daemon-url', 'file:///tmp/daemon', 'doctor'], {

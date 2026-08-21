@@ -7,7 +7,10 @@
  *   npm run dev:all                   # 向后兼容别名
  *
  * 行为：
- * - 先增量构建 daemon（tsc，通常秒级），再并行拉起两个进程；
+ * - 先增量构建 daemon（tsc，通常秒级）；
+ * - 若 7380（或 GGAI_DAEMON_PORT）上已有同一 project-root 的 daemon，
+ *   先中断它再拉起当前构建，避免前端连上旧 schema；
+ * - 等 /health 确认当前 Canvas schema 后再启动 Vite；
  * - 监听 daemon/ 与共享前端源码（src/canvas、src/agent、src/types，
  *   即 tsconfig.daemon.json 的 include）变更：自动重新构建并重启 daemon，
  *   Vite 不受影响；
@@ -18,9 +21,18 @@ import { spawn } from 'node:child_process'
 import process from 'node:process'
 import chokidar from 'chokidar'
 import {
+  parseDaemonPort,
   resolveCodexCommand,
   viteBrowserOrigins,
 } from './dev-all-options.mjs'
+import {
+  classifyDaemonOccupant,
+  EXPECTED_CANVAS_SCHEMA_VERSION,
+  probeDaemonHealth,
+  readWorkspaceDaemonPid,
+  stopOwnedDaemon,
+  waitForCurrentDaemon,
+} from './dev-all-lifecycle.mjs'
 
 const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const viteArgs = process.argv.slice(2)
@@ -30,12 +42,15 @@ const codexCommand = resolveCodexCommand({
   pathValue: process.env.PATH,
 })
 let allowedOrigins
+let daemonPort
 try {
   allowedOrigins = viteBrowserOrigins(viteArgs)
+  daemonPort = parseDaemonPort(process.env)
 } catch (error) {
   process.stderr.write(`[dev] 参数错误：${error instanceof Error ? error.message : String(error)}\n`)
   process.exit(1)
 }
+const daemonUrl = `http://127.0.0.1:${daemonPort}`
 
 let shuttingDown = false
 let daemonChild = null
@@ -81,10 +96,38 @@ function buildDaemon() {
   })
 }
 
+function probeLocalDaemon() {
+  return probeDaemonHealth(daemonUrl)
+}
+
+async function replaceOwnedDaemon(decision) {
+  const pid = readWorkspaceDaemonPid(process.cwd())
+  if (pid === null) {
+    throw new Error(
+      `端口 ${daemonPort} 上已有本项目 daemon（Canvas schema ${decision.health.schemaVersion}），但找不到 .gg/workspace/runtime/daemon.lock 中的 PID。请先停止该进程后再运行 npm run dev。`,
+    )
+  }
+  const label = decision.reason === 'stale'
+    ? `旧协议 schema ${decision.health.schemaVersion}`
+    : '当前会话外的进程'
+  process.stdout.write(`[dev] 正在替换 ${daemonUrl} 上的 daemon（pid ${pid}，${label}）…\n`)
+  const stopped = await stopOwnedDaemon(pid, { probe: probeLocalDaemon })
+  if (!stopped) {
+    throw new Error(`未能停止 pid ${pid} 上的 daemon，端口 ${daemonPort} 仍被占用。`)
+  }
+}
+
+async function ensureDaemonPort() {
+  const occupant = classifyDaemonOccupant(await probeLocalDaemon(), process.cwd())
+  if (occupant.action === 'abort') throw new Error(occupant.message)
+  if (occupant.action === 'replace') await replaceOwnedDaemon(occupant)
+}
+
 function startDaemon() {
   const daemonArgs = [
     'dist-daemon/daemon/index.js',
     '--project-root', process.cwd(),
+    '--port', String(daemonPort),
     '--codex-command', codexCommand,
   ]
   for (const origin of allowedOrigins) daemonArgs.push('--allow-origin', origin)
@@ -101,6 +144,14 @@ function startDaemon() {
     process.stderr.write(`[daemon] 启动失败：${error.message}\n`)
     shutdown(1)
   })
+}
+
+async function launchDaemon() {
+  startDaemon()
+  await waitForCurrentDaemon(probeLocalDaemon, {
+    isDaemonAlive: () => daemonChild !== null && daemonChild.exitCode === null,
+  })
+  process.stdout.write(`[dev] daemon ready · Canvas schema ${EXPECTED_CANVAS_SCHEMA_VERSION}\n`)
 }
 
 function stopDaemon() {
@@ -135,8 +186,16 @@ async function restartDaemon() {
   }
   if (!shuttingDown) {
     process.stdout.write('[dev] 重新构建 daemon…\n')
-    if (await buildDaemon()) startDaemon()
-    else process.stderr.write('[dev] daemon 构建失败，等待下一次变更…\n')
+    if (await buildDaemon()) {
+      try {
+        await launchDaemon()
+      } catch (error) {
+        process.stderr.write(`[dev] ${error instanceof Error ? error.message : String(error)}\n`)
+        shutdown(1)
+      }
+    } else {
+      process.stderr.write('[dev] daemon 构建失败，等待下一次变更…\n')
+    }
   }
   restarting = false
   if (restartQueued && !shuttingDown) {
@@ -191,11 +250,18 @@ process.on('SIGTERM', () => shutdown(0, 'SIGTERM'))
 
 process.stdout.write('[dev] 构建 daemon…\n')
 if (await buildDaemon()) {
+  process.stdout.write(`[dev] daemon: ${daemonUrl}\n`)
   process.stdout.write(`[dev] codex: ${codexCommand}\n`)
   process.stdout.write(`[dev] browser origins: ${allowedOrigins.join(', ')}\n`)
-  startDaemon()
-  startVite()
-  watchDaemonSources()
+  try {
+    await ensureDaemonPort()
+    await launchDaemon()
+    startVite()
+    watchDaemonSources()
+  } catch (error) {
+    process.stderr.write(`[dev] ${error instanceof Error ? error.message : String(error)}\n`)
+    shutdown(1)
+  }
 } else {
   process.stderr.write('[dev] daemon 构建失败\n')
   process.exit(1)

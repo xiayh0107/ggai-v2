@@ -3,16 +3,29 @@ import path from 'node:path'
 
 export const DEFAULT_VITE_HOST = 'localhost'
 export const DEFAULT_VITE_PORT = 3000
+export const DEFAULT_DAEMON_HOST = '127.0.0.1'
+export const DEFAULT_DAEMON_PORT = 7380
 
-function parsePort(value) {
+function parsePortValue(value, label) {
   if (!/^\d+$/u.test(value ?? '')) {
-    throw new Error(`Vite --port must be an integer from 1 to 65535, received ${value || '(empty)'}`)
+    throw new Error(`${label} must be an integer from 1 to 65535, received ${value || '(empty)'}`)
   }
   const port = Number(value)
   if (port < 1 || port > 65_535) {
-    throw new Error(`Vite --port must be an integer from 1 to 65535, received ${value}`)
+    throw new Error(`${label} must be an integer from 1 to 65535, received ${value}`)
   }
   return port
+}
+
+/** Loopback daemon port for `npm run dev`; `GGAI_DAEMON_PORT` is the only override. */
+export function parseDaemonPort(environment = process.env) {
+  const raw = environment.GGAI_DAEMON_PORT
+  if (raw === undefined || String(raw).trim() === '') return DEFAULT_DAEMON_PORT
+  return parsePortValue(String(raw).trim(), 'GGAI_DAEMON_PORT')
+}
+
+function parsePort(value) {
+  return parsePortValue(value, 'Vite --port')
 }
 
 /** Parse only the Vite options that determine the browser Origin. */

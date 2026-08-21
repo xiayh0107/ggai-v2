@@ -7,7 +7,10 @@ import {
   type CanvasBootstrapFailureReason,
   type CanvasCapabilityClient,
 } from './CanvasBootstrap'
-import type { CanvasDaemonCapabilities } from './daemonClient'
+import {
+  CanvasSchemaMismatchError,
+  type CanvasDaemonCapabilities,
+} from './daemonClient'
 
 let root: Root | null = null
 let container: HTMLDivElement | null = null
@@ -82,6 +85,18 @@ describe('Canvas bootstrap', () => {
     })
 
     expect(reason(host)).toBe('daemon-incompatible')
+    expect(host.querySelector('[data-state="canvas"]')).toBeNull()
+  })
+
+  it('blocks a leftover daemon that still advertises a stale Canvas schema', async () => {
+    const host = await renderBoundary({
+      getCapabilities: async () => {
+        throw new CanvasSchemaMismatchError(2)
+      },
+    })
+
+    expect(reason(host)).toBe('daemon-stale')
+    expect(host.textContent).toContain('Daemon Canvas schema is 2, expected 3')
     expect(host.querySelector('[data-state="canvas"]')).toBeNull()
   })
 

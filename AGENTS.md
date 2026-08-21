@@ -131,7 +131,7 @@ registerPlugin(videoType);
 ## 构建与验证
 
 ```bash
-npm run dev          # 一条命令拉起 Vite + daemon；后端变更自动重启，Ctrl+C 同时退出
+npm run dev          # 一条命令拉起 Vite + daemon；会替换同项目旧 daemon，等 health 就绪后再开前端
 npm run dev:frontend # 仅启动 Vite（只用于拆分进程调试）
 npm run dev:all      # npm run dev 的兼容别名
 npm run build        # tsc -b && vite build，必须通过

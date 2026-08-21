@@ -1,5 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import type { CanvasDaemonCapabilities } from './daemonClient'
+import {
+  CanvasSchemaMismatchError,
+  type CanvasDaemonCapabilities,
+} from './daemonClient'
 
 export interface CanvasCapabilityClient {
   getCapabilities(): Promise<CanvasDaemonCapabilities>
@@ -7,6 +10,7 @@ export interface CanvasCapabilityClient {
 
 export type CanvasBootstrapFailureReason =
   | 'daemon-incompatible'
+  | 'daemon-stale'
   | 'probe-failed'
 
 export interface CanvasBootstrapFailure {
@@ -25,6 +29,16 @@ type BootstrapState =
   | { status: 'checking' }
   | { status: 'ready' }
   | { status: 'blocked'; failure: CanvasBootstrapFailure }
+
+function canvasBootstrapFailureFromError(error: unknown): CanvasBootstrapFailure {
+  if (error instanceof CanvasSchemaMismatchError) {
+    return { reason: 'daemon-stale', message: error.message }
+  }
+  return {
+    reason: 'probe-failed',
+    message: error instanceof Error ? error.message : String(error),
+  }
+}
 
 /** Capability boundary for the single rolling Canvas implementation. */
 export function CanvasBootstrap({
@@ -51,10 +65,7 @@ export function CanvasBootstrap({
         if (!active) return
         setState({
           status: 'blocked',
-          failure: {
-            reason: 'probe-failed',
-            message: error instanceof Error ? error.message : String(error),
-          },
+          failure: canvasBootstrapFailureFromError(error),
         })
       },
     )

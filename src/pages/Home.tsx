@@ -191,7 +191,9 @@ function CanvasUnavailable({
 }) {
   const explanation = failure.reason === 'daemon-incompatible'
     ? '本地 daemon 仍在使用已退役的根项目启动协议，请重启应用加载当前版本。'
-    : '无法确认本地 daemon 的 Canvas 能力。请确认 daemon 已启动，并检查终端中的启动错误。'
+    : failure.reason === 'daemon-stale'
+      ? '本地 daemon 仍在运行旧的 Canvas 协议。请在 app 目录重新运行 npm run dev，启动器会替换旧进程后再打开画布。'
+      : '无法确认本地 daemon 的 Canvas 能力。请确认已运行 npm run dev，并检查终端中的启动错误。'
 
   return (
     <main className="flex h-screen w-screen items-center justify-center bg-gg-bg p-6 font-sans">

@@ -17,7 +17,7 @@ npm run deps:doctor
 npm run dev
 ```
 
-这会同时启动 `127.0.0.1:7380` 的 daemon 与 `localhost:3000` 的 Vite；修改 `daemon/` 会自动重建并重启后端，一次 Ctrl+C 会结束两者。预览工具需要其他端口时直接透传给 Vite，启动器会把该端口的精确回环 Origin 同步给 daemon：
+这会同时启动 `127.0.0.1:7380` 的 daemon 与 `localhost:3000` 的 Vite。若端口上已有同一项目的旧 daemon，启动器会先替换它，并等到 `/health` 确认当前 Canvas schema 后再打开前端，避免画布连上过期协议。修改 `daemon/` 会自动重建并重启后端，一次 Ctrl+C 会结束两者。预览工具需要其他端口时直接透传给 Vite，启动器会把该端口的精确回环 Origin 同步给 daemon：
 
 ```bash
 npm run dev -- --host localhost --port 7100 --strictPort

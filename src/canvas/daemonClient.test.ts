@@ -8,6 +8,7 @@ import {
   CanvasDaemonClient,
   CanvasHttpError,
   CanvasProtocolError,
+  CanvasSchemaMismatchError,
   MAX_CANVAS_CONFLICT_MUTATIONS,
   serializeCanvasCommand,
 } from './daemonClient'
@@ -111,12 +112,27 @@ describe('Canvas daemon client', () => {
       baseUrl: persistenceScope.daemonBaseUrl,
       fetch: async () => json({
         capabilities: { canvas: false },
-        canvas: { schemaVersion: 1, initializationRequired: false },
+        canvas: { schemaVersion: 3, initializationRequired: false },
       }),
     })
 
     await expect(client.getCapabilities()).rejects.toThrow(
       'Daemon Canvas capabilities are inconsistent',
+    )
+  })
+
+  it('rejects a stale Canvas schema instead of treating it as a generic probe failure', async () => {
+    const client = new CanvasDaemonClient({
+      baseUrl: persistenceScope.daemonBaseUrl,
+      fetch: async () => json({
+        capabilities: { canvas: true },
+        canvas: { schemaVersion: 2, initializationRequired: false },
+      }),
+    })
+
+    await expect(client.getCapabilities()).rejects.toBeInstanceOf(CanvasSchemaMismatchError)
+    await expect(client.getCapabilities()).rejects.toThrow(
+      'Daemon Canvas schema is 2, expected 3',
     )
   })
 

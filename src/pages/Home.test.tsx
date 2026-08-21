@@ -85,6 +85,16 @@ describe('Canvas Home entry', () => {
     expect(host.querySelector('[role="alert"]')?.textContent).toContain('重启应用')
     expect(host.textContent).toContain('已退役的根项目启动协议')
   })
+
+  it('asks to restart npm run dev when the leftover daemon schema is stale', async () => {
+    const { host } = await renderHome({
+      capabilities: { canvas: true },
+      canvas: { schemaVersion: 2, initializationRequired: false },
+    })
+
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain('重新运行 npm run dev')
+    expect(host.textContent).toContain('Daemon Canvas schema is 2, expected 3')
+  })
 })
 
 const READY_PROJECT: WorkspaceProject = {
